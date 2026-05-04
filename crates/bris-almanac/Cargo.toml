@@ -14,6 +14,7 @@ workspace = true
 [dependencies]
 bris-core.workspace = true
 thiserror.workspace = true
+vsop87.workspace = true
 
 [dev-dependencies]
 proptest.workspace = true

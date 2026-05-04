@@ -6,6 +6,8 @@
 //!
 //! See `plan.org` Phase 1 for the full design.
 
+pub mod ephemeris;
 pub mod frame;
 
+pub use ephemeris::{heliocentric, sun_geocentric, Body, Heliocentric};
 pub use frame::{mean_obliquity, nutation, precession_angles, NutationAngles, PrecessionAngles};
