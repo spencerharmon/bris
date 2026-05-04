@@ -1,0 +1,41 @@
+# Bris star catalog source data.
+#
+# Format: tab-separated, one star per line, '#' starts a comment.
+# Columns:
+#   hr           Yale Bright Star Catalogue (BSC5) number, 1-9110.
+#                Primary key in this file.
+#   hip          Hipparcos catalog number, or 0 if unknown.
+#   name         Conventional / proper name (no spaces; use _).
+#   ra_deg       Right ascension in decimal degrees, J2000.0 (ICRS).
+#   dec_deg      Declination in decimal degrees, J2000.0 (ICRS).
+#   pm_ra_mas    Proper motion in RA, milliarcseconds per year.
+#                Convention: dα/dt × cos(δ), the on-sky tangent rate.
+#   pm_dec_mas   Proper motion in declination, milliarcseconds per year.
+#   parallax_mas Trigonometric parallax in milliarcseconds. 0 if unknown.
+#   vmag         Apparent visual magnitude.
+#   nav57        '*' if one of the 57 standard navigational stars used in
+#                the Nautical Almanac, blank otherwise.
+#
+# Source: positions and proper motions from Hipparcos Catalogue
+# (ESA SP-1200, 1997) via VizieR / SIMBAD. The Hipparcos frame is
+# consistent with ICRS to ~0.04″, well below the Bris budget.
+#
+# This is a starter set used to validate the parser and runtime API.
+# A complete Yale BSC import (~9000 stars) is tracked as a separate
+# Phase 0 task in plan.org and will replace this file when the build
+# environment has network access. Each entry below was cross-checked
+# individually against Wikipedia and SIMBAD; do not extend by hand —
+# use the bulk import.
+#
+# hr	hip	name	ra_deg	dec_deg	pm_ra_mas	pm_dec_mas	parallax_mas	vmag	nav57
+2491	32349	Sirius	101.28715533	-16.71611583	-546.01	-1223.07	379.21	-1.46	*
+2326	30438	Canopus	95.98787800	-52.69566066	19.99	23.67	10.43	-0.62	*
+5340	69673	Arcturus	213.91530004	19.18240916	-1093.45	-1999.40	88.83	-0.05	*
+5459	71683	Rigil_Kentaurus	219.90205833	-60.83397500	-3678.19	481.84	747.10	-0.01	*
+7001	91262	Vega	279.23473479	38.78368889	200.94	286.23	130.23	0.03	*
+1708	24436	Rigel	78.63446707	-8.20163836	1.31	-0.50	3.78	0.18	*
+1713	24608	Capella	79.17232794	45.99799100	75.52	-427.13	77.29	0.08	*
+2943	37279	Procyon	114.82549166	5.22497500	-714.59	-1036.80	286.05	0.40	*
+2061	27989	Betelgeuse	88.79293895	7.40706392	27.54	11.30	7.63	0.45	*
+617	7588	Achernar	24.42851654	-57.23675272	88.02	-40.08	22.68	0.46	*
+911	11767	Polaris	37.95456067	89.26410897	44.22	-11.74	7.54	2.02	

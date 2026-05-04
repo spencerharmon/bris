@@ -7,10 +7,12 @@
 //!
 //! See `plan.org` Phase 1 for the full design.
 
+pub mod catalog;
 pub mod ephemeris;
 pub mod frame;
 pub mod lunar;
 
+pub use catalog::{all_stars, by_hr, navigational_stars, position_at, StarPosition, StarRecord};
 pub use ephemeris::{heliocentric, sun_geocentric, Body, Heliocentric};
 pub use frame::{mean_obliquity, nutation, precession_angles, NutationAngles, PrecessionAngles};
 pub use lunar::{lunar_position, LunarPosition};

@@ -69,6 +69,20 @@ stable. Each task is sized to a meaningful unit of work, not a single commit.
    Rust source. The regenerator also produces the ~bris-data~ payload's
    leap-second portion, keeping in-binary defaults and OTA-update
    payloads in sync from one source.
+** TODO Vendored Yale BSC import + cross-check script
+   The catalog parser and runtime API (in ~bris-almanac::catalog~) work
+   from a vetted starter ~data/stars.tsv~ with ~10 entries. To go from
+   starter to production, write ~scripts/fetch_bsc.py~ which:
+   - Downloads the BSC5 / Hipparcos main catalog from VizieR (CDS
+     Strasbourg, public domain).
+   - Selects stars to mag ≤ 6.5 (naked-eye) plus all 57 navigational
+     stars (cross-referenced via the standard Nautical-Almanac star
+     list; embed that list verbatim in the script).
+   - Emits ~data/stars.tsv~ in the existing column format.
+   - Runs the build to confirm no parser errors.
+   The runtime code path is unchanged; only the data file grows.
+   Keep the script and its outputs reproducible by pinning VizieR
+   query parameters and verifying record counts.
 
 * Phase 1: Almanac
 ** TODO Define coordinate types
