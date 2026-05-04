@@ -13,6 +13,7 @@ workspace = true
 
 [dependencies]
 thiserror.workspace = true
+chrono = { workspace = true }
 serde = { workspace = true, optional = true }
 
 [dev-dependencies]
@@ -20,6 +21,5 @@ proptest.workspace = true
 approx.workspace = true
 
 [features]
-default = ["std"]
-std = []
+default = []
 serde = ["dep:serde"]
