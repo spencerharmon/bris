@@ -31,8 +31,13 @@ stable. Each task is sized to a meaningful unit of work, not a single commit.
   into device images, persistent device UUID, factory-reset = wipe
   overlay. Doesn't change architecture.
 - *Updates:* mobile via app store updates. Embedded via user-initiated
-  ~bris-cli update~ command (option 2 below). Auto-update infrastructure
-  deferred until a hardware product justifies the operational complexity.
+  ~bris-cli update~ command. The same update channel carries leap-second
+  table, almanac coefficients, and star catalog as a single ~bris-data~
+  payload, signed and atomically swapped. Leap-second updates have a
+  hard operational deadline (an announced leap second must be applied
+  before its effective UTC instant); almanac/catalog updates do not.
+  Auto-update infrastructure deferred until a hardware product justifies
+  the operational complexity.
 - *No telemetry, no analytics, no automatic network calls.*
 
 * Phase 0: Project scaffolding
@@ -55,6 +60,15 @@ stable. Each task is sized to a meaningful unit of work, not a single commit.
 ** TODO License, contributing guide, code of conduct
 ** TODO Set up ~rustfmt~, ~clippy~ (deny warnings in CI), ~cargo-deny~
 ** TODO Property-based test harness (proptest) wired up early
+** TODO Vendored leap-second source + build-time regenerator
+   Vendor an authoritative IERS leap-second source file (e.g. the
+   IETF-mirrored ~leap-seconds.list~). A small build-time script or
+   ~build.rs~ regenerates the ~LEAP_TABLE~ const in ~bris-core::time~
+   and the ~LEAP_TABLE_EXPIRES~ constant from the vendored file, so
+   updating the table is a single-file refresh rather than hand-editing
+   Rust source. The regenerator also produces the ~bris-data~ payload's
+   leap-second portion, keeping in-binary defaults and OTA-update
+   payloads in sync from one source.
 
 * Phase 1: Almanac
 ** TODO Define coordinate types
@@ -121,8 +135,14 @@ stable. Each task is sized to a meaningful unit of work, not a single commit.
 ** TODO Stale leap-second table detection
    The bundled leap-second table has an expiration. If the table is older
    than a configurable threshold (default 12 months) and a new leap second
-   may have been announced, raise time uncertainty accordingly. Update
-   path: app store update for mobile, ~bris-cli update~ for embedded.
+   may have been announced, raise time uncertainty accordingly.
+   Additionally, embed an optional "next-known-leap-instant" field. When
+   set and the current UTC is past that instant *but* the locally-known
+   TAI−UTC offset hasn't incremented, escalate to a hard time-uncertainty
+   warning (an announced leap second has occurred but our table doesn't
+   include it). Update path: app store update for mobile,
+   ~bris-cli update~ for embedded — same channel as almanac and star
+   catalog, all shipped as a unified ~bris-data~ payload.
 
 * Phase 2: Vision core (no platform code)
 ** TODO Image abstraction
@@ -402,7 +422,9 @@ stable. Each task is sized to a meaningful unit of work, not a single commit.
 ** TODO ~bris-cli~ with subcommands
    ~capture~, ~calibrate~, ~fix~, ~serve~, ~replay~ (process saved frames),
    ~log~ (list/show/delete/restore/export), ~update~ (download and apply
-   signed almanac/catalog/leap-second updates).
+   the signed ~bris-data~ payload containing leap-second table, almanac
+   coefficients, and star catalog as a unified set; verify signature,
+   atomically swap, log version transition).
 ** TODO Camera capture via ~libcamera~ / V4L2
    Use the ~libcamera-rs~ bindings or shell out to ~rpicam-still~ as a
    first pass. Frames flow into ~bris-vision~.
