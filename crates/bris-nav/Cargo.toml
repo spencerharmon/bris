@@ -1,0 +1,24 @@
+[package]
+name = "bris-nav"
+description = "Sight reduction, multi-sight fix computation, uncertainty propagation, continuous-operation engine."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+bris-core.workspace = true
+bris-almanac.workspace = true
+bris-vision.workspace = true
+bris-platesolve.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+approx.workspace = true

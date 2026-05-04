@@ -1,0 +1,77 @@
+#+TITLE: Bris: Digital Sextant
+
+Norwegian word for light wind. Named after Yrvind's Bris sextant.
+
+* Concept
+Bris is a portable application written in Rust for Android, iOS, Linux desktop,
+and embedded Linux (Raspberry Pi Zero 2W class) which leverages only a camera
+to perform celestial navigation. The Rust core operates *continuously*: a
+device sweeps the sky (manually, by boat motion, or by a mechanical mount),
+and Bris automatically detects the horizon, identifies celestial bodies in
+view, selects the best ones for a fix, and publishes updated positions on
+its NMEA stream. The operator does not select bodies, trigger sights, or
+switch between day and night modes.
+
+Two deployment patterns sit on top of the same core:
+- *Embedded / fixed install:* Pi Zero 2W on deck, running continuously,
+  emitting NMEA to the boat's chartplotter. No local UI in the steady state.
+- *Mobile:* phone app with a session-based UX. The user taps "Take sight,"
+  is guided through a short sweep, and receives a single fix when uncertainty
+  drops below an acceptable threshold. The position is displayed on a map
+  with multiple sharable coordinate formats. Native Android (Kotlin) and
+  iOS (Swift) frontends call the Rust core via UniFFI.
+
+A single Rust core crate implements all navigation, imaging, and almanac
+logic. Each platform provides a thin frontend (camera capture, display,
+NMEA output, session UX) that calls the core via FFI/UniFFI. CI/CD builds
+and tests every target.
+
+Position fixes are emitted as NMEA 0183 sentences (e.g. ~$GPGLL~, ~$GPRMC~,
+~$GPGGA~) over TCP, UDP, or serial, which is consumed natively by OpenCPN
+and most marine chartplotters. Fix uncertainty combines all error sources
+(centroiding, horizon fit, lens calibration residual, stitching alignment,
+refraction model, horizon dip, timing) into a full position covariance,
+emitted via ~$GPGST~ and reflected in the ~$GPGGA~ quality field, so
+chartplotter alarms work without custom integration. Bris-specific
+diagnostics — including which error source dominates the current fix —
+ride on a ~$PBRIS~ proprietary sentence. NMEA 2000 output is a possible
+future addition via an external gateway.
+
+Headless deployments log to syslog/journald. Operator-facing diagnostics
+(time-since-sync, drift, horizon confidence, per-sight residuals, etc.)
+ride on the ~$PBRIS~ proprietary sentence so a single NMEA stream carries
+both the fix and everything needed to judge its quality. Conversion to
+richer observability formats (Prometheus, OTLP, dashboards) is the job
+of a separate downstream tool that consumes the NMEA stream, not Bris.
+
+* Design Decisions
+- *No Arduino target.* The full pipeline (stitching, segmentation, plate
+  solving) cannot fit on a microcontroller. The Pi Zero 2W is the minimum
+  embedded target, running a stripped Linux image with Bris as a systemd
+  service (embedded-Linux appliance model).
+- *Single Rust core, native frontends.* The core crate is platform-agnostic.
+  Mobile shells (Kotlin/Swift) and desktop/embedded shells call into it.
+- *Runtime almanac, not compile-time LUT.* Truncated VSOP87 (Sun, planets) and
+  ELP2000-82B (Moon) plus the Hipparcos/FK5 catalog with precession, nutation,
+  proper motion, aberration, and refraction applied at runtime. Sub-arcsecond
+  accuracy in well under 1 ms on a Pi Zero 2W. Optional Chebyshev caches if
+  profiling demands them later.
+- *Classical computer vision throughout,* no ML:
+  - Horizon detection: edge + RANSAC line fit. Open-ocean horizons are
+    high-contrast linear features, which is exactly the case classical
+    methods handle well. Conditions that defeat classical CV (heavy fog,
+    severe glare, shore clutter) are also conditions in which a sight
+    should not be taken.
+  - Sun/Moon centroiding: thresholded ellipse fit with sub-pixel refinement.
+  - Star identification: geometric hash plate solving (Tetra3-style).
+  Result: deterministic, small binary, no inference runtime, easy to debug.
+- *Lens calibration* is a built-in user-facing workflow. Stitching more frames
+  trades compute time for accuracy; multi-minute fixes are acceptable.
+- *Time source* is the system monotonic + wall clock, NTP-disciplined when
+  a network is available. Offshore operation (no NTP for weeks) is a primary
+  use case: the application tracks last-sync age, detects clock steps,
+  refuses to compute fixes when wall time is implausible, and exposes a
+  per-fix time-confidence value so the operator can judge longitude
+  uncertainty. Optional opt-in drift correction uses a persisted rate
+  learned during prior NTP-synced periods.
+- *Output protocol:* NMEA 0183 first. NMEA 2000 deferred (license + hardware).

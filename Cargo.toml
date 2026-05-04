@@ -1,0 +1,73 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/bris-core",
+    "crates/bris-almanac",
+    "crates/bris-vision",
+    "crates/bris-platesolve",
+    "crates/bris-nav",
+    "crates/bris-nmea",
+    "crates/bris-cli",
+]
+# bris-ffi is intentionally not in the workspace yet. The FFI surface is
+# defined late, against a stable Rust core (see plan.org).
+
+[workspace.package]
+version = "0.0.1"
+edition = "2021"
+rust-version = "1.94"
+authors = ["Bris contributors"]
+license = "GPL-3.0-or-later"
+repository = "https://github.com/anomalyco/bris"
+readme = "../../readme.org"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+missing_debug_implementations = "warn"
+missing_docs = "warn"
+unreachable_pub = "warn"
+unused_must_use = "deny"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+# These are too noisy in early development. Revisit when the API stabilizes.
+module_name_repetitions = "allow"
+must_use_candidate = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+
+[workspace.dependencies]
+# Errors and logging
+thiserror = "1"
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+
+# Math / time / serde
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
+
+# Testing
+proptest = "1"
+approx = "0.5"
+
+# Internal crates (path deps).
+bris-core = { path = "crates/bris-core" }
+bris-almanac = { path = "crates/bris-almanac" }
+bris-vision = { path = "crates/bris-vision" }
+bris-platesolve = { path = "crates/bris-platesolve" }
+bris-nav = { path = "crates/bris-nav" }
+bris-nmea = { path = "crates/bris-nmea" }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+debug = "line-tables-only"
+strip = "symbols"
+
+[profile.release-embedded]
+inherits = "release"
+opt-level = 3
+panic = "abort"

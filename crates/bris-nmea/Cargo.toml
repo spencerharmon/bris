@@ -1,0 +1,21 @@
+[package]
+name = "bris-nmea"
+description = "NMEA 0183 sentence formatting and transports (TCP/UDP/serial)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+bris-core.workspace = true
+bris-nav.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true

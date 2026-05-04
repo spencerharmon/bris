@@ -1,0 +1,572 @@
+#+TITLE: Bris Development Plan
+#+STARTUP: overview
+
+Step-by-step plan to build Bris from scratch. Phases are roughly sequential
+but later phases can begin once their dependencies in earlier phases are
+stable. Each task is sized to a meaningful unit of work, not a single commit.
+
+* Decisions baked in
+- *License:* GPL-3.0. ~cargo-deny~ enforces license-compatible deps from
+  the first commit.
+- *Repo structure:* monorepo. May split later if mobile teams want
+  independent CI cadence.
+- *Rust toolchain:* current stable. Pi Zero 2W is aarch64 and fully
+  supported.
+- *Accuracy target:* "best we can do" is the design philosophy. Baseline
+  design target ≈1–2 nm (ocean passage); 0.5 nm is a stretch contingent
+  on validation data. The user never sees these targets — they see the
+  actual numeric uncertainty per fix and configure their own accept
+  threshold.
+- *Config:* TOML. ~/etc/bris/config.toml~ for system, ~~/.config/bris/config.toml~
+  for unprivileged user override. XDG-style per-key shadowing.
+- *Star catalog:* Yale BSC (~9000 stars, <1 MB) for the general catalog;
+  the 57 standard navigational stars are cross-referenced to Hipparcos
+  IDs for accurate proper motion. Catalog-induced fix error is negligible
+  at any of these levels.
+- *Sight database:* SQLite, used for the log on both mobile and embedded.
+- *Process model:* one binary per device, no daemon/client split. The
+  Rust core is in-process with the frontend (CLI on embedded, UniFFI
+  library call on mobile).
+- *Hardware product future-proofing:* factory-default calibration baked
+  into device images, persistent device UUID, factory-reset = wipe
+  overlay. Doesn't change architecture.
+- *Updates:* mobile via app store updates. Embedded via user-initiated
+  ~bris-cli update~ command (option 2 below). Auto-update infrastructure
+  deferred until a hardware product justifies the operational complexity.
+- *No telemetry, no analytics, no automatic network calls.*
+
+* Phase 0: Project scaffolding
+** TODO Choose workspace layout
+   Cargo workspace with members:
+   - ~bris-core~ — pure Rust, no_std-friendly where possible, no I/O
+   - ~bris-almanac~ — ephemeris + star catalog
+   - ~bris-vision~ — image processing, stitching, horizon, centroiding
+   - ~bris-platesolve~ — star pattern matching
+   - ~bris-nav~ — sight reduction, fix computation
+   - ~bris-nmea~ — NMEA 0183 sentence formatting + transport
+   - ~bris-ffi~ — UniFFI bindings layer
+   - ~bris-cli~ — desktop/embedded reference frontend
+   - ~bris-android~, ~bris-ios~ — thin shells (separate repos optional)
+** TODO Set up CI matrix
+   Build + test on: ~x86_64-unknown-linux-gnu~, ~aarch64-unknown-linux-gnu~
+   (Pi Zero 2W), ~aarch64-linux-android~, ~aarch64-apple-ios~,
+   ~x86_64-apple-darwin~, ~aarch64-apple-darwin~. Use ~cross~ or
+   ~cargo-zigbuild~ for cross-compilation.
+** TODO License, contributing guide, code of conduct
+** TODO Set up ~rustfmt~, ~clippy~ (deny warnings in CI), ~cargo-deny~
+** TODO Property-based test harness (proptest) wired up early
+
+* Phase 1: Almanac
+** TODO Define coordinate types
+   Strongly typed wrappers for radians/degrees, RA/Dec, Az/Alt, JD/JDE,
+   UT1/TT/TAI conversions. Use ~uom~ or hand-rolled newtypes.
+** TODO Time scales
+   Implement UTC ↔ TAI ↔ TT ↔ UT1 conversions. Bundle a leap second table
+   with a build-time check that warns if the table is older than N months.
+   Allow user override of ΔUT1 (default 0).
+** TODO Precession / nutation
+   IAU 2006/2000A model (or simplified IAU 1980 if size matters).
+** TODO Solar System ephemeris
+   Truncated VSOP87 for Sun + planets. Decide accuracy threshold
+   (target: <1 arcsec for navigational use; 0.1 arcsec is overkill).
+   Validate against JPL Horizons for a sampled set of dates.
+** TODO Lunar ephemeris
+   Truncated ELP2000-82B. Validate against Horizons.
+** TODO Star catalog
+   Embed the 57 standard navigational stars + ~1000 brightest from
+   Hipparcos as a ~const~ table. Apply proper motion, precession,
+   nutation, annual aberration, and atmospheric refraction at runtime.
+** TODO Refraction model
+   Bennett or Sæmundsson formula; allow temperature/pressure overrides.
+** TODO Almanac API surface
+   ~body_position(BodyId, Instant, Observer) -> ApparentPosition~
+** TODO Benchmark on Pi Zero 2W
+   Confirm <1 ms per body. Decide whether Chebyshev caching is needed.
+   Likely answer: no.
+
+* Phase 1.5: Time integrity
+  Offshore operation without NTP for weeks at a time is a primary use case.
+  The system clock keeps running, but several failure modes need explicit
+  handling.
+** TODO Dual-clock timestamping
+   Every captured frame carries both a monotonic timestamp (immune to wall-
+   clock steps) and a wall-clock timestamp. Fix computation uses monotonic
+   deltas within a session and only converts to wall time at the end.
+** TODO Clock-step detection
+   Watch for wall-clock jumps that disagree with the monotonic clock by more
+   than a configurable threshold (e.g. 2 s). On detection: invalidate any
+   in-flight sight session and log the event. Subsequent fixes are flagged
+   as "post-step" until the next clean session.
+** TODO Plausibility checks at startup
+   Refuse to compute fixes if wall time is before the build date or jumps
+   more than 1 hour from the last persisted shutdown time. Surface a clear
+   error to the operator.
+** TODO NTP sync tracking
+   Record the timestamp of the last successful NTP sync (or equivalent
+   trusted source). Persist across reboots. Expose "seconds since last
+   sync" to the fix pipeline.
+** TODO Optional drift-rate learning
+   When NTP is available, observe the offset trend over time and persist
+   an estimated local oscillator drift rate (ppm). Off by default. When
+   enabled and offline, apply the correction and widen the time-uncertainty
+   estimate accordingly.
+** TODO Per-fix time confidence
+   Each emitted fix carries a time-uncertainty value (seconds, 1σ) derived
+   from: time since last sync, drift-rate uncertainty, and any detected
+   step events. Propagate into longitude uncertainty in the fix output.
+** TODO RTC handling on embedded image
+   Document RTC battery requirements for the Pi appliance. If no RTC,
+   persist last-known-good time on clean shutdown and on every successful
+   fix, and use that as the floor at next boot.
+** TODO Stale leap-second table detection
+   The bundled leap-second table has an expiration. If the table is older
+   than a configurable threshold (default 12 months) and a new leap second
+   may have been announced, raise time uncertainty accordingly. Update
+   path: app store update for mobile, ~bris-cli update~ for embedded.
+
+* Phase 2: Vision core (no platform code)
+** TODO Image abstraction
+   ~Frame { width, height, pixels, timestamp, exposure, intrinsics }~.
+   Support grayscale + Bayer + RGB. Zero-copy where possible.
+** TODO Lens model + calibration
+   Pinhole + Brown-Conrady distortion (k1, k2, k3, p1, p2). Calibration
+   workflow: capture N frames of a printed checkerboard or use star
+   field self-calibration. Persist intrinsics per-device. For shipped
+   hardware, a factory-default calibration is baked into the image and
+   the user calibration workflow overrides it.
+** TODO Eye-height handling
+   Eye height contributes to horizon dip, which is a per-fix correction.
+   - Persist a default eye height per device (settings).
+   - Mobile: prompt at session start with the default prefilled, one tap
+     to accept, swipe to adjust.
+   - Embedded: configured once in ~/etc/bris/config.toml~.
+   - Track eye-height *uncertainty* (default ±0.5 m) which feeds dip
+     uncertainty in the error budget. Users in significant seas can
+     widen the uncertainty manually.
+   - Settings explainer: in significant seas, effective eye height
+     ≈ standing height + ½ × dominant wave height + cockpit-above-water
+     height. Document but do not compute — too many unknowns.
+** TODO Horizon detection
+   Classical pipeline: downsample → gradient → RANSAC line fit on the
+   sea/sky boundary. Return line in image coords + uncertainty. Report
+   low-confidence results explicitly so the operator can reject the
+   sight rather than silently producing a bad fix.
+** TODO Sun/Moon centroiding
+   Threshold + connected components + ellipse fit, sub-pixel refinement.
+   Account for partial occlusion by horizon (limb correction).
+** TODO Multi-frame stitching
+   Feature-based (ORB) alignment of overlapping frames into a panorama
+   in a gnomonic or equirectangular projection. Track per-frame
+   timestamps; do *not* average pixel data across time for moving bodies
+   — instead, compute per-frame angles and combine with proper time
+   correction.
+** TODO Angle measurement pipeline
+   Given a stitched scene + horizon line + body centroid + camera
+   intrinsics, output measured altitude with uncertainty.
+** TODO Stitching/accuracy tradeoff knob
+   User-facing "quality" setting controlling number of frames, RANSAC
+   iterations, refinement passes. Document expected runtime per tier.
+
+* Phase 3: Plate solving (night)
+** TODO Star detection in frame
+   Local-max + PSF fit, magnitude estimation, hot-pixel rejection.
+** TODO Geometric hash database
+   Build at compile time from the embedded star catalog. Tetra3-style
+   4-star pattern hashing. Tunable FOV range.
+** TODO Matcher
+   Query hash → candidate matches → geometric verification → camera
+   pose (RA/Dec of optical axis + roll). Confidence score.
+** TODO Per-star altitude extraction
+   For each identified star above horizon, compute measured altitude
+   using the same pipeline as day mode.
+
+* Phase 3.5: Continuous operation & automatic body selection
+  Bris is not a "press the button to take a sight" app. The intended model
+  is a device mounted on deck or held in hand, continuously sweeping the
+  sky (manually, by boat motion, or by a mechanical mount), with fixes
+  published automatically as conditions allow. The operator does not select
+  a body or trigger a measurement.
+** TODO Streaming frame pipeline
+   Frames flow continuously from the camera into a pipeline: capture →
+   horizon detection → body detection → identification → sight extraction
+   → sight queue → fix publisher. Backpressure handling: drop frames at
+   the input rather than queueing them if downstream stages cannot keep up.
+** TODO Automatic day/night mode detection
+   Per-frame mean luminance + presence of saturated regions selects
+   between day pipeline (sun/moon centroiding) and night pipeline
+   (plate solving). Hysteresis prevents twilight flapping. No user toggle.
+** TODO Day-mode body identification
+   Detect saturated bright blob; classify Sun vs Moon by apparent angular
+   diameter and time-of-day priors. Apply semi-diameter correction from
+   almanac (sun and moon are not point sources; we measure to the limb
+   and reduce to center). When both visible, prefer the higher-altitude
+   body and queue both as independent sights when geometry allows.
+** TODO Night-mode automatic star selection
+   Plate-solve the frame to identify all stars present, then score each
+   for sight value:
+   - Altitude band: prefer 20°–70° (refraction error vs geometry tradeoff).
+   - Azimuth diversity: prefer stars whose LOPs are 60°–120° from
+     existing queued sights (minimizes position covariance).
+   - Brightness: better SNR improves centroiding.
+   - Catalog reliability: prefer the 57 standard navigational stars where
+     possible.
+   Add the top N (default 3–5) per opportunity to the sight queue.
+   Visible planets are treated as additional candidates with the same
+   scoring.
+** TODO Body tracking across frames
+   Once a body is identified in frame N, predict its position in frame
+   N+1 from camera motion (estimated from horizon line shift) and
+   sidereal motion. Re-detect at the predicted location rather than
+   re-running plate solve. Fall back to full plate solve when tracking
+   fails.
+** TODO Rolling sight window with aging
+   Maintain a sliding window (default 10 min, configurable) of accepted
+   sights. Each sight carries its capture timestamp; older sights are
+   weighted down or dropped from fix computation. Window contents,
+   ages, and weights surfaced in ~$PBRIS,SIGHT~.
+** TODO Continuous fix publishing
+   Publish a new fix whenever the sight window contents change
+   meaningfully (new sight added, old sight expired, or every N seconds
+   minimum). Each published fix is a snapshot of the current best
+   estimate from the current window — there is no concept of "starting"
+   or "ending" a sight session.
+** TODO Sweep guidance (mobile only)
+   On phone frontends, render a minimal overlay showing horizon
+   detection status and current body candidates. No body-selection UI.
+   The operator's only job is to sweep slowly enough for stitching to
+   work; the overlay communicates whether they are sweeping too fast.
+
+* Phase 4: Sight reduction & fix
+** TODO Per-stage uncertainty propagation
+   Every pipeline stage that produces a measurement also produces a 1σ
+   uncertainty for that measurement, carried in the type system rather
+   than a side channel. Sources to track:
+   - Body centroiding residual (from sub-pixel fit covariance).
+   - Horizon line fit residual (from RANSAC inlier covariance).
+   - Lens calibration residual (from calibration RMS, optionally
+     inflated by time/temperature since last calibration).
+   - Stitching alignment residual (from feature reprojection RMS).
+   - Refraction model uncertainty (altitude-dependent; larger near horizon).
+   - Horizon dip uncertainty (from user-entered eye-height tolerance).
+   - Timing uncertainty (from time-since-sync, drift estimate, step events).
+   - Almanac uncertainty (from chosen VSOP87/ELP2000 truncation level;
+     expected negligible but tracked for completeness).
+** TODO Per-sight altitude covariance
+   Combine the relevant per-stage uncertainties into a single 1σ altitude
+   uncertainty for each sight. Document the combination rule (assumed
+   independent, root-sum-square) and its limits.
+** TODO Single sight LOP
+   Compute computed altitude (Hc) from almanac, intercept (Ho − Hc),
+   azimuth. Output a line of position with associated uncertainty.
+** TODO Multi-sight fix with full covariance
+   Weighted least-squares intersection of ≥2 LOPs using per-sight
+   altitude variances. Time uncertainty enters as a one-dimensional
+   longitude variance (≈15′ per second × cos(lat)) added to the position
+   covariance. Output: lat/lon + 2×2 position covariance.
+** TODO Running fix
+   Advance earlier LOPs by DR (course/speed) before intersection.
+   Course/speed input is optional; if absent, only simultaneous fixes
+   are produced. Inflate covariance by DR uncertainty when used.
+** TODO Sanity checks
+   Reject obvious blunders (intercept > N nm, azimuth disagreement,
+   per-sight residual > Kσ from the consensus, etc.) with clear
+   diagnostics naming the rejected sight and reason.
+** TODO Dominant-source attribution
+   For each fix, identify which uncertainty source dominates (e.g.
+   "horizon fit", "time", "refraction", "calibration", "stitching")
+   and surface it in the ~$PBRIS~ sentence. This is what tells the
+   operator *why* a fix is uncertain and therefore what to change.
+** TODO Altitude-dependent refraction uncertainty
+   Refraction model error grows nonlinearly as altitude approaches the
+   horizon. Bennett residual is ~0.1′ at 45° but >5′ below 5°. Make the
+   refraction uncertainty contribution explicitly altitude-dependent so
+   low-altitude sights are correctly downweighted in the fix and flagged
+   in dominant-source attribution. This subsumes the "sunrise/sunset
+   warning" idea: it applies to any low-altitude body, not just the Sun
+   at twilight.
+** TODO Sight-planning hints
+   CLI/UI helper that, given current time and observer, lists visible
+   bodies with their altitudes and projected per-sight uncertainty,
+   highlighting low-altitude bodies as expected-poor. Operator can pick
+   the best target before committing to a measurement session.
+
+* Phase 9: Stretch goals
+** TODO NMEA 2000 output via external gateway, documented integrations.
+** TODO Mechanical pan rig reference design (servo + 3D-printed mount).
+** TODO Lunar distance method for time independence.
+** TODO Cloud/web frontend for offline analysis of uploaded frames.
+** TODO Dead reckoning as a separate NMEA stream
+   Post-MVP, possibly won't do. If implemented, course/speed input
+   produces an independent DR position published with talker ID ~$DR*~
+   (e.g. ~$DRRMC~, ~$DRGGA~) on the same transport as the optical fixes.
+   The chartplotter renders both as separate vessel symbols/tracks; the
+   operator visually evaluates agreement. Bris never fuses, never gates,
+   never silently corrects — it just publishes both honestly. A separate
+   downstream application can produce a best-guess merged fix if desired;
+   that is not Bris's responsibility. Documentation must be explicit
+   that the optical fix on ~$GP*~ is the authoritative Bris output and
+   the ~$DR*~ stream is a navigational aid, not a correction.
+
+* Phase 5: Output
+** TODO NMEA 0183 sentence builders
+   ~$GPGLL~, ~$GPRMC~, ~$GPGGA~ with correct checksums and "manual
+   input" mode flag where the spec allows it.
+** TODO Uncertainty in NMEA output
+   Implement all of the following; they are complementary, not alternatives.
+   The thresholds operate on the *combined* fix uncertainty (time +
+   optical + stitching + calibration + horizon + refraction), not on any
+   single source.
+   - ~$GPGST~ carries 1σ lat/lon/alt error in meters derived from the
+     full fix covariance. Always emit when a fix is produced; this is
+     the standards-compliant uncertainty channel.
+   - ~$GPGGA~ quality field: degrade from 1 ("GPS fix") to 6 ("DR") past
+     a configurable confidence threshold; degrade to 0 ("invalid") past
+     a hard threshold. This triggers chartplotter-side alarms for free.
+   - ~$GPRMC~ status field: flip ~A~ → ~V~ at the hard threshold.
+   Thresholds are user-configurable with documented sensible defaults.
+** TODO Operator documentation: chartplotter symptoms & remediation
+   A dedicated docs page enumerating every uncertainty signal Bris emits,
+   how it appears on common chartplotters, what triggered it, and how to
+   resolve it. State explicitly that OpenCPN is the recommended consumer
+   because it parses ~$GPGST~ and tolerates proprietary sentences cleanly;
+   most fixed-mount chartplotters will display the position but not the
+   uncertainty breakdown. Cover at minimum:
+   - One section per uncertainty source (centroiding, horizon, calibration,
+     stitching, refraction, dip, timing) with: how it appears in
+     ~$PBRIS,UNC~, what conditions cause it to dominate, and concrete
+     operator actions. The dominant-source field maps 1:1 to these
+     sections.
+   - Low-altitude bodies and refraction: explain that any sight below
+     ~10° altitude (Sun at twilight, rising/setting stars, low planets)
+     carries elevated and partially irreducible uncertainty. Recommend
+     higher targets when available.
+   - ~$GPGGA~ quality = 6 (DR mode) and = 0 (invalid): how to read,
+     what triggered it via the dominant-source field, remediation per cause.
+   - ~$GPRMC~ status V: same.
+   - Large ~$GPGST~ uncertainty ellipse: how to read it, how the dominant
+     source field directs remediation.
+   - Chartplotter "GPS lost" alarm: explain that this is the expected
+     behavior when Bris flags a fix as invalid, and is correct.
+   - Sight rejection diagnostics in ~$PBRIS,SIGHT~: how to identify a
+     single bad sight from per-sight residuals.
+   - "No remediation possible" cases: be explicit that some conditions
+     (heavy haze, low-altitude-only visibility, multi-week NTP outage
+     with no drift baseline) produce correctly-reported high uncertainty
+     that the operator can only accept, not fix.
+   Include screenshots from at least OpenCPN. Live in ~docs/operator/~.
+** TODO ~$PBRIS~ proprietary diagnostic sentences
+   Vendor-prefixed sentences carrying time-since-sync, drift estimate,
+   step-detected flag, horizon confidence, sights used in fix. Ignored
+   by standard consumers; consumed by our own tooling.
+** TODO Transport layer
+   TCP server, UDP broadcast, serial (~serialport~ crate). Configurable
+   via a small TOML/JSON config.
+** TODO OpenCPN integration test
+   Scripted: spin up Bris emitting a canned fix, connect OpenCPN in a
+   container/VM, assert vessel icon appears at expected position and
+   that ~$GPGST~ uncertainty is rendered.
+
+* Phase 5.5: Diagnostics & logging
+  Keep the on-device surface minimal. Operator-facing diagnostics ride on
+  the ~$PBRIS~ sentence (consumed by chartplotter-side tooling); local
+  diagnostics go to syslog. Anything richer (Prometheus, OTLP, dashboards)
+  is the job of a separate downstream tool that consumes NMEA, not Bris.
+** TODO ~tracing~ instrumentation throughout the core and frontends
+   Single internal facade so log levels and targets are uniform.
+** TODO syslog / journald subscriber
+   Default-on for the embedded image (~tracing-journald~). On non-systemd
+   systems, fall back to ~tracing-syslog~ or stderr. ~journalctl -u bris~
+   is the baseline diagnostic command.
+** TODO Structured ~$PBRIS~ payload (multi-sentence)
+   NMEA 0183 has an 82-character per-sentence limit. Split diagnostics
+   across typed subtype sentences, all sharing a common timestamp:
+   - ~$PBRIS,UNC,...~ — per-source 1σ contributions to the fix
+     (centroiding, horizon, calibration, stitching, refraction, dip,
+     timing) plus the dominant source.
+   - ~$PBRIS,SIGHT,n,...~ — one per sight: body, altitude, residual,
+     individual uncertainty.
+   - ~$PBRIS,TIME,...~ — time-since-sync, drift estimate ppm,
+     step-detected flag, last-sync timestamp.
+   - ~$PBRIS,ERR,...~ — capture/processing error counters since last fix.
+   Each sentence stays under 82 chars; downstream tools reassemble by
+   the shared timestamp. Field-level spec lives in
+   ~docs/protocol/pbris.md~ as the canonical contract.
+** TODO Document the "NMEA → metrics" extraction contract
+   Field-by-field spec of every ~$PBRIS~ subtype sentence in
+   ~docs/protocol/pbris.md~ so a future converter tool, an operator
+   reading raw NMEA, or a downstream alerting system can be built
+   against a stable interface. Versioned (~$PBRIS,VER,...~ at session
+   start) so consumers can detect schema changes.
+
+* Phase 6: Reference frontend (CLI / embedded Linux)
+** TODO ~bris-cli~ with subcommands
+   ~capture~, ~calibrate~, ~fix~, ~serve~, ~replay~ (process saved frames),
+   ~log~ (list/show/delete/restore/export), ~update~ (download and apply
+   signed almanac/catalog/leap-second updates).
+** TODO Camera capture via ~libcamera~ / V4L2
+   Use the ~libcamera-rs~ bindings or shell out to ~rpicam-still~ as a
+   first pass. Frames flow into ~bris-vision~.
+** TODO Pi Zero 2W appliance image
+   Buildroot or ~pi-gen~ recipe: minimal kernel, ~bris-cli serve~ as
+   systemd unit, read-only rootfs, NTP enabled, NMEA on TCP 10110.
+** TODO Field log + replay
+   Persist raw frames + metadata so a fix can be re-derived offline
+   for debugging. Includes the same soft-delete model as the mobile
+   sight log: ~bris-cli log delete <id>~ marks a fix deleted; deleted
+   fixes are excluded from exports and re-computations but retained
+   for the configured retention period. ~bris-cli log restore <id>~
+   undoes a deletion within the retention window.
+
+* Phase 7: Mobile frontends
+  Mobile frontends wrap the continuous core in a *session-based* UI. The
+  user holds the phone, taps "Take sight," is guided through a sweep, and
+  receives a single fix when uncertainty drops below an acceptable
+  threshold (or when they accept the current best). The continuous engine
+  is unchanged — the mobile UI is a bounded driver on top of it.
+  Implemented in native languages (Kotlin / Swift), not Rust, to use
+  platform-native camera, map, and share APIs idiomatically.
+** TODO UniFFI bindings in ~bris-ffi~
+   Expose the streaming session API: start/stop session, frame ingest,
+   current-best-fix subscription (lat/lon, covariance, dominant source,
+   per-source uncertainty), accept-current, abandon. Also: calibration
+   workflow, log access.
+** TODO Android shell (Kotlin)
+   - CameraX capture → byte buffers → Rust core via UniFFI.
+   - Foreground service for the duration of an active session only;
+     stops when the session ends.
+   - No NMEA server by default. Optional advanced setting to enable
+     TCP/UDP NMEA output for users who want to drive a chartplotter
+     from the phone.
+** TODO iOS shell (Swift)
+   - AVFoundation capture → Rust core via UniFFI.
+   - Foreground only; no background camera access on iOS without
+     compelling justification.
+   - Same NMEA defaults as Android.
+** TODO Sight session UX
+   - "Take sight" button starts the session.
+   - On-screen sweep guidance: a minimal overlay showing horizon
+     detection status, "sweep slower / faster" feedback, and current
+     candidate bodies (count, not selection — selection stays automatic).
+   - Live uncertainty indicator: numeric 1σ value (e.g. "1.8 nm") with
+     red/yellow/green color coding. The number is always shown; the
+     color reflects whether it meets the current accept threshold.
+     - Red: above hard threshold. Never accepted, neither manually nor
+       automatically.
+     - Yellow: between hard and accept thresholds.
+     - Green: at or below accept threshold.
+   - Dominant-source label always visible so the user understands what
+     is currently limiting the fix (e.g. "horizon: hazy", "low altitude
+     body", "need more sweeps").
+   - Auto-accept after N seconds of sustained green (default 3 s,
+     configurable).
+   - Session timeout (default 5 min, configurable). On timeout: if the
+     best fix achieved during the session was green or yellow, accept it
+     and surface that it was the timeout-best rather than a clean accept;
+     if only red was ever achieved, end the session with no fix and
+     explain why.
+   - Late-session hint: when the timeout is approaching (e.g. last 30 s)
+     and no green has been achieved, prompt with the actual best-so-far
+     number, e.g. "Unable to reach 0.5 nm in current conditions.
+     Best so far: 1.8 nm. Adjust target?" The user can raise the
+     target threshold in-place or let the timeout resolve normally.
+   - Manual "Accept now" available whenever a *non-red* fix exists; used
+     to accept a yellow fix without waiting for green.
+   - Manual "Keep going" overrides auto-accept for users holding out
+     for better.
+   - "Abandon" cancels the session with no fix recorded.
+   - Configurable accept-threshold defaults; expose as a single
+     "target accuracy" slider (e.g. 0.5 / 1 / 5 nm) rather than raw
+     covariance values.
+** TODO Fix presentation
+   On accept:
+   - Show position on a native map (MapKit / Google Maps / OSM via
+     ~osmdroid~) with a 1σ uncertainty ellipse.
+   - Show coordinates in multiple formats with one-tap copy:
+     - Decimal degrees: ~47.6062, -122.3321~
+     - DMS: ~47°36'22.3"N 122°19'55.6"W~
+     - ~geo:~ URI: ~geo:47.6062,-122.3321~ (opens in any map app)
+   - Show dominant uncertainty source and per-source breakdown in a
+     collapsible panel for users who want it.
+   - OS share sheet integration: share the formatted position as
+     plain text or a ~geo:~ URI to messaging / email / other apps.
+   - Save to an on-device sight log with timestamp, all sights used,
+     and full uncertainty breakdown for later review.
+** TODO Mobile calibration UX
+   Guided checkerboard capture or "point at a clear night sky"
+   star-field auto-calibration. Persists per-device intrinsics.
+** TODO Sight log review
+   List of past accepted fixes, each row showing timestamp, position,
+   numeric 1σ uncertainty, and color-coded by whether that fix met its
+   session's accept threshold (green), was a yellow accept (manual or
+   timeout), or was explicitly accepted at higher uncertainty. Tap a
+   row for map preview, conditions summary, dominant source, full
+   per-source uncertainty breakdown, and re-share. The color-coded
+   list is itself a diagnostic — patterns over time (e.g. "every fix
+   near sunset is yellow") teach the operator their own conditions.
+
+   Each saved fix records the accept threshold that was active when it
+   was taken, and is color-coded against *that* threshold permanently.
+   Changing the accept threshold in app settings does *not* re-color
+   prior fixes — the log is a historical record of the operator's
+   intent at each fix, not a live view. Each row displays the
+   threshold-at-time alongside the achieved uncertainty so the color
+   is always self-explanatory ("1.8 nm achieved against 1.0 nm target").
+** TODO Log export (mobile and embedded)
+   Two formats:
+   - *GPX* with Bris extensions: standard ~<trkpt>~ for chartplotter
+     and route-planning tool compatibility, plus ~<extensions>~ children
+     ~<bris:uncertainty_nm>~, ~<bris:dominant_source>~,
+     ~<bris:threshold_nm>~, ~<bris:accept_state>~. Standard tools
+     ignore the extensions and render the track; Bris-aware tools
+     surface them.
+   - *CSV* for analysis: ~timestamp,lat,lon,sigma_nm,threshold_nm,~
+     ~accept_state,dominant_source,sights_used,session_id~. Trivial
+     to import into spreadsheets, Python, R.
+   Export on mobile via OS share sheet; on embedded via ~bris-cli log
+   export --format gpx|csv~.
+** TODO Track map view
+   Map showing all logged fixes over time as a sequence of markers,
+   each colored by its own historical accept-state (green / yellow)
+   and labeled with its numeric 1σ uncertainty. Tap a marker for the
+   same detail panel as the log list. The 1σ uncertainty ellipse is
+   rendered around each marker, optionally toggleable. Date-range
+   filter for long passages. Provides an at-a-glance view of fix
+   quality along the route — clusters of yellow markers immediately
+   reveal degraded periods (haze, twilight, calibration drift).
+   Soft-deleted fixes are hidden by default; the "show deleted" toggle
+   from the log applies here too, rendering them in a muted style.
+** TODO Fix deletion (soft delete)
+   The user can delete any fix from the log list, the detail view, or
+   the track map. Deletion is soft: the fix is marked deleted, hidden
+   from default log/map/export views, and excluded from any future
+   computations, but the underlying record (including all sights and
+   uncertainty data) is retained. An "Undo" toast appears immediately
+   after deletion. A "Show deleted" toggle in log settings reveals
+   deleted fixes in a muted style for review or restoration. Deleted
+   fixes are auto-purged after a configurable retention period
+   (default 30 days). Deletion never affects already-published NMEA
+   output (those bytes are gone) but does prevent the fix from
+   appearing in subsequent exports.
+
+* Phase 8: Validation
+** TODO Synthetic test suite
+   Render synthetic skies (known body positions + known camera pose +
+   known lens distortion) and verify the full pipeline recovers the
+   ground truth within target accuracy.
+** TODO Recorded real-world dataset
+   Capture sights at known positions (land-based, accurate GNSS for
+   ground truth) across day/night, sea/land horizons, calm/rough
+   conditions. Track accuracy regressions in CI on a sample subset.
+** TODO Documented accuracy budget
+   Per error source: timing, refraction, horizon dip, centroiding,
+   calibration residual, almanac. Total expected fix uncertainty.
+
+* Phase 9: Stretch goals
+** TODO NMEA 2000 output via external gateway, documented integrations.
+** TODO Mechanical pan rig reference design (servo + 3D-printed mount).
+** TODO Lunar distance method for time independence.
+** TODO Cloud/web frontend for offline analysis of uploaded frames.
+
+* Open questions for you
+1. Is there anything in the "Decisions baked in" block at the top that
+   you want to revisit before Phase 0 starts?

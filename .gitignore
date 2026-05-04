@@ -1,0 +1,45 @@
+# Build artifacts
+target/
+**/target/
+*.rs.bk
+Cargo.lock.bak
+
+# IDE / editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.#*
+\#*\#
+
+# Agent / shell artifacts
+.agent-shell/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Local config / secrets
+.env
+.env.local
+*.local.toml
+
+# Logs / databases (dev)
+*.log
+*.sqlite
+*.sqlite-journal
+*.db
+
+# Mobile build artifacts (placeholders for later phases)
+android/.gradle/
+android/build/
+android/app/build/
+android/local.properties
+ios/build/
+ios/Pods/
+ios/*.xcworkspace/xcuserdata/
+ios/*.xcodeproj/xcuserdata/
+
+# Generated UniFFI bindings
+**/generated/

@@ -1,0 +1,20 @@
+[package]
+name = "bris-almanac"
+description = "Ephemeris (Sun, Moon, planets, stars) and time scale conversions for Bris."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+bris-core.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+approx.workspace = true
