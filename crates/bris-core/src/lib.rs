@@ -8,3 +8,9 @@
 //! See `plan.org` Phase 0 / Phase 1 for the design rationale.
 
 #![cfg_attr(not(feature = "std"), no_std)]
+
+pub mod angle;
+pub mod uncertainty;
+
+pub use angle::{Angle, AngleError, Latitude, Longitude};
+pub use uncertainty::{Sigma, Uncertain, UncertaintyError};
