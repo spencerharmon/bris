@@ -261,6 +261,16 @@ impl Tt {
     pub fn julian_centuries_j2000(self) -> f64 {
         (self.0 - JD_J2000) / 36525.0
     }
+
+    /// Construct directly from a Julian Date in TT.
+    ///
+    /// Most callers should use [`utc_to_tt`] to go through the leap
+    /// table from a wall-clock instant. This constructor exists for
+    /// almanac internals and tests that work in TT directly.
+    #[must_use]
+    pub const fn from_julian_date(jd: f64) -> Self {
+        Self(jd)
+    }
 }
 
 /// International Atomic Time as a Julian Date.
