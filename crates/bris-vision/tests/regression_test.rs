@@ -970,3 +970,109 @@ fn sunrise_horizon_findable_with_body_exclusion_and_relaxed_ransac() {
         line.residual_rms_px
     );
 }
+
+/// `night_test_lowres` revisited: with a manually-tuned
+/// `search_row_range` that skips the moon's halo, the night
+/// detector finds the actual sea-sky horizon at ~69% of the
+/// frame height (around y = 1324 of 1920).
+///
+/// The default-config night detector lands on the moon halo's
+/// edge at y ≈ 258 — the strongest luma transition in the frame.
+/// The body-excluding variant alone doesn't help much because the
+/// moon's halo extends well beyond the body's column range. The
+/// fix is to restrict the global gradient search to the lower
+/// portion of the frame (below the halo): `search_row_range:
+/// (0.55, 1.0)` works for this scene.
+///
+/// In the eventual streaming engine this kind of per-scene tuning
+/// would come from either:
+///   - A multi-pass detector (find strongest gradient, mask its
+///     neighborhood, find next-strongest).
+///   - Combining with the segmentation detector to get a sky/sea
+///     class prior.
+///   - Operator-supplied scene context.
+///
+/// For now this test documents that the night detector *can* find
+/// the right horizon when given the right search range — the
+/// algorithm is sound; the autoconfig is the missing piece.
+#[test]
+fn night_test_lowres_horizon_findable_with_tuned_search_range() {
+    use bris_core::time::{Tt, JD_J2000};
+    use bris_vision::{detect_horizon_night, load_frame_from_path, Intrinsics, NightHorizonConfig};
+    use std::path::Path;
+
+    let path = Path::new(harness::REGRESSION_DIR)
+        .join("night_test_lowres")
+        .join("frame.jpg");
+    let dims = image::image_dimensions(&path).expect("dims");
+    let intrinsics = Intrinsics::placeholder(dims.0, dims.1);
+    let frame = load_frame_from_path(&path, Tt::from_julian_date(JD_J2000), 0, intrinsics)
+        .expect("load frame");
+
+    let cfg = NightHorizonConfig {
+        search_row_range: (0.55, 1.0),
+        min_inlier_fraction: 0.2,
+        ..NightHorizonConfig::default()
+    };
+    let line =
+        detect_horizon_night(&frame, cfg).expect("tuned night detector should find a horizon");
+
+    // Recorded: intercept ≈ 1324, slope near zero, ~110 inliers.
+    // ~69% of the 1920-tall frame, which is where the actual
+    // moonlit-sky-to-sea transition sits.
+    assert!(
+        (line.intercept - 1324.0).abs() < 30.0,
+        "horizon intercept {} not near recorded ~1324",
+        line.intercept
+    );
+    assert!(
+        line.slope.abs() < 0.05,
+        "horizon slope {} not near horizontal",
+        line.slope
+    );
+    assert!(
+        line.inlier_count >= 80,
+        "expected at least 80 inliers, got {}",
+        line.inlier_count
+    );
+}
+
+/// Synthetic "moonlit sea brighter than dark sky" scene: confirms
+/// the night detector handles the **sea-brighter-than-sky** case
+/// (the daylight detectors all assume sky-brighter-than-sea).
+/// Strictly synthetic; complementary to the real-scene
+/// `night_test_lowres` test above.
+#[test]
+fn night_detector_handles_sea_brighter_than_sky() {
+    use bris_core::time::{Tt, JD_J2000};
+    use bris_vision::{detect_horizon_night, Frame, Intrinsics, NightHorizonConfig};
+
+    // Build a frame with dark sky on top (luma 800) and brighter
+    // moonlit sea on the bottom (luma 1500), transition at y=200.
+    let w: u32 = 640;
+    let h: u32 = 360;
+    let mut pixels = vec![0u16; (w * h) as usize];
+    for y in 0..h {
+        let v = if y < 200 { 800 } else { 1500 };
+        for x in 0..w {
+            pixels[(y as usize) * (w as usize) + (x as usize)] = v;
+        }
+    }
+    let frame = Frame::new(
+        w,
+        h,
+        pixels,
+        Tt::from_julian_date(JD_J2000),
+        0,
+        Intrinsics::placeholder(w, h),
+    )
+    .unwrap();
+
+    let line = detect_horizon_night(&frame, NightHorizonConfig::default())
+        .expect("night detector should handle sea-brighter-than-sky");
+    assert!(
+        (line.intercept - 200.0).abs() < 5.0,
+        "intercept {} not near true horizon row 200",
+        line.intercept
+    );
+}

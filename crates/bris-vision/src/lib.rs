@@ -12,6 +12,7 @@ pub mod horizon;
 pub mod io;
 pub mod lens;
 pub mod measure;
+pub mod night_horizon;
 pub mod panorama;
 pub mod peak;
 #[cfg(feature = "segmentation")]
@@ -38,6 +39,10 @@ pub use io::{
 };
 pub use lens::{distort_normalized, pixel_ray_direction, project_pinhole, undistort_pixel};
 pub use measure::{measure_altitude, MeasurementError};
+pub use night_horizon::{
+    detect_horizon_night, detect_horizon_night_excluding_body,
+    detect_horizon_night_with_column_mask, NightHorizonConfig,
+};
 pub use panorama::{panorama_altitude, panorama_altitude_with_detector, FrameRoles, PanoramaError};
 pub use peak::{detect_peaks, Peak, PeakConfig};
 #[cfg(feature = "segmentation")]

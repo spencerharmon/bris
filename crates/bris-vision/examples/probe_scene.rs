@@ -10,7 +10,8 @@
     clippy::too_many_lines,
     clippy::cast_possible_truncation,
     clippy::cast_possible_wrap,
-    clippy::cast_sign_loss
+    clippy::cast_sign_loss,
+    clippy::cast_precision_loss
 )]
 
 use std::path::PathBuf;
@@ -18,10 +19,11 @@ use std::path::PathBuf;
 use bris_core::time::{Tt, JD_J2000};
 use bris_vision::{
     body_column_mask, centroid_brightest_body, centroid_saturated_body_in_mask, classify,
-    detect_horizon, detect_horizon_via_sky_region, detect_horizon_via_sky_region_with_column_mask,
+    detect_horizon, detect_horizon_night, detect_horizon_night_excluding_body,
+    detect_horizon_via_sky_region, detect_horizon_via_sky_region_with_column_mask,
     detect_horizon_with_column_mask, detect_peaks, load_frame_from_path_with_rotation,
-    CentroidConfig, ConditionConfig, HorizonConfig, Intrinsics, PeakConfig, Rotation,
-    SaturatedBodyConfig,
+    CentroidConfig, ConditionConfig, HorizonConfig, Intrinsics, NightHorizonConfig, PeakConfig,
+    Rotation, SaturatedBodyConfig,
 };
 
 #[cfg(feature = "segmentation")]
@@ -276,6 +278,78 @@ fn main() {
             line.residual_rms_px
         ),
         Err(e) => println!("  Err: {e}"),
+    }
+
+    // Night horizon detector.
+    println!("\n[horizon.night]");
+    match detect_horizon_night(&frame, NightHorizonConfig::default()) {
+        Ok(line) => println!(
+            "  Ok: slope = {:.4}, intercept = {:.2}, inliers = {} / {} candidates, RMS = {:.2} px",
+            line.slope,
+            line.intercept,
+            line.inlier_count,
+            line.candidate_count,
+            line.residual_rms_px
+        ),
+        Err(e) => println!("  Err: {e}"),
+    }
+    if std::env::var("PROBE_ROWS").is_ok() {
+        // Print smoothed per-row mean profile at 5% intervals so we
+        // can see where the largest gradients are.
+        let h = frame.height();
+        println!("  per-row mean luma at 5% steps (full frame):");
+        let pixels = frame.pixels();
+        let w = frame.width();
+        for pct in (0..=100).step_by(5) {
+            let y = (u64::from(h - 1) * pct as u64 / 100) as u32;
+            let row_off = (y as usize) * (w as usize);
+            let sum: u64 = pixels[row_off..row_off + (w as usize)]
+                .iter()
+                .map(|&v| u64::from(v))
+                .sum();
+            let mean = (sum as f64) / f64::from(w);
+            println!("    y = {y:5} ({pct:3}%): mean luma = {mean:7.0}");
+        }
+    }
+    if let Ok(body) = &saturated_body {
+        let radius_px = (f64::from(body.area_px) / std::f64::consts::PI).sqrt();
+        println!("  with body-exclusion (r = {radius_px:.1} px):");
+        match detect_horizon_night_excluding_body(
+            &frame,
+            NightHorizonConfig::default(),
+            body.x,
+            body.y,
+            radius_px,
+            8.0,
+        ) {
+            Ok(line) => println!(
+                "    Ok: slope = {:.4}, intercept = {:.2}, inliers = {} / {}, RMS = {:.2} px",
+                line.slope,
+                line.intercept,
+                line.inlier_count,
+                line.candidate_count,
+                line.residual_rms_px
+            ),
+            Err(e) => println!("    Err: {e}"),
+        }
+        if std::env::var("PROBE_DUMP").is_ok() {
+            // Loosen RANSAC for noisy night scenes.
+            let cfg = NightHorizonConfig {
+                min_inlier_fraction: 0.2,
+                ..NightHorizonConfig::default()
+            };
+            println!("  with body-exclusion + min_inlier_fraction=0.2:");
+            match detect_horizon_night_excluding_body(&frame, cfg, body.x, body.y, radius_px, 8.0) {
+                Ok(line) => {
+                    println!(
+                        "    Ok: slope = {:.4}, intercept = {:.2}, inliers = {} / {}, RMS = {:.2} px",
+                        line.slope, line.intercept, line.inlier_count, line.candidate_count,
+                        line.residual_rms_px
+                    );
+                }
+                Err(e) => println!("    Err: {e}"),
+            }
+        }
     }
 
     #[cfg(feature = "segmentation")]
