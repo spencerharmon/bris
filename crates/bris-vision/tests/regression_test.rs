@@ -51,8 +51,8 @@ mod harness {
     use bris_core::time::{Tt, JD_J2000};
     use bris_vision::{
         centroid_brightest_body, detect_horizon, detect_horizon_via_sky_region,
-        load_frame_from_path, CentroidConfig, Frame, HorizonConfig, HorizonError, HorizonLine,
-        Intrinsics,
+        load_frame_from_path_with_rotation, CentroidConfig, Frame, HorizonConfig, HorizonError,
+        HorizonLine, Intrinsics, Rotation,
     };
 
     #[cfg(feature = "segmentation")]
@@ -89,24 +89,33 @@ mod harness {
         pub description: String,
         pub kind: CaseKind,
         pub frame_count: u32,
+        /// Frame width *after* rotation (the dimensions the pipeline
+        /// sees). For a portrait phone capture rotated 90°, this is
+        /// the source's height.
         pub frame_width: u32,
+        /// Frame height *after* rotation.
         pub frame_height: u32,
-        /// Rotation applied to the source image at load time, in
-        /// degrees clockwise. 0 for landscape captures; 90 / 180 /
-        /// 270 for portrait or otherwise-rotated captures. Pixel
-        /// coordinates in `expected_centroid_frame0` and `horizon.*`
-        /// are after rotation. Defaults to 0.
-        ///
-        /// Loader-side rotation is a separate follow-up commit; for
-        /// now any case with a non-zero value will trip an assertion
-        /// in the loader. The schema lands first so cases can declare
-        /// rotation when they need it.
+        /// Rotation applied to the source pixels at load time, in
+        /// degrees clockwise. Accepts 0, 90, 180, 270. Defaults to
+        /// 0. When 0 and `auto_rotate` is true (the default), the
+        /// loader derives a rotation from the source's aspect ratio
+        /// (portrait → 90° CW).
         #[serde(default)]
         pub source_rotation_deg: u16,
+        /// When `source_rotation_deg = 0`, decides whether to
+        /// auto-detect rotation from source aspect ratio. Defaults
+        /// to true. Set to false to force "no rotation" on a
+        /// portrait-shaped source (rare; mostly for negative tests).
+        #[serde(default = "default_auto_rotate")]
+        pub auto_rotate: bool,
         /// Optional list of frame filenames in capture order. Defaults
         /// to `["frame.png"]` if absent.
         #[serde(default)]
         pub frames: Option<Vec<String>>,
+    }
+
+    fn default_auto_rotate() -> bool {
+        true
     }
 
     /// What the case is testing for. This is documentation; the
@@ -249,27 +258,57 @@ mod harness {
         toml::from_str(&text).unwrap_or_else(|e| panic!("parse {}: {e}", path.display()))
     }
 
+    /// Resolve the effective rotation for a case. Explicit non-zero
+    /// `source_rotation_deg` always wins; a zero value with
+    /// `auto_rotate = true` (the default) derives from source aspect.
+    pub fn resolve_rotation(case: &CaseSpec, src_w: u32, src_h: u32) -> Rotation {
+        match case.case.source_rotation_deg {
+            0 => {
+                if case.case.auto_rotate {
+                    Rotation::auto_for_aspect(src_w, src_h)
+                } else {
+                    Rotation::Deg0
+                }
+            }
+            other => Rotation::from_degrees(other).unwrap_or_else(|d| {
+                panic!(
+                    "case {}: source_rotation_deg must be 0|90|180|270, got {d}",
+                    case.case.name
+                )
+            }),
+        }
+    }
+
     /// Load a frame from a case directory. Honors the case's
-    /// `source_rotation_deg` (currently 0 only; non-zero traps).
+    /// `source_rotation_deg` (explicit) or derives a rotation from
+    /// the source's aspect ratio (when the case allows auto-rotate
+    /// and didn't declare an explicit rotation). The returned
+    /// `Frame` records the applied rotation.
     pub fn load_case_frame(case: &CaseSpec, filename: &str) -> Frame {
         let path: PathBuf = Path::new(REGRESSION_DIR)
             .join(&case.case.name)
             .join(filename);
-        let dims = image::image_dimensions(&path)
+        let (src_w, src_h) = image::image_dimensions(&path)
             .unwrap_or_else(|e| panic!("dims {}: {e}", path.display()));
-        // Rotation lands in a follow-up commit; for now any case
-        // with non-zero rotation will trip this assertion until the
-        // loader honors it.
-        assert_eq!(
-            case.case.source_rotation_deg, 0,
-            "case {}: source_rotation_deg = {} but loader rotation \
-             isn't wired in yet",
-            case.case.name, case.case.source_rotation_deg,
-        );
-        let intrinsics = Intrinsics::placeholder(dims.0, dims.1);
-        load_frame_from_path(&path, Tt::from_julian_date(JD_J2000), 0, intrinsics)
-            .unwrap_or_else(|e| panic!("load {}: {e}", path.display()))
-            .with_source_path(path)
+        let rotation = resolve_rotation(case, src_w, src_h);
+        // Intrinsics are placeholder for the regression corpus
+        // (uncalibrated cameras). They must describe the post-
+        // rotation frame so the principal point lands at the
+        // post-rotation center.
+        let (post_w, post_h) = match rotation {
+            Rotation::Deg0 | Rotation::Deg180 => (src_w, src_h),
+            Rotation::Deg90 | Rotation::Deg270 => (src_h, src_w),
+        };
+        let intrinsics = Intrinsics::placeholder(post_w, post_h);
+        load_frame_from_path_with_rotation(
+            &path,
+            Tt::from_julian_date(JD_J2000),
+            0,
+            intrinsics,
+            rotation,
+        )
+        .unwrap_or_else(|e| panic!("load {}: {e}", path.display()))
+        .with_source_path(path)
     }
 
     /// First frame in a case (default `frame.png` unless `frames =
@@ -287,6 +326,9 @@ mod harness {
     // -----------------------------------------------------------------
 
     /// Assert each declared frame loads at the declared dimensions.
+    /// Dimensions in `case.toml` are *post-rotation*: for a portrait
+    /// 1080×1920 source loaded with 90° rotation, declare
+    /// `frame_width = 1920`, `frame_height = 1080`.
     pub fn check_frames_load(case: &CaseSpec) {
         let filenames: Vec<String> = case
             .case
@@ -300,31 +342,23 @@ mod harness {
             case.case.frame_count,
             filenames.len()
         );
-        let (expected_w, expected_h) = match case.case.source_rotation_deg {
-            0 | 180 => (case.case.frame_width, case.case.frame_height),
-            90 | 270 => (case.case.frame_height, case.case.frame_width),
-            other => panic!(
-                "case {}: source_rotation_deg must be 0|90|180|270, got {other}",
-                case.case.name
-            ),
-        };
         for filename in &filenames {
             let f = load_case_frame(case, filename);
             assert_eq!(
                 f.width(),
-                expected_w,
-                "{}: width = {} expected {}",
+                case.case.frame_width,
+                "{}: width = {} expected {} (post-rotation)",
                 filename,
                 f.width(),
-                expected_w
+                case.case.frame_width
             );
             assert_eq!(
                 f.height(),
-                expected_h,
-                "{}: height = {} expected {}",
+                case.case.frame_height,
+                "{}: height = {} expected {} (post-rotation)",
                 filename,
                 f.height(),
-                expected_h
+                case.case.frame_height
             );
         }
     }

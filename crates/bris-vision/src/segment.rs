@@ -239,6 +239,24 @@ fn build_session(path: &Path) -> Result<Mutex<Session>, String> {
 ///
 /// See [`SegmentError`].
 pub fn segment(image_path: &Path) -> Result<SegmentationMask, SegmentError> {
+    segment_with_rotation(image_path, crate::Rotation::Deg0)
+}
+
+/// Run inference on a source image, applying `rotation` (clockwise
+/// degrees) to the loaded RGB before feeding it to the model.
+///
+/// This exists so [`detect_horizon_via_segmentation`] can produce a
+/// mask whose coordinates align with a [`Frame`] that was
+/// loaded-and-rotated for portrait support. Callers that don't care
+/// about rotation should use [`segment`].
+///
+/// # Errors
+///
+/// See [`SegmentError`].
+pub fn segment_with_rotation(
+    image_path: &Path,
+    rotation: crate::Rotation,
+) -> Result<SegmentationMask, SegmentError> {
     let session_mutex = MODEL
         .get()
         .ok_or_else(|| SegmentError::LoadFailed("model not loaded; call load_model first".into()))?
@@ -246,7 +264,7 @@ pub fn segment(image_path: &Path) -> Result<SegmentationMask, SegmentError> {
         .map_err(|e| SegmentError::LoadFailed(e.clone()))?;
     let mut session = session_mutex.lock().map_err(|_| SegmentError::Poisoned)?;
 
-    let arr = image_path_to_input_array(image_path)?;
+    let arr = image_path_to_input_array(image_path, rotation)?;
     let input =
         Tensor::from_array(arr).map_err(|e| SegmentError::InferenceFailed(e.to_string()))?;
     let outputs = session
@@ -318,7 +336,7 @@ pub fn detect_horizon_via_segmentation(
                 .into(),
         )
     })?;
-    let mask = segment(path)?;
+    let mask = segment_with_rotation(path, frame.source_rotation)?;
 
     // Use the obstruction-aware transition extractor and accept
     // SkyToSea + SkyToObstructionToSea (thin obstruction = distant
@@ -357,14 +375,27 @@ pub fn detect_horizon_via_segmentation(
 }
 
 /// Build the (1, 3, `INFERENCE_SIZE`, `INFERENCE_SIZE`) RGB f32 array
-/// the model expects, by loading the original color image from disk.
-fn image_path_to_input_array(path: &Path) -> Result<ndarray::Array4<f32>, SegmentError> {
+/// the model expects, by loading the original color image from disk
+/// and applying `rotation` (clockwise degrees) before resize.
+fn image_path_to_input_array(
+    path: &Path,
+    rotation: crate::Rotation,
+) -> Result<ndarray::Array4<f32>, SegmentError> {
     const MEAN: [f32; 3] = [0.485, 0.456, 0.406];
     const STD: [f32; 3] = [0.229, 0.224, 0.225];
 
     let img = image::open(path)
         .map_err(|e| SegmentError::InferenceFailed(format!("load color image: {e}")))?
         .to_rgb8();
+    // Apply the same rotation the grayscale loader applied so the
+    // mask coordinates align with the rotated Frame. `image::imageops`
+    // rotations are clockwise, matching our [`Rotation`] convention.
+    let img = match rotation {
+        crate::Rotation::Deg0 => img,
+        crate::Rotation::Deg90 => image::imageops::rotate90(&img),
+        crate::Rotation::Deg180 => image::imageops::rotate180(&img),
+        crate::Rotation::Deg270 => image::imageops::rotate270(&img),
+    };
     let resized = image::imageops::resize(
         &img,
         INFERENCE_SIZE as u32,

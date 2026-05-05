@@ -23,7 +23,7 @@
     clippy::cast_sign_loss
 )]
 
-use crate::frame::{Frame, FrameError, Intrinsics};
+use crate::frame::{rotate_pixels, Frame, FrameError, Intrinsics, Rotation};
 use bris_core::time::Tt;
 use std::path::Path;
 
@@ -39,7 +39,12 @@ pub enum LoadError {
     Frame(#[from] FrameError),
 }
 
-/// Load a frame from a path. Color images are converted to grayscale.
+/// Load a frame from a path with no rotation. Convenience wrapper
+/// over [`load_frame_from_path_with_rotation`] for callers that
+/// only deal with landscape input.
+///
+/// Color images are converted to grayscale via BT.709 luma. The
+/// loaded frame's `source_rotation` is [`Rotation::Deg0`].
 ///
 /// `capture_tt` and `intrinsics` come from external metadata (saved
 /// alongside the frame, or set by the caller). The image file itself
@@ -54,9 +59,44 @@ pub fn load_frame_from_path<P: AsRef<Path>>(
     exposure_us: u32,
     intrinsics: Intrinsics,
 ) -> Result<Frame, LoadError> {
+    load_frame_from_path_with_rotation(path, capture_tt, exposure_us, intrinsics, Rotation::Deg0)
+}
+
+/// Load a frame from a path, applying the given rotation to the
+/// pixel buffer at load time.
+///
+/// `intrinsics` must describe the camera in the *internal*
+/// (post-rotation) frame. For the default placeholder intrinsics,
+/// pass dimensions in post-rotation order (i.e. for 90°/270°
+/// rotation of a portrait source, swap source width and height).
+/// The loaded frame records the applied rotation in
+/// [`Frame::source_rotation`].
+///
+/// # Errors
+///
+/// See [`LoadError`].
+pub fn load_frame_from_path_with_rotation<P: AsRef<Path>>(
+    path: P,
+    capture_tt: Tt,
+    exposure_us: u32,
+    intrinsics: Intrinsics,
+    rotation: Rotation,
+) -> Result<Frame, LoadError> {
     let dyn_img = image::open(path.as_ref())?;
-    let (width, height) = (dyn_img.width(), dyn_img.height());
-    let pixels = match dyn_img {
+    let (src_w, src_h) = (dyn_img.width(), dyn_img.height());
+    let pixels = decode_to_luma16(dyn_img);
+    let (rotated, w, h) = rotate_pixels(&pixels, src_w, src_h, rotation);
+    let frame = Frame::new(w, h, rotated, capture_tt, exposure_us, intrinsics)?
+        .with_source_rotation(rotation);
+    Ok(frame)
+}
+
+/// Decode any [`image::DynamicImage`] variant down to row-major
+/// `Vec<u16>` BT.709 luminance. Extracted from
+/// [`load_frame_from_path_with_rotation`] so the rotation step has
+/// a clean buffer to operate on.
+fn decode_to_luma16(dyn_img: image::DynamicImage) -> Vec<u16> {
+    match dyn_img {
         image::DynamicImage::ImageLuma8(buf) => widen_8_to_16(buf.into_raw()),
         image::DynamicImage::ImageLuma16(buf) => buf.into_raw(),
         image::DynamicImage::ImageRgb8(buf) => rgb8_to_luma16(&buf.into_raw()),
@@ -90,16 +130,7 @@ pub fn load_frame_from_path<P: AsRef<Path>>(
         // Other formats (Rgb32F, etc.) are exotic; convert via the
         // crate's helper to Luma8 then widen.
         other => widen_8_to_16(other.to_luma8().into_raw()),
-    };
-
-    Ok(Frame::new(
-        width,
-        height,
-        pixels,
-        capture_tt,
-        exposure_us,
-        intrinsics,
-    )?)
+    }
 }
 
 /// Widen u8 pixels to u16 by replicating the high byte to the low byte.
@@ -244,5 +275,77 @@ mod tests {
             placeholder_intrinsics(1, 1),
         );
         assert!(r.is_err());
+    }
+
+    #[test]
+    fn load_with_rotation_90_swaps_dims_and_records_rotation() {
+        // Synthesize a small grayscale image: 4 wide × 2 tall.
+        // After 90° CW load it should be 2 wide × 4 tall, and the
+        // frame should record source_rotation = Deg90.
+        let buf = image::ImageBuffer::<image::Luma<u8>, _>::from_fn(4, 2, |x, y| {
+            image::Luma([(x + y * 4) as u8])
+        });
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let path = tmp.path().with_extension("png");
+        buf.save_with_format(&path, image::ImageFormat::Png)
+            .unwrap();
+
+        let loaded = load_frame_from_path_with_rotation(
+            &path,
+            Tt::from_julian_date(JD_J2000),
+            0,
+            placeholder_intrinsics(2, 4), // post-rotation dims
+            Rotation::Deg90,
+        )
+        .unwrap();
+        assert_eq!(loaded.width(), 2);
+        assert_eq!(loaded.height(), 4);
+        assert_eq!(loaded.source_rotation, Rotation::Deg90);
+
+        // Verify pixel mapping. Source row 1 (y=1, values 4 5 6 7)
+        // becomes destination column 0 (x=0, top-to-bottom). Each
+        // source pixel was widened by ×257.
+        // After 90° CW with our convention:
+        //   src (0,1)=4 → dst (0,0)
+        //   src (0,0)=0 → dst (0,1)? — no, our convention rotates so
+        //   the bottom-left source pixel becomes the top-left
+        //   destination pixel. Let's just check that the four corners
+        //   land where rotate_pixels said they would.
+        // Reuse rotate_pixels for the expectation so this test is
+        // about the loader-vs-rotator wiring, not the rotation math
+        // itself (which has its own dedicated tests in frame.rs).
+        let src_pixels: Vec<u16> = (0..8u16).map(|v| v * 257).collect();
+        let (expected, _, _) = rotate_pixels(&src_pixels, 4, 2, Rotation::Deg90);
+        assert_eq!(loaded.pixels(), expected.as_slice());
+    }
+
+    #[test]
+    fn load_with_rotation_zero_matches_unrotated_loader() {
+        let buf = image::ImageBuffer::<image::Luma<u8>, _>::from_fn(4, 2, |x, y| {
+            image::Luma([(x + y * 4) as u8])
+        });
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let path = tmp.path().with_extension("png");
+        buf.save_with_format(&path, image::ImageFormat::Png)
+            .unwrap();
+
+        let a = load_frame_from_path(
+            &path,
+            Tt::from_julian_date(JD_J2000),
+            0,
+            placeholder_intrinsics(4, 2),
+        )
+        .unwrap();
+        let b = load_frame_from_path_with_rotation(
+            &path,
+            Tt::from_julian_date(JD_J2000),
+            0,
+            placeholder_intrinsics(4, 2),
+            Rotation::Deg0,
+        )
+        .unwrap();
+        assert_eq!(a.pixels(), b.pixels());
+        assert_eq!(a.width(), b.width());
+        assert_eq!(a.height(), b.height());
     }
 }

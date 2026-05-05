@@ -73,9 +73,12 @@ name                = "my_scene"          # must match directory name
 description         = "..."
 kind                = "working"           # working | expected_failure | expected_low_confidence
 frame_count         = 1
-frame_width         = 640
-frame_height        = 360
-source_rotation_deg = 0                   # 0 | 90 | 180 | 270; loader rotation TBD
+frame_width         = 640                 # post-rotation
+frame_height        = 360                 # post-rotation
+source_rotation_deg = 0                   # 0 | 90 | 180 | 270
+auto_rotate         = true                # default true; when source_rotation_deg = 0,
+                                          # auto-derive 90° CW for portrait sources
+                                          # (h ≥ 1.2·w). Set false to force no rotation.
 frames              = ["frame.png"]       # optional; defaults to ["frame.png"]
 
 [reference_observer]

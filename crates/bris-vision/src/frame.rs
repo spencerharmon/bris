@@ -30,6 +30,156 @@
 use bris_core::time::Tt;
 use core::num::NonZeroU32;
 
+/// Rotation applied to source pixels at load time, in degrees
+/// clockwise.
+///
+/// Frames captured in portrait orientation (phones in their natural
+/// hold) violate the pipeline's "horizon is approximately
+/// horizontal" assumption that's baked into the
+/// `y = slope·x + intercept` parameterization in
+/// [`crate::horizon::HorizonLine`] and the per-column scanning in
+/// every horizon detector. Rather than refactor the entire pipeline
+/// to a normal-form line representation, we rotate the pixel buffer
+/// at load time so the *internal* frame is always landscape with
+/// the horizon roughly horizontal.
+///
+/// [`Frame::source_rotation`] records which rotation was applied so
+/// downstream code that needs to talk about source-image coordinates
+/// (currently just the segmentation detector, which re-loads the
+/// original file from disk) can map back.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub enum Rotation {
+    /// No rotation. Source pixels are the internal pixels.
+    #[default]
+    Deg0,
+    /// 90° clockwise. A portrait source becomes a landscape internal
+    /// frame; the source's top edge is the internal frame's right
+    /// edge.
+    Deg90,
+    /// 180°.
+    Deg180,
+    /// 270° clockwise (equivalently 90° counter-clockwise). The
+    /// source's top edge is the internal frame's left edge.
+    Deg270,
+}
+
+impl Rotation {
+    /// Heuristic: if the source aspect ratio is portrait by a margin
+    /// (h ≥ 1.2 × w), return [`Rotation::Deg90`]. Otherwise
+    /// [`Rotation::Deg0`]. Phone captures are typically 9:16 or 3:4
+    /// portrait; the 1.2 margin avoids spurious rotation on
+    /// near-square frames where either orientation is fine.
+    ///
+    /// The direction (CW vs. CCW) is chosen to match the modal
+    /// phone-in-hand case where the volume buttons point up. EXIF
+    /// orientation, when we read it (not yet — there's no EXIF
+    /// dependency in the workspace), should override this heuristic.
+    #[must_use]
+    pub fn auto_for_aspect(width: u32, height: u32) -> Self {
+        if u64::from(height) * 5 >= u64::from(width) * 6 {
+            Self::Deg90
+        } else {
+            Self::Deg0
+        }
+    }
+
+    /// Degrees as a `u16`, for serialization.
+    #[must_use]
+    pub fn degrees(self) -> u16 {
+        match self {
+            Self::Deg0 => 0,
+            Self::Deg90 => 90,
+            Self::Deg180 => 180,
+            Self::Deg270 => 270,
+        }
+    }
+
+    /// Parse from degrees. Only 0/90/180/270 are accepted.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err(degrees)` for any other value.
+    pub fn from_degrees(degrees: u16) -> Result<Self, u16> {
+        match degrees {
+            0 => Ok(Self::Deg0),
+            90 => Ok(Self::Deg90),
+            180 => Ok(Self::Deg180),
+            270 => Ok(Self::Deg270),
+            other => Err(other),
+        }
+    }
+}
+
+/// Rotate a row-major pixel buffer. Returns the rotated buffer plus
+/// its new (width, height).
+///
+/// `Rotation::Deg0` returns a clone of the original buffer with
+/// dimensions unchanged. The other rotations allocate a new buffer;
+/// the pipeline only does this once per loaded frame so the cost is
+/// amortized over all subsequent processing.
+///
+/// We compute by walking the destination buffer and reading the
+/// corresponding source pixel — easier to reason about than
+/// computing forward maps that have to invert orientation.
+#[must_use]
+pub fn rotate_pixels(
+    pixels: &[u16],
+    src_w: u32,
+    src_h: u32,
+    rotation: Rotation,
+) -> (Vec<u16>, u32, u32) {
+    match rotation {
+        Rotation::Deg0 => (pixels.to_vec(), src_w, src_h),
+        Rotation::Deg90 => {
+            let (dst_w, dst_h) = (src_h, src_w);
+            let mut out = vec![0u16; pixels.len()];
+            for y in 0..dst_h {
+                for x in 0..dst_w {
+                    // Internal (x, y) maps from source
+                    // (src_x, src_y) where src_x = y and
+                    // src_y = src_h - 1 - x. Derived: 90° CW takes
+                    // a source row into a destination column,
+                    // reading bottom-to-top.
+                    let src_x = y;
+                    let src_y = src_h - 1 - x;
+                    let src_idx = (src_y as usize) * (src_w as usize) + (src_x as usize);
+                    let dst_idx = (y as usize) * (dst_w as usize) + (x as usize);
+                    out[dst_idx] = pixels[src_idx];
+                }
+            }
+            (out, dst_w, dst_h)
+        }
+        Rotation::Deg180 => {
+            let mut out = vec![0u16; pixels.len()];
+            for y in 0..src_h {
+                for x in 0..src_w {
+                    let src_x = src_w - 1 - x;
+                    let src_y = src_h - 1 - y;
+                    let src_idx = (src_y as usize) * (src_w as usize) + (src_x as usize);
+                    let dst_idx = (y as usize) * (src_w as usize) + (x as usize);
+                    out[dst_idx] = pixels[src_idx];
+                }
+            }
+            (out, src_w, src_h)
+        }
+        Rotation::Deg270 => {
+            let (dst_w, dst_h) = (src_h, src_w);
+            let mut out = vec![0u16; pixels.len()];
+            for y in 0..dst_h {
+                for x in 0..dst_w {
+                    // 270° CW = 90° CCW. Mirror of the Deg90 mapping.
+                    let src_x = src_w - 1 - y;
+                    let src_y = x;
+                    let src_idx = (src_y as usize) * (src_w as usize) + (src_x as usize);
+                    let dst_idx = (y as usize) * (dst_w as usize) + (x as usize);
+                    out[dst_idx] = pixels[src_idx];
+                }
+            }
+            (out, dst_w, dst_h)
+        }
+    }
+}
+
 /// Camera intrinsics (lens parameters) under which a frame was captured.
 ///
 /// Pinhole + Brown-Conrady distortion. Concrete distortion-coefficient
@@ -107,6 +257,14 @@ pub struct Frame {
     /// to grayscale-replicated input with the documented quality
     /// hit, or returns an error — caller's choice.
     pub source_path: Option<std::path::PathBuf>,
+    /// Rotation that was applied to the source pixels at load time
+    /// to produce the internal frame. `Deg0` for landscape captures
+    /// loaded as-is; `Deg90` etc. for portrait or otherwise-rotated
+    /// captures the loader rotated to match the pipeline's
+    /// "horizon-roughly-horizontal" assumption. The segmentation
+    /// detector consumes this so it can re-load and re-rotate the
+    /// source RGB to match the internal frame.
+    pub source_rotation: Rotation,
 }
 
 impl Frame {
@@ -146,6 +304,7 @@ impl Frame {
             exposure_us,
             intrinsics,
             source_path: None,
+            source_rotation: Rotation::Deg0,
         })
     }
 
@@ -155,6 +314,16 @@ impl Frame {
     #[must_use]
     pub fn with_source_path(mut self, path: std::path::PathBuf) -> Self {
         self.source_path = Some(path);
+        self
+    }
+
+    /// Record the rotation that was applied to the source pixels at
+    /// load time. Defaults to [`Rotation::Deg0`] (no rotation). The
+    /// segmentation detector consults this to re-rotate the
+    /// re-loaded source RGB to match the internal frame.
+    #[must_use]
+    pub fn with_source_rotation(mut self, rotation: Rotation) -> Self {
+        self.source_rotation = rotation;
         self
     }
 
@@ -298,5 +467,131 @@ mod tests {
         assert!((i.cx - 320.0).abs() < 1e-12);
         assert!((i.cy - 240.0).abs() < 1e-12);
         assert!(i.k1.abs() < 1e-12 && i.k2.abs() < 1e-12 && i.k3.abs() < 1e-12);
+    }
+
+    // -----------------------------------------------------------------
+    // Rotation
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn rotation_round_trip_via_degrees() {
+        for r in [
+            Rotation::Deg0,
+            Rotation::Deg90,
+            Rotation::Deg180,
+            Rotation::Deg270,
+        ] {
+            assert_eq!(Rotation::from_degrees(r.degrees()), Ok(r));
+        }
+        assert_eq!(Rotation::from_degrees(45), Err(45));
+        assert_eq!(Rotation::from_degrees(360), Err(360));
+    }
+
+    #[test]
+    fn auto_for_aspect_picks_landscape_for_landscape_input() {
+        assert_eq!(Rotation::auto_for_aspect(640, 360), Rotation::Deg0);
+        assert_eq!(Rotation::auto_for_aspect(1920, 1080), Rotation::Deg0);
+        // Square is left as-is.
+        assert_eq!(Rotation::auto_for_aspect(500, 500), Rotation::Deg0);
+        // Just below the 6:5 threshold.
+        assert_eq!(Rotation::auto_for_aspect(500, 599), Rotation::Deg0);
+    }
+
+    #[test]
+    fn auto_for_aspect_picks_rotation_for_portrait_input() {
+        // 9:16 cellphone capture
+        assert_eq!(Rotation::auto_for_aspect(1080, 1920), Rotation::Deg90);
+        // 3:4 phone capture
+        assert_eq!(Rotation::auto_for_aspect(960, 1280), Rotation::Deg90);
+        // Threshold case (h:w = 6:5)
+        assert_eq!(Rotation::auto_for_aspect(500, 600), Rotation::Deg90);
+        // 4:5 portrait crop (h:w = 1.25, above the 1.2 threshold).
+        assert_eq!(Rotation::auto_for_aspect(400, 500), Rotation::Deg90);
+    }
+
+    #[test]
+    fn rotate_pixels_zero_is_identity() {
+        let pixels: Vec<u16> = (0..12).collect();
+        let (out, w, h) = rotate_pixels(&pixels, 4, 3, Rotation::Deg0);
+        assert_eq!((w, h), (4, 3));
+        assert_eq!(out, pixels);
+    }
+
+    #[test]
+    fn rotate_pixels_180_is_reverse() {
+        let pixels: Vec<u16> = (0..12).collect();
+        let (out, w, h) = rotate_pixels(&pixels, 4, 3, Rotation::Deg180);
+        assert_eq!((w, h), (4, 3));
+        let expected: Vec<u16> = (0..12).rev().collect();
+        assert_eq!(out, expected);
+    }
+
+    #[test]
+    fn rotate_pixels_90_then_270_is_identity() {
+        // Use a non-symmetric pattern so we'd notice a transposition
+        // bug: 4 wide × 3 tall, values 0..12 row-major.
+        let pixels: Vec<u16> = (0..12).collect();
+        let (rot90, w90, h90) = rotate_pixels(&pixels, 4, 3, Rotation::Deg90);
+        assert_eq!((w90, h90), (3, 4));
+        let (rot_back, wb, hb) = rotate_pixels(&rot90, w90, h90, Rotation::Deg270);
+        assert_eq!((wb, hb), (4, 3));
+        assert_eq!(rot_back, pixels, "90° CW then 270° CW should be identity");
+    }
+
+    #[test]
+    fn rotate_pixels_90_specific_values() {
+        // 2×3 image (w=2, h=3), values:
+        //   0 1
+        //   2 3
+        //   4 5
+        // After 90° CW it should be 3×2 (w=3, h=2):
+        //   4 2 0
+        //   5 3 1
+        // (the bottom row of the source becomes the left column of
+        // the destination, top-to-bottom).
+        let pixels: Vec<u16> = vec![0, 1, 2, 3, 4, 5];
+        let (out, w, h) = rotate_pixels(&pixels, 2, 3, Rotation::Deg90);
+        assert_eq!((w, h), (3, 2));
+        assert_eq!(out, vec![4, 2, 0, 5, 3, 1]);
+    }
+
+    #[test]
+    fn rotate_pixels_270_specific_values() {
+        // Same source as above. 270° CW = 90° CCW, so:
+        //   0 1            1 3 5
+        //   2 3   becomes  0 2 4
+        //   4 5
+        let pixels: Vec<u16> = vec![0, 1, 2, 3, 4, 5];
+        let (out, w, h) = rotate_pixels(&pixels, 2, 3, Rotation::Deg270);
+        assert_eq!((w, h), (3, 2));
+        assert_eq!(out, vec![1, 3, 5, 0, 2, 4]);
+    }
+
+    #[test]
+    #[allow(clippy::many_single_char_names)]
+    fn rotate_pixels_four_90s_is_identity() {
+        let pixels: Vec<u16> = (0..12).collect();
+        let (a, w, h) = rotate_pixels(&pixels, 4, 3, Rotation::Deg90);
+        let (b, w, h) = rotate_pixels(&a, w, h, Rotation::Deg90);
+        let (c, w, h) = rotate_pixels(&b, w, h, Rotation::Deg90);
+        let (d, w, h) = rotate_pixels(&c, w, h, Rotation::Deg90);
+        assert_eq!((w, h), (4, 3));
+        assert_eq!(d, pixels);
+    }
+
+    #[test]
+    fn frame_records_source_rotation() {
+        let f = Frame::new(
+            4,
+            3,
+            vec![0u16; 12],
+            Tt::from_julian_date(JD_J2000),
+            0,
+            dummy_intrinsics(),
+        )
+        .unwrap();
+        assert_eq!(f.source_rotation, Rotation::Deg0);
+        let f2 = f.with_source_rotation(Rotation::Deg90);
+        assert_eq!(f2.source_rotation, Rotation::Deg90);
     }
 }

@@ -21,19 +21,22 @@ pub use centroid::{
     centroid_brightest_body, centroid_brightest_body_in_mask, Centroid, CentroidConfig,
     CentroidError,
 };
-pub use frame::{Frame, FrameError, Intrinsics};
+pub use frame::{rotate_pixels, Frame, FrameError, Intrinsics, Rotation};
 pub use fusion::{fuse_altitudes, FrameMeasurement, FusionConfig, FusionError};
 pub use horizon::{
     detect_horizon, detect_horizon_via_sky_region, HorizonConfig, HorizonError, HorizonLine,
 };
-pub use io::{load_frame_from_path, save_frame_as_png, LoadError};
+pub use io::{
+    load_frame_from_path, load_frame_from_path_with_rotation, save_frame_as_png, LoadError,
+};
 pub use lens::{distort_normalized, pixel_ray_direction, project_pinhole, undistort_pixel};
 pub use measure::{measure_altitude, MeasurementError};
 pub use panorama::{panorama_altitude, panorama_altitude_with_detector, FrameRoles, PanoramaError};
 pub use peak::{detect_peaks, Peak, PeakConfig};
 #[cfg(feature = "segmentation")]
 pub use segment::{
-    detect_horizon_via_segmentation, load_model, segment, SegmentError, SegmentationMask,
+    detect_horizon_via_segmentation, load_model, segment, segment_with_rotation, SegmentError,
+    SegmentationMask,
 };
 pub use track::{
     detect_corners, track, track_peaks, Corner, RigidTransform, TrackConfig, TrackError,
