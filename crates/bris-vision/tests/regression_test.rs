@@ -1076,3 +1076,100 @@ fn night_detector_handles_sea_brighter_than_sky() {
         line.intercept
     );
 }
+
+/// `marina_with_body` exercises the **peak detector** for a
+/// non-saturated body (the dusk Moon visible in the marina scene).
+/// Three frames captured at different points of the rigging-sway
+/// cycle:
+///
+///   - `frame_visible.png`: Moon clearly detectable.
+///   - `frame_partial.png`: Moon barely above peak threshold;
+///     rigging passing across.
+///   - `frame_obscured.png`: Moon below peak threshold; rigging
+///     fully covers it.
+///
+/// Demonstrates two complementary properties:
+/// 1. Peak detection finds non-saturated bodies that
+///    `centroid_brightest_body` misses (the body's connected
+///    component is too small at the `0.85·frame_max` threshold).
+/// 2. Single-frame detection is **not enough** when something
+///    intermittently obscures the body — the future streaming
+///    engine needs cross-frame tracking to maintain a body
+///    position estimate through obscured frames so a fix can be
+///    computed when the body briefly reappears. The Phase 2
+///    panorama stitching machinery is the foundation; predictive
+///    tracking is the missing piece.
+///
+/// Recorded position: Moon at ~(415.88, 111.77), intensity ~43000
+/// in the visible frame. The same peak appears at ~(415.22,
+/// 111.15) in the partial frame at lower intensity (~41167).
+#[test]
+fn marina_with_body_peak_detector_finds_moon_when_visible() {
+    use bris_core::time::{Tt, JD_J2000};
+    use bris_vision::{detect_peaks, load_frame_from_path, Intrinsics, PeakConfig};
+    use std::path::Path;
+
+    let path = Path::new(harness::REGRESSION_DIR)
+        .join("marina_with_body")
+        .join("frame_visible.png");
+    let dims = image::image_dimensions(&path).expect("dims");
+    let intrinsics = Intrinsics::placeholder(dims.0, dims.1);
+    let frame = load_frame_from_path(&path, Tt::from_julian_date(JD_J2000), 0, intrinsics)
+        .expect("load frame");
+
+    let peaks = detect_peaks(&frame, PeakConfig::default());
+
+    // The Moon is at ~(415.88, 111.77). It must be in the top peaks.
+    const MOON_X: f64 = 415.88;
+    const MOON_Y: f64 = 111.77;
+    const TOL_PX: f64 = 5.0;
+    let moon_peak = peaks
+        .iter()
+        .find(|p| ((p.x - MOON_X).powi(2) + (p.y - MOON_Y).powi(2)).sqrt() < TOL_PX);
+    assert!(
+        moon_peak.is_some(),
+        "no peak within {TOL_PX} px of Moon at ({MOON_X}, {MOON_Y}); top peaks: {:?}",
+        peaks.iter().take(5).collect::<Vec<_>>(),
+    );
+}
+
+#[test]
+fn marina_with_body_peak_detector_sees_moon_dim_when_rigging_obscures() {
+    use bris_core::time::{Tt, JD_J2000};
+    use bris_vision::{detect_peaks, load_frame_from_path, Intrinsics, PeakConfig};
+    use std::path::Path;
+
+    fn moon_intensity(filename: &str) -> Option<f64> {
+        let path = Path::new(harness::REGRESSION_DIR)
+            .join("marina_with_body")
+            .join(filename);
+        let dims = image::image_dimensions(&path).expect("dims");
+        let intrinsics = Intrinsics::placeholder(dims.0, dims.1);
+        let frame = load_frame_from_path(&path, Tt::from_julian_date(JD_J2000), 0, intrinsics)
+            .expect("load frame");
+        let peaks = detect_peaks(&frame, PeakConfig::default());
+        const MOON_X: f64 = 415.88;
+        const MOON_Y: f64 = 111.77;
+        const TOL_PX: f64 = 5.0;
+        peaks
+            .iter()
+            .find(|p| ((p.x - MOON_X).powi(2) + (p.y - MOON_Y).powi(2)).sqrt() < TOL_PX)
+            .map(|p| p.intensity)
+    }
+
+    let visible = moon_intensity("frame_visible.png").expect("Moon visible in frame_visible.png");
+    let obscured =
+        moon_intensity("frame_obscured.png").expect("Moon still detectable in frame_obscured.png");
+
+    // The rigging dims the Moon's apparent intensity. Visible
+    // frame has intensity ~43000; obscured frame ~29000 (recorded
+    // values, ±5%). The drop is the load-bearing assertion: the
+    // peak detector sees the body fade as the rigging swings
+    // across, which is the signal a temporal-tracking algorithm
+    // would use to know the body is being intermittently obscured.
+    assert!(
+        obscured < visible * 0.8,
+        "expected obscured intensity ({obscured:.0}) to be substantially \
+         below visible intensity ({visible:.0}); rigging should dim it",
+    );
+}

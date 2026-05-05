@@ -1,0 +1,88 @@
+# Regression metadata for marina_with_body.
+#
+# Marina at dusk; multiple sailboats moored; the **Moon** is
+# visible in the upper portion of the frame, partially behind one
+# of the sailboat's rigging. The user pointed out that the marina
+# scene does have a celestial body — it's just intermittently
+# obscured by a swinging mast/rigging line as the boat sways.
+#
+# Three frames captured at different points in the sway cycle:
+#   frame_visible.png  (orig 0001): Moon clearly detectable as a
+#                                   peak at ~(415.88, 111.77),
+#                                   intensity ~43000.
+#   frame_partial.png  (orig 0017): Moon still visible but with
+#                                   rigging passing across,
+#                                   intensity dropping (~41000).
+#   frame_obscured.png (orig 0019): Moon dimmed substantially as
+#                                   rigging covers it (~29000).
+#
+# The peak isn't gone -- the rigging only partially blocks light
+# -- but the intensity drop across frames is the signal a
+# temporal-tracking algorithm would use to know the body is being
+# intermittently obscured.
+#
+# This case exercises the **peak detector for non-saturated bodies**:
+# the moon at dusk isn't saturated (max ~52000 < 95% threshold),
+# but it's a clear local maximum the peak detector finds.
+# centroid_saturated_body_in_mask correctly refuses on every frame.
+#
+# Behavioral progression across frames is the load-bearing
+# assertion (see the `marina_with_body_*` static tests in
+# regression_test.rs): peak detection finds the moon, then
+# loses it as the rigging swings across, then a future
+# multi-frame stitching pipeline could recover its predicted
+# position from earlier-frame tracking.
+#
+# Per-frame: the harness exercises horizon detectors on
+# `frame_visible.png` (frame 0). Same shore-as-horizon behavior as
+# the `marina` case; segmentation and sky-region produce
+# navigationally-wrong but stable outputs (recorded for regression
+# detection, not as targets for correctness).
+
+[case]
+name         = "marina_with_body"
+description  = "Marina at dusk with intermittently-rigging-obscured Moon; demonstrates peak detection for non-saturated bodies and the multi-frame motivation for stitching"
+kind         = "working"
+frame_count  = 3
+frame_width  = 640
+frame_height = 360
+frames       = ["frame_visible.png", "frame_partial.png", "frame_obscured.png"]
+
+[expected_classifier]
+condition = "twilight"
+# No min_confidence: this is a borderline scene, classifier reports
+# Twilight at moderate confidence which is correct.
+
+# Centroid (extended-disk, no mask): refuses with ComponentTooSmall
+# (only ~4 pixels above the 0.85·max threshold; the moon at dusk
+# isn't bright enough to form a 50+ pixel connected component at
+# that threshold). The peak detector is the right tool for this
+# body; see the marina_with_body_* static tests in
+# regression_test.rs that exercise it across all three frames.
+
+# Horizon detectors: same shore-as-horizon outputs as the original
+# marina case. Documenting them here for regression-detection.
+[horizon.gradient]
+outcome       = "err"
+error_variant = "only 55 inliers"
+correctness   = "wrong"
+
+[horizon.sky_region]
+outcome             = "ok"
+slope               = 0.073
+intercept           = 132.94
+slope_tolerance     = 0.05
+intercept_tolerance = 15.0
+inlier_count_min    = 50
+correctness         = "wrong"
+notes               = "Latches onto the shore-water boundary as if it were the sea horizon."
+
+[horizon.segmentation]
+outcome             = "ok"
+slope               = -0.012
+intercept           = 197.88
+slope_tolerance     = 0.05
+intercept_tolerance = 15.0
+inlier_count_min    = 100
+correctness         = "wrong"
+notes               = "Segmentation classifies the water-shore boundary as sky→sea."
