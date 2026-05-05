@@ -75,10 +75,11 @@ kind                = "working"           # working | expected_failure | expecte
 frame_count         = 1
 frame_width         = 640                 # post-rotation
 frame_height        = 360                 # post-rotation
-source_rotation_deg = 0                   # 0 | 90 | 180 | 270
-auto_rotate         = true                # default true; when source_rotation_deg = 0,
-                                          # auto-derive 90° CW for portrait sources
-                                          # (h ≥ 1.2·w). Set false to force no rotation.
+source_rotation_deg = 0                   # 0 | 90 | 180 | 270; default 0 (no rotation).
+                                          # Only override for fixtures whose bytes are stored
+                                          # in sensor-native orientation. Phone JPEGs and
+                                          # conventional camera images need 0 — the bytes
+                                          # are already in viewing orientation.
 frames              = ["frame.png"]       # optional; defaults to ["frame.png"]
 
 [reference_observer]

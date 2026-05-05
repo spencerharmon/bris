@@ -33,15 +33,33 @@ use core::num::NonZeroU32;
 /// Rotation applied to source pixels at load time, in degrees
 /// clockwise.
 ///
-/// Frames captured in portrait orientation (phones in their natural
-/// hold) violate the pipeline's "horizon is approximately
-/// horizontal" assumption that's baked into the
-/// `y = slope·x + intercept` parameterization in
-/// [`crate::horizon::HorizonLine`] and the per-column scanning in
-/// every horizon detector. Rather than refactor the entire pipeline
-/// to a normal-form line representation, we rotate the pixel buffer
-/// at load time so the *internal* frame is always landscape with
-/// the horizon roughly horizontal.
+/// The pipeline assumes that in the *internal* frame coordinate
+/// system the horizon runs left-to-right (parameterized as
+/// `y = slope·x + intercept` in [`crate::horizon::HorizonLine`]).
+/// This is the natural orientation for nearly any consumer image:
+/// phones encode photos in viewing orientation (often after
+/// applying EXIF orientation themselves), and conventional cameras
+/// save in landscape. **In all those cases no rotation is needed.**
+///
+/// Rotation is opt-in for two situations:
+///
+/// 1. **Capture pipelines** that read sensor pixels in their native
+///    orientation (e.g. raw V4L2 or libcamera streams from a
+///    sideways-mounted camera) and need to rotate before the rest
+///    of the pipeline sees the frame. The capture shell knows the
+///    device + sensor orientation and supplies the appropriate
+///    [`Rotation`] explicitly.
+/// 2. **Test fixtures or hand-edited inputs** where the saved bytes
+///    don't match viewing orientation. Regression cases declare
+///    rotation explicitly via `source_rotation_deg` in `case.toml`.
+///
+/// We deliberately do **not** auto-rotate based on aspect ratio:
+/// aspect cannot distinguish a 4:3 landscape from a 3:4 portrait
+/// (and EXIF, when we eventually read it, is the right source of
+/// truth for ambiguous cases anyway). When an image arrives in the
+/// wrong orientation and the pipeline produces nonsense, the
+/// detector errors will surface that fact loudly rather than the
+/// loader silently guessing.
 ///
 /// [`Frame::source_rotation`] records which rotation was applied so
 /// downstream code that needs to talk about source-image coordinates
@@ -52,37 +70,17 @@ pub enum Rotation {
     /// No rotation. Source pixels are the internal pixels.
     #[default]
     Deg0,
-    /// 90° clockwise. A portrait source becomes a landscape internal
-    /// frame; the source's top edge is the internal frame's right
-    /// edge.
+    /// 90° clockwise. Useful when the source bytes are in
+    /// sensor-native orientation and the sensor is mounted
+    /// rotated 90° CCW relative to the intended scene up.
     Deg90,
     /// 180°.
     Deg180,
-    /// 270° clockwise (equivalently 90° counter-clockwise). The
-    /// source's top edge is the internal frame's left edge.
+    /// 270° clockwise (equivalently 90° counter-clockwise).
     Deg270,
 }
 
 impl Rotation {
-    /// Heuristic: if the source aspect ratio is portrait by a margin
-    /// (h ≥ 1.2 × w), return [`Rotation::Deg90`]. Otherwise
-    /// [`Rotation::Deg0`]. Phone captures are typically 9:16 or 3:4
-    /// portrait; the 1.2 margin avoids spurious rotation on
-    /// near-square frames where either orientation is fine.
-    ///
-    /// The direction (CW vs. CCW) is chosen to match the modal
-    /// phone-in-hand case where the volume buttons point up. EXIF
-    /// orientation, when we read it (not yet — there's no EXIF
-    /// dependency in the workspace), should override this heuristic.
-    #[must_use]
-    pub fn auto_for_aspect(width: u32, height: u32) -> Self {
-        if u64::from(height) * 5 >= u64::from(width) * 6 {
-            Self::Deg90
-        } else {
-            Self::Deg0
-        }
-    }
-
     /// Degrees as a `u16`, for serialization.
     #[must_use]
     pub fn degrees(self) -> u16 {
@@ -485,28 +483,6 @@ mod tests {
         }
         assert_eq!(Rotation::from_degrees(45), Err(45));
         assert_eq!(Rotation::from_degrees(360), Err(360));
-    }
-
-    #[test]
-    fn auto_for_aspect_picks_landscape_for_landscape_input() {
-        assert_eq!(Rotation::auto_for_aspect(640, 360), Rotation::Deg0);
-        assert_eq!(Rotation::auto_for_aspect(1920, 1080), Rotation::Deg0);
-        // Square is left as-is.
-        assert_eq!(Rotation::auto_for_aspect(500, 500), Rotation::Deg0);
-        // Just below the 6:5 threshold.
-        assert_eq!(Rotation::auto_for_aspect(500, 599), Rotation::Deg0);
-    }
-
-    #[test]
-    fn auto_for_aspect_picks_rotation_for_portrait_input() {
-        // 9:16 cellphone capture
-        assert_eq!(Rotation::auto_for_aspect(1080, 1920), Rotation::Deg90);
-        // 3:4 phone capture
-        assert_eq!(Rotation::auto_for_aspect(960, 1280), Rotation::Deg90);
-        // Threshold case (h:w = 6:5)
-        assert_eq!(Rotation::auto_for_aspect(500, 600), Rotation::Deg90);
-        // 4:5 portrait crop (h:w = 1.25, above the 1.2 threshold).
-        assert_eq!(Rotation::auto_for_aspect(400, 500), Rotation::Deg90);
     }
 
     #[test]

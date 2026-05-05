@@ -90,32 +90,25 @@ mod harness {
         pub kind: CaseKind,
         pub frame_count: u32,
         /// Frame width *after* rotation (the dimensions the pipeline
-        /// sees). For a portrait phone capture rotated 90°, this is
-        /// the source's height.
+        /// sees). For a fixture whose bytes are stored sideways and
+        /// declared with `source_rotation_deg = 90`, this is the
+        /// post-rotation width (= source height).
         pub frame_width: u32,
         /// Frame height *after* rotation.
         pub frame_height: u32,
-        /// Rotation applied to the source pixels at load time, in
+        /// Rotation to apply to the source pixels at load time, in
         /// degrees clockwise. Accepts 0, 90, 180, 270. Defaults to
-        /// 0. When 0 and `auto_rotate` is true (the default), the
-        /// loader derives a rotation from the source's aspect ratio
-        /// (portrait → 90° CW).
+        /// 0 (no rotation): we trust that the saved bytes are in
+        /// viewing orientation, which is true for any phone-encoded
+        /// JPEG/PNG and any conventionally-saved camera image.
+        /// Override only for fixtures whose bytes are stored in
+        /// sensor-native orientation or otherwise off-axis.
         #[serde(default)]
         pub source_rotation_deg: u16,
-        /// When `source_rotation_deg = 0`, decides whether to
-        /// auto-detect rotation from source aspect ratio. Defaults
-        /// to true. Set to false to force "no rotation" on a
-        /// portrait-shaped source (rare; mostly for negative tests).
-        #[serde(default = "default_auto_rotate")]
-        pub auto_rotate: bool,
         /// Optional list of frame filenames in capture order. Defaults
         /// to `["frame.png"]` if absent.
         #[serde(default)]
         pub frames: Option<Vec<String>>,
-    }
-
-    fn default_auto_rotate() -> bool {
-        true
     }
 
     /// What the case is testing for. This is documentation; the
@@ -258,39 +251,28 @@ mod harness {
         toml::from_str(&text).unwrap_or_else(|e| panic!("parse {}: {e}", path.display()))
     }
 
-    /// Resolve the effective rotation for a case. Explicit non-zero
-    /// `source_rotation_deg` always wins; a zero value with
-    /// `auto_rotate = true` (the default) derives from source aspect.
-    pub fn resolve_rotation(case: &CaseSpec, src_w: u32, src_h: u32) -> Rotation {
-        match case.case.source_rotation_deg {
-            0 => {
-                if case.case.auto_rotate {
-                    Rotation::auto_for_aspect(src_w, src_h)
-                } else {
-                    Rotation::Deg0
-                }
-            }
-            other => Rotation::from_degrees(other).unwrap_or_else(|d| {
-                panic!(
-                    "case {}: source_rotation_deg must be 0|90|180|270, got {d}",
-                    case.case.name
-                )
-            }),
-        }
+    /// Resolve the effective rotation for a case from its declared
+    /// `source_rotation_deg`. Default is no rotation; only explicit
+    /// 90/180/270 trigger a rotation.
+    pub fn resolve_rotation(case: &CaseSpec) -> Rotation {
+        Rotation::from_degrees(case.case.source_rotation_deg).unwrap_or_else(|d| {
+            panic!(
+                "case {}: source_rotation_deg must be 0|90|180|270, got {d}",
+                case.case.name
+            )
+        })
     }
 
     /// Load a frame from a case directory. Honors the case's
-    /// `source_rotation_deg` (explicit) or derives a rotation from
-    /// the source's aspect ratio (when the case allows auto-rotate
-    /// and didn't declare an explicit rotation). The returned
-    /// `Frame` records the applied rotation.
+    /// declared `source_rotation_deg`. The returned `Frame` records
+    /// the applied rotation.
     pub fn load_case_frame(case: &CaseSpec, filename: &str) -> Frame {
         let path: PathBuf = Path::new(REGRESSION_DIR)
             .join(&case.case.name)
             .join(filename);
         let (src_w, src_h) = image::image_dimensions(&path)
             .unwrap_or_else(|e| panic!("dims {}: {e}", path.display()));
-        let rotation = resolve_rotation(case, src_w, src_h);
+        let rotation = resolve_rotation(case);
         // Intrinsics are placeholder for the regression corpus
         // (uncalibrated cameras). They must describe the post-
         // rotation frame so the principal point lands at the
