@@ -33,8 +33,9 @@ eye_height_m = 2.0
 capture_utc  = "2024-03-15T15:00:00Z"
 body         = "sun"
 
-# Day/night classifier expectation. Stub: the classifier module
-# doesn't exist yet, so this currently has no runtime effect.
+# Day/night classifier expectation. The image-only classifier is
+# run on frame 0; the astronomical-prior path lives in the engine
+# (which has access to bris-almanac) and is not exercised here.
 [expected_classifier]
 condition      = "day"
 min_confidence = 0.7

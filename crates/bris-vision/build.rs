@@ -114,6 +114,14 @@ fn emit_case_module(out: &mut String, case_name: &str, parsed: &ParsedCase) {
         out.push_str("    }\n\n");
     }
 
+    if parsed.expected_classifier.is_some() {
+        out.push_str("    #[test]\n");
+        out.push_str("    fn classifier() {\n");
+        out.push_str("        let case = harness::load_case(CASE);\n");
+        out.push_str("        harness::check_classifier(&case);\n");
+        out.push_str("    }\n\n");
+    }
+
     if let Some(h) = &parsed.horizon {
         if h.gradient.is_some() {
             out.push_str("    #[test]\n");
@@ -175,6 +183,8 @@ fn sanitize_mod(name: &str) -> String {
 struct ParsedCase {
     case: CaseMeta,
     #[serde(default)]
+    expected_classifier: Option<toml::Value>,
+    #[serde(default)]
     expected_centroid_frame0: Option<toml::Value>,
     #[serde(default)]
     horizon: Option<HorizonSection>,
@@ -185,8 +195,6 @@ struct ParsedCase {
     // accept any shape without us having to mirror the full schema.
     #[serde(default, rename = "reference_observer")]
     _reference_observer: Option<toml::Value>,
-    #[serde(default, rename = "expected_classifier")]
-    _expected_classifier: Option<toml::Value>,
     #[serde(default, rename = "fix")]
     _fix: Option<toml::Value>,
 }

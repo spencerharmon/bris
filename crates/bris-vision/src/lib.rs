@@ -5,6 +5,7 @@
 //! Phase 2 for design.
 
 pub mod centroid;
+pub mod condition;
 pub mod frame;
 pub mod fusion;
 pub mod horizon;
@@ -20,6 +21,10 @@ pub mod track;
 pub use centroid::{
     centroid_brightest_body, centroid_brightest_body_in_mask, Centroid, CentroidConfig,
     CentroidError,
+};
+pub use condition::{
+    classify, AstronomicalEvidence, Classification, Condition, ConditionConfig, ImageEvidence,
+    TwilightBand,
 };
 pub use frame::{rotate_pixels, Frame, FrameError, Intrinsics, Rotation};
 pub use fusion::{fuse_altitudes, FrameMeasurement, FusionConfig, FusionError};

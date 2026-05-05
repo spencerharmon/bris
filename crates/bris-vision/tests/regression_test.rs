@@ -50,9 +50,9 @@ mod harness {
 
     use bris_core::time::{Tt, JD_J2000};
     use bris_vision::{
-        centroid_brightest_body, detect_horizon, detect_horizon_via_sky_region,
-        load_frame_from_path_with_rotation, CentroidConfig, Frame, HorizonConfig, HorizonError,
-        HorizonLine, Intrinsics, Rotation,
+        centroid_brightest_body, classify, detect_horizon, detect_horizon_via_sky_region,
+        load_frame_from_path_with_rotation, CentroidConfig, Condition, ConditionConfig, Frame,
+        HorizonConfig, HorizonError, HorizonLine, Intrinsics, Rotation,
     };
 
     #[cfg(feature = "segmentation")]
@@ -130,10 +130,14 @@ mod harness {
         pub body: String,
     }
 
-    /// Day/night/twilight classifier expectation. Asserted only if
-    /// `[expected_classifier]` is present. Until the classifier
-    /// module lands this is a no-op stub; the schema is in place so
-    /// cases can declare expectations ahead of the implementation.
+    /// Day/night/twilight classifier expectation. When present in
+    /// `case.toml`, the harness runs the image-only classifier
+    /// (no astronomical prior) on frame 0 and asserts the resulting
+    /// [`Condition`] matches `condition` and the confidence meets
+    /// `min_confidence` if set.
+    ///
+    /// `condition` strings: `"day"`, `"twilight"`, `"night"`,
+    /// `"unusable"`. Match is case-insensitive.
     #[derive(Debug, serde::Deserialize)]
     pub struct ClassifierExpectation {
         pub condition: String,
@@ -342,6 +346,53 @@ mod harness {
                 f.height(),
                 case.case.frame_height
             );
+        }
+    }
+
+    /// Run the image-only day/night classifier on frame 0 and
+    /// assert it reports the expected condition (and meets
+    /// `min_confidence` if declared).
+    pub fn check_classifier(case: &CaseSpec) {
+        let exp = case
+            .expected_classifier
+            .as_ref()
+            .expect("check_classifier called with no [expected_classifier]");
+        let want = parse_condition(&exp.condition).unwrap_or_else(|| {
+            panic!(
+                "case {}: unknown condition string {:?}; expected day/twilight/night/unusable",
+                case.case.name, exp.condition
+            )
+        });
+        let frame = load_case_frame(case, &first_frame_filename(case));
+        let got = classify(&frame, None, ConditionConfig::default());
+        assert_eq!(
+            got.condition,
+            want,
+            "classifier reported {:?} (confidence {:.2}); expected {:?}. \
+             Image evidence: mean_luma = {:.4}, saturated_fraction = {:.4}.",
+            got.condition,
+            got.confidence,
+            want,
+            got.image_evidence.mean_luma,
+            got.image_evidence.saturated_fraction
+        );
+        if let Some(min) = exp.min_confidence {
+            assert!(
+                got.confidence >= min,
+                "classifier confidence {:.3} below declared minimum {:.3}",
+                got.confidence,
+                min
+            );
+        }
+    }
+
+    fn parse_condition(s: &str) -> Option<Condition> {
+        match s.to_ascii_lowercase().as_str() {
+            "day" => Some(Condition::Day),
+            "twilight" => Some(Condition::Twilight),
+            "night" => Some(Condition::Night),
+            "unusable" => Some(Condition::Unusable),
+            _ => None,
         }
     }
 
