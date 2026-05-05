@@ -53,7 +53,7 @@
 
 use crate::centroid::{centroid_brightest_body, CentroidConfig};
 use crate::frame::{Frame, Intrinsics};
-use crate::horizon::{detect_horizon, HorizonConfig, HorizonLine};
+use crate::horizon::{HorizonConfig, HorizonLine};
 use crate::measure::{measure_altitude, MeasurementError};
 use crate::track::{track, RigidTransform, TrackConfig};
 use bris_core::{Sigma, Uncertain};
@@ -105,6 +105,32 @@ pub fn panorama_altitude(
     centroid_cfg: CentroidConfig,
     track_cfg: TrackConfig,
 ) -> Result<Uncertain<f64>, PanoramaError> {
+    panorama_altitude_with_detector(
+        frames,
+        horizon_cfg,
+        centroid_cfg,
+        track_cfg,
+        crate::horizon::detect_horizon,
+    )
+}
+
+/// Same as [`panorama_altitude`] but with a caller-supplied horizon
+/// detection function. Use this to swap in
+/// [`crate::horizon::detect_horizon_via_sky_region`] or any future
+/// detector without changing this module.
+pub fn panorama_altitude_with_detector<F>(
+    frames: &[Frame],
+    horizon_cfg: HorizonConfig,
+    centroid_cfg: CentroidConfig,
+    track_cfg: TrackConfig,
+    horizon_fn: F,
+) -> Result<Uncertain<f64>, PanoramaError>
+where
+    F: Fn(
+        &Frame,
+        HorizonConfig,
+    ) -> Result<crate::horizon::HorizonLine, crate::horizon::HorizonError>,
+{
     if frames.is_empty() {
         return Err(PanoramaError::NoHorizonFrame);
     }
@@ -114,7 +140,7 @@ pub fn panorama_altitude(
         .iter()
         .enumerate()
         .map(|(i, f)| {
-            let horizon = match detect_horizon(f, horizon_cfg) {
+            let horizon = match horizon_fn(f, horizon_cfg) {
                 Ok(h) => {
                     tracing::debug!(
                         frame = i,

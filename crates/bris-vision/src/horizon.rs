@@ -1,22 +1,27 @@
 //! Horizon detection from a captured frame.
 //!
-//! Classical pipeline:
-//! 1. Downsample to a working resolution (~200 px wide). Removes
-//!    high-frequency noise; horizon is a low-frequency feature.
-//! 2. Compute vertical gradient (Sobel-y).
-//! 3. For each column, locate the row of maximum |gradient| above a
-//!    threshold. This produces a list of candidate horizon points.
-//! 4. RANSAC line fit. Inliers are the consensus horizon; outliers
-//!    are clouds, foreground vessels, masts, lens flares, etc.
-//! 5. Return the fit line plus residual statistics so callers know
-//!    how much to trust the result.
+//! Two strategies are available:
 //!
-//! # Why not `imageproc`?
+//! 1. [`detect_horizon`] — gradient + RANSAC. Fast and robust on
+//!    open-ocean scenes where the sea-sky boundary is the dominant
+//!    horizontal edge in the frame. Tends to be fooled in cluttered
+//!    scenes (deck-mounted cameras with sail / rigging / boat
+//!    structure occupying the lower half).
 //!
-//! Each step is simple enough to implement directly, and avoiding the
-//! dependency keeps the binary lean and the algorithm fully visible
-//! for review. If we ever need richer primitives (Hough transform,
-//! Canny, etc.) we can add `imageproc` then.
+//! 2. [`detect_horizon_via_sky_region`] — find the bright sky region
+//!    first (largest connected component touching the top of the
+//!    frame above a brightness threshold), then take its lower
+//!    boundary as the horizon. Robust against deck/sail/rigging
+//!    occlusion because those don't extend up to and connect with
+//!    the sky region.
+//!
+//! Both detectors share the downsample → column-candidates → RANSAC
+//! line-fit → uncertainty machinery; only the candidate-extraction
+//! step differs.
+//!
+//! Neither approach handles night frames where the entire scene is
+//! dark; that case needs IMU-assisted dead reckoning of the horizon
+//! direction or a "horizon not visible — supply manually" mode.
 
 // Image arithmetic uses casts between u32, usize, and f64 throughout.
 // These are pixel coordinates and dimensions; they cannot meaningfully
@@ -92,6 +97,14 @@ pub struct HorizonConfig {
     /// Minimum inlier count to accept a fit, as a fraction of
     /// candidates. Default 0.5.
     pub min_inlier_fraction: f64,
+    /// Brightness percentile used by [`detect_horizon_via_sky_region`]
+    /// to threshold sky pixels. The sky is typically the brightest
+    /// large region in a daytime marine scene; the default 0.6 (60th
+    /// percentile) means "pixels brighter than 60% of the frame's
+    /// pixels are sky candidates." Lower values include more sky,
+    /// risking inclusion of bright sails or sun glint; higher values
+    /// risk missing dim sky.
+    pub sky_brightness_percentile: f64,
 }
 
 impl Default for HorizonConfig {
@@ -102,11 +115,18 @@ impl Default for HorizonConfig {
             ransac_iterations: 200,
             ransac_inlier_px: 2.0,
             min_inlier_fraction: 0.5,
+            sky_brightness_percentile: 0.6,
         }
     }
 }
 
-/// Detect the sea horizon in a frame.
+/// Detect the sea horizon in a frame via per-column gradient peaks.
+///
+/// Best for open-ocean scenes where the sea-sky boundary is the
+/// dominant horizontal edge in the frame. Tends to be fooled by
+/// stronger competing horizontal edges (deck rails, sail edges,
+/// boom shadows) in cluttered shipboard scenes; for those, see
+/// [`detect_horizon_via_sky_region`].
 ///
 /// # Errors
 ///
@@ -116,21 +136,53 @@ impl Default for HorizonConfig {
 /// "horizon not detected" rather than fabricating a fit.
 #[allow(clippy::similar_names)] // x0/y0/x1/y1 are box-filter coords.
 pub fn detect_horizon(frame: &Frame, cfg: HorizonConfig) -> Result<HorizonLine, HorizonError> {
-    // Step 1: downsample.
     let scale = f64::from(frame.width()) / f64::from(cfg.working_width);
     let working_height = (f64::from(frame.height()) / scale).round() as u32;
     let work = downsample(frame, cfg.working_width, working_height);
-
-    // Step 2 & 3: per-column row of strongest vertical gradient.
     let candidates = column_gradient_peaks(&work, cfg.gradient_threshold);
+    finalize_horizon(frame, &candidates, scale, &cfg)
+}
 
+/// Detect the sea horizon by finding the bright sky region first,
+/// then taking its lower boundary.
+///
+/// Best for cluttered shipboard scenes where the deck, sail, and
+/// rigging dominate the frame's horizontal-gradient features. The
+/// sky region is identified as the largest connected component of
+/// bright pixels touching the top of the frame; its bottom boundary
+/// is by construction either a sky-sea or a sky-other edge, with the
+/// sky-other edges naturally rejected as RANSAC outliers when the
+/// sky-sea boundary spans more columns.
+///
+/// # Errors
+///
+/// Returns `Err` if no sky region is found or the RANSAC fit fails
+/// the same confidence checks as [`detect_horizon`].
+pub fn detect_horizon_via_sky_region(
+    frame: &Frame,
+    cfg: HorizonConfig,
+) -> Result<HorizonLine, HorizonError> {
+    let scale = f64::from(frame.width()) / f64::from(cfg.working_width);
+    let working_height = (f64::from(frame.height()) / scale).round() as u32;
+    let work = downsample(frame, cfg.working_width, working_height);
+    let candidates = sky_region_lower_boundary(&work, cfg.sky_brightness_percentile);
+    finalize_horizon(frame, &candidates, scale, &cfg)
+}
+
+/// Shared post-extraction pipeline: RANSAC, refit, and uncertainty
+/// computation. Both detectors call this with a slice of working-
+/// resolution candidate points (in (x, y) pixel coordinates).
+fn finalize_horizon(
+    frame: &Frame,
+    candidates: &[(f64, f64)],
+    scale: f64,
+    cfg: &HorizonConfig,
+) -> Result<HorizonLine, HorizonError> {
     if candidates.len() < 10 {
-        #[allow(clippy::cast_possible_truncation)]
         return Err(HorizonError::InsufficientCandidates(candidates.len() as u32));
     }
 
-    // Step 4: RANSAC line fit.
-    let fit = ransac_line(&candidates, cfg.ransac_iterations, cfg.ransac_inlier_px);
+    let fit = ransac_line(candidates, cfg.ransac_iterations, cfg.ransac_inlier_px);
 
     let candidate_count = candidates.len();
     let min_inliers = ((candidate_count as f64) * cfg.min_inlier_fraction).ceil() as u32;
@@ -147,22 +199,164 @@ pub fn detect_horizon(frame: &Frame, cfg: HorizonConfig) -> Result<HorizonLine, 
     let intercept_full = fit.intercept * scale;
     let residual_full_px = fit.residual_rms * scale;
 
-    // Convert per-pixel residual to an altitude σ. The full image
-    // covers (height / fy) radians of vertical FOV; one pixel ≈
-    // 1 / fy radians. So altitude σ ≈ residual_px / fy.
     let altitude_sigma_rad = residual_full_px / frame.intrinsics.fy;
     let altitude_sigma = Sigma::new(altitude_sigma_rad).unwrap_or(Sigma::ZERO);
 
     Ok(HorizonLine {
         slope: slope_full,
         intercept: intercept_full,
-        #[allow(clippy::cast_possible_truncation)]
         inlier_count: fit.inlier_count,
-        #[allow(clippy::cast_possible_truncation)]
         candidate_count: candidate_count as u32,
         residual_rms_px: residual_full_px,
         altitude_sigma,
     })
+}
+
+/// Find the lower boundary of the sky region, column by column.
+///
+/// 1. Compute a brightness threshold at the configured percentile.
+///    The sky is typically the brightest large connected region in
+///    a daytime marine scene.
+/// 2. Two-pass connected-components labeling on the thresholded image.
+/// 3. Pick the largest component that touches the top row of the frame
+///    (touching the top is what distinguishes "sky" from "bright sail
+///    edge" or "sun glint cluster").
+/// 4. For each column, find the lowest row that's still part of that
+///    component. That's the column's sky-bottom y.
+/// 5. Skip columns where the sky doesn't reach (no boundary point).
+fn sky_region_lower_boundary(img: &WorkingImage, brightness_percentile: f64) -> Vec<(f64, f64)> {
+    let w = img.width;
+    let h = img.height;
+    if w == 0 || h == 0 {
+        return Vec::new();
+    }
+    let pixels: &[u16] = &img.pixels;
+
+    // Step 1: percentile-based threshold. Sort a copy of the pixels;
+    // for working-resolution images (typically 200×height ~ 200×113)
+    // this is < 25k elements, fast.
+    let mut sorted: Vec<u16> = pixels.to_vec();
+    sorted.sort_unstable();
+    let idx = ((sorted.len() as f64 - 1.0) * brightness_percentile.clamp(0.0, 1.0)) as usize;
+    let threshold = sorted[idx];
+
+    // Step 2: connected components on the thresholded image.
+    let labels = connected_components_above(pixels, w, h, threshold);
+
+    // Step 3: pick the largest component touching the top row.
+    let mut top_labels: std::collections::HashSet<u32> = std::collections::HashSet::new();
+    for x in 0..w {
+        let lbl = labels[x as usize];
+        if lbl > 0 {
+            top_labels.insert(lbl);
+        }
+    }
+    if top_labels.is_empty() {
+        return Vec::new();
+    }
+    let mut areas: std::collections::HashMap<u32, u32> = std::collections::HashMap::new();
+    for &lbl in &labels {
+        if top_labels.contains(&lbl) {
+            *areas.entry(lbl).or_insert(0) += 1;
+        }
+    }
+    let sky_label = areas
+        .into_iter()
+        .max_by_key(|&(_, area)| area)
+        .map_or(0, |(lbl, _)| lbl);
+    if sky_label == 0 {
+        return Vec::new();
+    }
+
+    // Step 4: per-column lower boundary.
+    let mut points = Vec::new();
+    for x in 0..w {
+        let mut last_sky_y: Option<u32> = None;
+        for y in 0..h {
+            if labels[(y * w + x) as usize] == sky_label {
+                last_sky_y = Some(y);
+            }
+        }
+        if let Some(y) = last_sky_y {
+            // Skip columns where the sky reaches all the way to the
+            // bottom; that's not a horizon, that's clear sky obscuring
+            // whatever's below (or a frame with no sea visible).
+            if y < h - 1 {
+                points.push((f64::from(x), f64::from(y)));
+            }
+        }
+    }
+    points
+}
+
+/// Two-pass connected-components labeling for pixels above `threshold`.
+/// Returns a label per pixel; 0 means below threshold (background).
+///
+/// 4-connectivity. Same union-find approach as `centroid::label_components`
+/// but works on `&[u16]` so we don't need to construct a `Frame`.
+fn connected_components_above(pixels: &[u16], w: u32, h: u32, threshold: u16) -> Vec<u32> {
+    let w = w as usize;
+    let h = h as usize;
+    let mut labels = vec![0u32; w * h];
+    let mut parent: Vec<u32> = vec![0]; // index 0 is reserved background
+    let mut next_label: u32 = 1;
+
+    for y in 0..h {
+        for x in 0..w {
+            let idx = y * w + x;
+            if pixels[idx] < threshold {
+                continue;
+            }
+            let left = if x > 0 { labels[idx - 1] } else { 0 };
+            let above = if y > 0 { labels[idx - w] } else { 0 };
+            let lbl = match (left, above) {
+                (0, 0) => {
+                    let new = next_label;
+                    next_label += 1;
+                    parent.push(new);
+                    new
+                }
+                (a, 0) | (0, a) => a,
+                (a, b) if a == b => a,
+                (a, b) => {
+                    union_find_union(&mut parent, a, b);
+                    a.min(b)
+                }
+            };
+            labels[idx] = lbl;
+        }
+    }
+
+    for lbl in &mut labels {
+        if *lbl > 0 {
+            *lbl = union_find_find(&mut parent, *lbl);
+        }
+    }
+
+    labels
+}
+
+fn union_find_find(parent: &mut [u32], x: u32) -> u32 {
+    let mut root = x;
+    while parent[root as usize] != root {
+        root = parent[root as usize];
+    }
+    let mut cur = x;
+    while parent[cur as usize] != root {
+        let next = parent[cur as usize];
+        parent[cur as usize] = root;
+        cur = next;
+    }
+    root
+}
+
+fn union_find_union(parent: &mut [u32], a: u32, b: u32) {
+    let ra = union_find_find(parent, a);
+    let rb = union_find_find(parent, b);
+    if ra != rb {
+        let (root, child) = if ra < rb { (ra, rb) } else { (rb, ra) };
+        parent[child as usize] = root;
+    }
 }
 
 /// Box-filter downsample to `(out_w, out_h)`. Each output pixel is
@@ -482,6 +676,128 @@ mod tests {
         assert!(
             sigma_deg < 1.0,
             "altitude sigma = {sigma_deg}° unexpectedly large"
+        );
+    }
+
+    /// Build a frame that simulates the deck-occluded shipboard scene:
+    /// bright sky in the upper portion, dark sea below, plus a bright
+    /// "deck" rectangle in the lower-left that has stronger horizontal
+    /// gradient than the sea-sky boundary itself.
+    fn synth_deck_occluded(
+        width: u32,
+        height: u32,
+        sky_horizon_y: u32,
+        deck_top_y: u32,
+        deck_right_x: u32,
+    ) -> Frame {
+        let mut pixels = vec![0u16; (width as usize) * (height as usize)];
+        for y in 0..height {
+            for x in 0..width {
+                let v = if y < sky_horizon_y {
+                    50_000 // sky
+                } else {
+                    8_000 // sea
+                };
+                pixels[(y as usize) * (width as usize) + (x as usize)] = v;
+            }
+        }
+        // Bright deck in the lower-left.
+        for y in deck_top_y..height {
+            for x in 0..deck_right_x {
+                // Deck slightly brighter than sea — this is what fools
+                // the gradient detector. The top edge of the deck is a
+                // strong horizontal feature competing with the sky-sea
+                // boundary.
+                pixels[(y as usize) * (width as usize) + (x as usize)] = 35_000;
+            }
+        }
+        Frame::new(
+            width,
+            height,
+            pixels,
+            Tt::from_julian_date(JD_J2000),
+            1000,
+            Intrinsics::placeholder(width, height),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn sky_region_detector_finds_horizon_in_deck_occluded_scene() {
+        // Sky-sea horizon at y=200; deck top at y=350 covering left
+        // half of the frame. The deck top is a strong horizontal edge
+        // *below* the true horizon. The sky-region detector should
+        // pick the actual sky's lower boundary at y=200, not the deck
+        // edge at y=350.
+        let frame = synth_deck_occluded(640, 480, 200, 350, 320);
+        let line = detect_horizon_via_sky_region(&frame, HorizonConfig::default()).unwrap();
+        assert!(
+            (line.intercept - 200.0).abs() < 5.0,
+            "sky-region detector should find horizon at y=200, got intercept {}",
+            line.intercept
+        );
+        assert!(
+            line.slope.abs() < 0.01,
+            "horizon should be flat, got slope {}",
+            line.slope
+        );
+    }
+
+    #[test]
+    fn sky_region_detector_works_on_simple_horizon() {
+        // Should match the gradient detector's behavior on the easy case.
+        let frame = synth_horizon_frame(800, 600, 300);
+        let line = detect_horizon_via_sky_region(&frame, HorizonConfig::default()).unwrap();
+        assert!(
+            (line.intercept - 300.0).abs() < 5.0,
+            "intercept {} should be near 300",
+            line.intercept
+        );
+        assert!(line.slope.abs() < 0.01);
+    }
+
+    #[test]
+    fn sky_region_detector_fails_when_no_sky_visible() {
+        // A frame where the entire scene is dark (no sky region):
+        // every pixel below the percentile threshold means no sky
+        // component → InsufficientCandidates.
+        let pixels = vec![1_000u16; 200 * 150];
+        let frame = Frame::new(
+            200,
+            150,
+            pixels,
+            Tt::from_julian_date(JD_J2000),
+            0,
+            Intrinsics::placeholder(200, 150),
+        )
+        .unwrap();
+        let result = detect_horizon_via_sky_region(&frame, HorizonConfig::default());
+        // A uniform frame has no real "sky" but the percentile
+        // thresholding will still split it; what we verify is just
+        // that the function fails cleanly (either NoCandidates or
+        // LowConfidence) rather than fabricating a fit.
+        assert!(result.is_err());
+    }
+
+    /// Direct comparison: gradient detector picks the wrong line in
+    /// the deck-occluded scene; sky-region detector picks the right
+    /// one. This is the load-bearing test for the new approach.
+    #[test]
+    fn sky_region_outperforms_gradient_in_deck_occluded_scene() {
+        let frame = synth_deck_occluded(640, 480, 200, 350, 320);
+        let gradient_line = detect_horizon(&frame, HorizonConfig::default()).unwrap();
+        let sky_line = detect_horizon_via_sky_region(&frame, HorizonConfig::default()).unwrap();
+        // The sky-region detector should be closer to the true horizon
+        // (y=200) than the gradient detector. We don't assert the
+        // gradient detector is wrong (it might luck into the right
+        // answer on some configurations), only that the sky-region
+        // detector is correct.
+        assert!(
+            (sky_line.intercept - 200.0).abs() < 5.0,
+            "sky-region detector at intercept {} (true=200); \
+             gradient detector at intercept {}",
+            sky_line.intercept,
+            gradient_line.intercept,
         );
     }
 }

@@ -20,8 +20,9 @@ use bris_nmea::{
     UncertaintyBudget,
 };
 use bris_vision::{
-    centroid_brightest_body, detect_horizon, load_frame_from_path, measure_altitude,
-    panorama_altitude, CentroidConfig, Frame, HorizonConfig, Intrinsics, TrackConfig,
+    centroid_brightest_body, detect_horizon, detect_horizon_via_sky_region, load_frame_from_path,
+    measure_altitude, panorama_altitude_with_detector, CentroidConfig, Frame, HorizonConfig,
+    HorizonError, HorizonLine, Intrinsics, TrackConfig,
 };
 use chrono::{DateTime, Utc};
 use clap::{Parser, Subcommand};
@@ -91,6 +92,29 @@ struct ReplayArgs {
     /// Defaults to the file modification time of the first frame.
     #[arg(long)]
     capture_utc: Option<String>,
+    /// Horizon detection method.
+    ///
+    /// `gradient` is the original RANSAC-on-column-gradients detector;
+    /// best for open-ocean scenes. `sky-region` finds the bright sky's
+    /// lower boundary; better for cluttered shipboard scenes where the
+    /// deck or sail dominates the lower half of the frame.
+    #[arg(long, value_enum, default_value_t = HorizonMethod::SkyRegion)]
+    horizon_method: HorizonMethod,
+}
+
+#[derive(Debug, Clone, Copy, clap::ValueEnum)]
+enum HorizonMethod {
+    Gradient,
+    SkyRegion,
+}
+
+impl HorizonMethod {
+    fn detect(self, frame: &Frame, cfg: HorizonConfig) -> Result<HorizonLine, HorizonError> {
+        match self {
+            Self::Gradient => detect_horizon(frame, cfg),
+            Self::SkyRegion => detect_horizon_via_sky_region(frame, cfg),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, clap::ValueEnum)]
@@ -184,11 +208,13 @@ fn run_replay(args: &ReplayArgs) -> anyhow::Result<()> {
     // Run the panorama-stitching path. The vision pipeline reports
     // per-frame failures inside; if every frame fails this returns
     // an error and we surface it cleanly.
-    let observed_altitude = match panorama_altitude(
+    let horizon_method = args.horizon_method;
+    let observed_altitude = match panorama_altitude_with_detector(
         &frames,
         HorizonConfig::default(),
         CentroidConfig::default(),
         TrackConfig::default(),
+        |frame, cfg| horizon_method.detect(frame, cfg),
     ) {
         Ok(alt) => {
             info!(
@@ -200,7 +226,7 @@ fn run_replay(args: &ReplayArgs) -> anyhow::Result<()> {
         }
         Err(e) => {
             warn!(error = %e, "replay: panorama failed; trying single-frame measurement");
-            single_frame_fallback(&frames)?
+            single_frame_fallback(&frames, horizon_method)?
         }
     };
 
@@ -335,11 +361,14 @@ fn parse_or_infer_utc(args: &ReplayArgs) -> anyhow::Result<DateTime<Utc>> {
     Ok(dt)
 }
 
-fn single_frame_fallback(frames: &[Frame]) -> anyhow::Result<Uncertain<f64>> {
+fn single_frame_fallback(
+    frames: &[Frame],
+    horizon_method: HorizonMethod,
+) -> anyhow::Result<Uncertain<f64>> {
     // Try each frame individually. The first one that yields both a
     // horizon and a centroid wins.
     for (i, frame) in frames.iter().enumerate() {
-        let Ok(horizon) = detect_horizon(frame, HorizonConfig::default()) else {
+        let Ok(horizon) = horizon_method.detect(frame, HorizonConfig::default()) else {
             continue;
         };
         let Ok(centroid) = centroid_brightest_body(frame, CentroidConfig::default()) else {
