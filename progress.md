@@ -13,19 +13,27 @@ For the project overview, see `readme.org`.
 **Phase 1 (almanac):** **8 of 9 tasks complete.** Only Pi Zero 2W
 benchmarking remains.
 **Phase 2 (vision):** **5 of 8 tasks complete + 2 partial + 1 not
-started.** Within-FOV altitude measurement works end-to-end:
-synthetic frame → horizon → body → fused altitude with σ. Calibration
-*workflow* and the streaming-engine quality knob are pending; full
-panorama stitching is required for the 0.5 nm target and not yet
-implemented (wide-angle MVP capped at ~5 nm without it).
+started.** Within-FOV altitude measurement works end-to-end.
+Calibration *workflow* and the streaming-engine quality knob are
+pending; full panorama stitching is required for the 0.5 nm target
+and not yet implemented.
+**Phase 4 (sight reduction & fix):** **3 of 4 tasks complete.**
+End-to-end synthetic LOP path works: from observed altitude +
+assumed position + body's apparent place → line of position →
+multi-sight fix with full position covariance + uncertainty ellipse.
+Per-sight blunder screening (absolute + leave-one-out outlier)
+catches obvious bad sights without rejecting honest uncertainty.
+Running fix (DR advance) and per-stage uncertainty propagation
+refinements still pending.
 
 All other phases not started.
 
-**Workspace metrics:** 13 commits, 110 tests passing (29 in
-`bris-core`, 53 in `bris-almanac`, 28 in `bris-vision`), zero clippy
-warnings under `-D warnings`, zero `cargo fmt` diffs.
+**Workspace metrics:** 16 commits, 128 tests passing (29 in
+`bris-core`, 53 in `bris-almanac`, 28 in `bris-vision`, 18 in
+`bris-nav`), zero clippy warnings under `-D warnings`, zero
+`cargo fmt` diffs.
 
-**Last commit:** `509ac50` — multi-frame altitude fusion.
+**Last commit:** `7fb0bb5` — per-sight blunder screening.
 
 ---
 
@@ -105,6 +113,27 @@ warnings under `-D warnings`, zero `cargo fmt` diffs.
   3.5.
 - ✅ **Eye-height handling** (already done in Phase 1's `Observer`).
 
+### Phase 4: sight reduction & fix
+
+- ✅ **Single sight LOP** (`bris-nav::sight`). `line_of_position()`
+  takes the assumed position, observed and computed altitudes (each
+  with σ), and azimuth, returns a `LineOfPosition` with intercept
+  in nm and combined intercept σ. Standard Marc Saint-Hilaire
+  intercept method.
+- ✅ **Multi-sight fix with full covariance** (`bris-nav::fix`).
+  `multi_sight_fix(&[LineOfPosition])` solves the weighted normal
+  equations for the (north, east) displacement, returns a `Fix`
+  with new lat/lon, full 2×2 covariance in nm², and decomposed
+  σ_major/σ_minor/orientation for chartplotter ellipse rendering.
+  End-to-end test: two synthetic LOPs → recovered (1 N, 2 E) within
+  0.01 nm. Singular geometry rejected explicitly.
+- ✅ **Sanity checks** (`bris-nav::screen`). Two screens: absolute
+  intercept (any |intercept| > 60 nm rejected) and leave-one-out
+  outlier (any sight > 5σ from MAD-based consensus, when ≥ 3
+  sights). Honest-σ invariant preserved: a high-σ sight with a
+  consistent value is kept and down-weighted, never rejected for
+  being uncertain.
+
 ---
 
 ## Not yet done
@@ -138,7 +167,20 @@ warnings under `-D warnings`, zero `cargo fmt` diffs.
   Within-FOV angle fusion is in place but is not a substitute.
 - ⏳ **Stitching/accuracy tradeoff knob** (streaming-engine setting).
 
-### All later phases (1.5, 3, 3.5, 4, 5, 5.5, 6, 7, 8, 9)
+### Phase 4 remainder
+
+- ⏳ **Running fix.** Advance earlier LOPs by DR (course/speed)
+  before intersection. Course/speed input is optional; if absent,
+  only simultaneous fixes are produced. Inflate covariance by DR
+  uncertainty when used.
+- ⏳ **Per-stage uncertainty propagation refinements.** The current
+  pipeline collects per-source σ contributions and quadrature-
+  combines them; the dominant-source attribution task (per
+  plan.org) needs explicit identification of which source
+  contributes most to each fix, surfaced in the `$PBRIS,UNC`
+  diagnostic.
+
+### All later phases (1.5, 3, 3.5, 5, 5.5, 6, 7, 8, 9)
 
 Not started. See `plan.org` for the full task list.
 
@@ -259,32 +301,28 @@ Not started. See `plan.org` for the full task list.
 
 Three reasonable paths, with explicit tradeoffs:
 
-**A. Phase 4 (sight reduction & fix) in `bris-nav`.** Assemble the
-observed altitude (from `bris-vision::measure`) and the computed
-altitude (from `bris-almanac::apparent`) into a line of position.
-The sight-reduction math is well-defined and produces an end-to-end
-synthetic-data fix. **Caveat:** the synthetic fix only validates the
-within-FOV path; it does not exercise panorama stitching, which is
-where most of the real-world accuracy work happens.
-
-**B. Multi-frame panorama stitching in `bris-vision`.** Build the
+**A. Multi-frame panorama stitching in `bris-vision`.** Build the
 ORB-feature alignment + pose chain + projection pipeline. This
 unblocks the 0.5 nm accuracy target and is the largest single piece
-of remaining vision work. **Caveat:** it's a substantial commit
-(probably 2-3 work sessions, includes ORB or a similar feature
-detector; without `imageproc` or `opencv` we either implement ORB
-ourselves or pick a permissive pure-Rust crate).
+of remaining vision work. Substantial commit (probably 2-3 work
+sessions; either implement ORB ourselves or pick a permissive
+pure-Rust crate). **This is the single most important piece for
+real-world capability.**
 
-**C. Phase 1.5 (time integrity) in `bris-core` and `bris-almanac`.**
-Dual-clock timestamping, clock-step detection, NTP sync tracking,
-per-fix time-confidence value. Self-contained, unblocks nothing else,
-pays off for offshore use. Smaller than B, larger than getting one
-synthetic LOP working.
+**B. NMEA 0183 sentence emission in `bris-nmea`** (Phase 5). The
+fix path now produces a typed `Fix` with full position covariance;
+emitting `$GPGLL`/`$GPRMC`/`$GPGGA`/`$GPGST` and the multi-subtype
+`$PBRIS` from a `Fix` would close the loop end-to-end at the API
+level, even before panorama stitching makes the fix accurate enough
+for real use. This is a self-contained smaller commit.
 
-I'd lean **start with A** so we have an end-to-end synthetic fix as
-a regression baseline, then tackle **B** so we can demonstrate real-
-world capable accuracy, then **C** as a cleanup pass before any
-field use.
+**C. Phase 1.5 (time integrity).** Self-contained, unblocks
+nothing else, pays off for offshore use. Same priority as before.
+
+I'd lean **B → A → C**: get the NMEA-emission loop closed first
+(it's small and gives us an end-to-end testable surface from frame
+to NMEA stream), then tackle panorama stitching to make the fix
+real, then time integrity as a cleanup pass.
 
 ---
 
