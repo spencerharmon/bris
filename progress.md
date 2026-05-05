@@ -9,7 +9,8 @@ For the project overview, see `readme.org`.
 
 ## Current status
 
-**Phase 0 (scaffolding):** complete except two follow-ups.
+**Phase 0 (scaffolding):** complete. Both follow-ups (vendored
+leap-second source + full BSC5 catalog import) are now in place.
 **Phase 1 (almanac):** **8 of 9 tasks complete.** Only Pi Zero 2W
 benchmarking remains.
 **Phase 2 (vision):** **6 of 8 tasks complete + 2 partial.** End-to-end
@@ -38,20 +39,21 @@ logs at debug level via `tracing` with the sentence bytes and a
 small context payload. Transport layer (TCP/UDP/serial) and the
 OpenCPN integration test still pending.
 
-**Phase 6 (CLI / embedded Linux):** **1 task partially complete.**
-`bris demo` runs the end-to-end synthetic pipeline (no camera
-hardware) and emits a debug log of the full NMEA stream that
-would go on the wire. Other subcommands (capture, calibrate, fix,
-serve, replay, log, update) are still stubs.
+**Phase 6 (CLI / embedded Linux):** not started in earnest. The
+synthetic `bris demo` subcommand was useful as a stack validator
+while building Phases 4-5 but has been removed (the project's real
+"demo" should drive the camera, not synthesize inputs). All
+subcommands are stubs.
 
 All other phases not started.
 
-**Workspace metrics:** 19 commits, 156 tests passing (29 in
+**Workspace metrics:** 21 commits, 156 tests passing (29 in
 `bris-core`, 53 in `bris-almanac`, 36 in `bris-vision`, 18 in
 `bris-nav`, 20 in `bris-nmea`), zero clippy warnings under
-`-D warnings`, zero `cargo fmt` diffs.
+`-D warnings`, zero `cargo fmt` diffs. The almanac now ships with
+the full 9,096-star Yale BSC catalog.
 
-**Last commit:** `3dde1b0` — panorama stitching + `bris demo`.
+**Last commit:** `3458fa9` — Phase 0 vendoring complete.
 
 ---
 
@@ -68,6 +70,15 @@ All other phases not started.
   `proptest` wired up workspace-wide.
 - ✅ Documentation skeletons: `docs/design/`, `docs/operator/`,
   `docs/protocol/pbris.md`.
+- ✅ **Vendored leap-second source + build-time regenerator.**
+  `crates/bris-core/data/leap-seconds.list` from IANA; `build.rs`
+  parses + validates it and emits the table consumed by
+  `bris-core::time`. Refreshing the table is a single-file `cp`.
+- ✅ **Vendored Yale BSC5 catalog import.** `scripts/import_bsc.py`
+  consumes the BSC5 fixed-width source from VizieR and emits
+  `crates/bris-almanac/data/stars.tsv`. Catalog is now 9,096 stars
+  (was 11 vetted starter stars). Documented and worked around an
+  off-by-one in the BSC ReadMe's J2000 declination column layout.
 
 ### Phase 1: almanac
 
@@ -189,12 +200,6 @@ All other phases not started.
 
 ## Not yet done
 
-### Phase 0 follow-ups
-
-- ⏳ **Vendored leap-second source + build-time regenerator.**
-- ⏳ **Vendored Yale BSC import + cross-check script.** Hard
-  prerequisite for Phase 3 (plate solving).
-
 ### Phase 1 remainder
 
 - ⏳ **Benchmark on Pi Zero 2W.**
@@ -206,14 +211,19 @@ All other phases not started.
 - ⏳ **Lunar topocentric parallax** (~1°! — required before Moon
   sights are accurate).
 
-### Phase 6: CLI / embedded Linux (partial)
+### Phase 6: CLI / embedded Linux (essentially not started)
 
-- ⚠️ **`bris demo`** runs the end-to-end synthetic pipeline (no
-  camera hardware) and prints a debug log of every NMEA sentence
-  that would go on the wire. Useful as a smoke test for the build
-  and for verifying the wire format before pointing OpenCPN at
-  Bris. All other CLI subcommands (capture, calibrate, fix, serve,
-  replay, log, update) are still stubs.
+The synthetic `bris demo` subcommand was removed in commit `3458fa9`
+because it didn't match the user's intent (the real demo should
+drive a webcam). The webcam-fed `bris fix` is the obvious next
+piece: capture a frame, run the vision pipeline, reduce the sight
+against an `--assumed-position`, and emit the fix and NMEA stream.
+Capture wiring needs `v4l` (Linux) and platform-native equivalents
+on macOS/Windows; for the Pi Zero appliance target, `v4l` is the
+right answer.
+
+All CLI subcommands (capture, calibrate, fix, serve, replay, log,
+update) are still stubs.
 
 ### Phase 2 remainder
 
@@ -369,27 +379,41 @@ related Phase 5 transport layer remain.
 
 ## Next concrete step
 
-Three reasonable paths, with explicit tradeoffs:
+**`bris fix` subcommand backed by webcam capture** is the primary
+next step. The user explicitly asked for "point my webcam at the
+sky and have bris tell me my lat/long." Pieces needed:
 
-**A. Phase 5 transport layer.** Wrap the existing `bris-nmea`
-formatters with TCP server / UDP broadcast / serial transports.
-Once the TCP server is in place, the `bris demo` subcommand can
-also write its NMEA stream to a configurable port, enabling the
-OpenCPN integration test as a natural follow-up.
+1. **Camera capture (V4L2 on Linux)** via the `v4l` crate: open
+   device, configure format, capture one frame, decode (MJPEG or
+   YUYV depending on the device), convert luminance → `bris_vision::Frame`.
+2. **Wire the vision → almanac → nav → NMEA pipeline** in a
+   `bris fix` subcommand, parameterized by:
+   - `--device /dev/video0`
+   - `--assumed-position LAT,LON` (required; one LOP doesn't
+     constrain a fix without plate solving — be explicit about this)
+   - `--eye-height-m N` (default 2.0)
+   - `--body sun|moon|...` (manual selection until plate solving lands)
+3. **Honest output**: print the fix with σ, and the NMEA stream at
+   debug level (matching what the synthetic demo did, but with real
+   data).
 
-**B. Phase 1.5 (time integrity).** Self-contained, unblocks
-nothing else, pays off for offshore use.
+Limitations to call out in the subcommand's help text:
+- Single-LOP fix needs `--assumed-position` and produces a fix
+  *along* the LOP, not a true 2D fix. For a true fix you need
+  multiple sights of different bodies (which the streaming engine
+  in Phase 3.5 will accumulate automatically).
+- Manual body selection is a stopgap until plate solving (Phase 3)
+  lands.
+- Lunar parallax is not yet applied (Phase 1 follow-up); Moon
+  sights will be off by up to ~1°.
 
-**C. Phase 4 follow-ups: running fix + dominant-source attribution
-plumbing.** Connect the per-stage σ values from the vision pipeline
-into a real `UncertaintyBudget` (the `$PBRIS,UNC` formatter exists
-but is currently fed from hardcoded values in the demo).
+After `bris fix` lands, the next milestones are:
 
-I'd lean **A → C → B**: get TCP serving in place so the OpenCPN
-integration test can land, then plumb the real per-stage σ values
-into `UncertaintyBudget` so the dominant-source attribution
-becomes meaningful end-to-end, then time integrity as a cleanup
-pass.
+- **Phase 3: plate solving** so night-sky pointing produces a fix
+  without `--body` selection.
+- **Phase 5 transport layer** so the NMEA stream goes out a real
+  TCP/UDP/serial port.
+- **Phase 1.5 time integrity** as a cleanup pass.
 
 ---
 
