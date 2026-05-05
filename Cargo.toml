@@ -52,9 +52,13 @@ chrono = { version = "0.4", default-features = false, features = ["clock", "serd
 # Astronomy
 vsop87 = "3"
 
+# Image I/O
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "pnm"] }
+
 # Testing
 proptest = "1"
 approx = "0.5"
+tempfile = "3"
 
 # Internal crates (path deps).
 bris-core = { path = "crates/bris-core" }

@@ -13,9 +13,12 @@ workspace = true
 
 [dependencies]
 bris-core.workspace = true
+chrono.workspace = true
+image.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
 proptest.workspace = true
 approx.workspace = true
+tempfile.workspace = true
