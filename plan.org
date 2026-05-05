@@ -212,13 +212,14 @@ stable. Each task is sized to a meaningful unit of work, not a single commit.
    - Track per-frame timestamps; correct for the body's sidereal motion
      between frames so we don't smear a moving target.
 
-   *Status:* angle-fusion path implemented in ~bris-vision::fusion~
-   covers the within-FOV case (wide-angle lens, low-to-medium-altitude
-   body). The full panorama-stitching path is *not yet implemented* and
-   is required before the 0.5 nm accuracy target is reachable. With
-   wide-angle-only operation the achievable accuracy is capped at the
-   wide-angle pixel scale (~1 arcmin/px → ~5 nm fix), so MVP can ship
-   without it but cannot reach the design target without it.
+   *Status:* angle-fusion (within-FOV) path implemented in
+   ~bris-vision::fusion~; cross-frame pose-chain path implemented in
+   ~bris-vision::track~ (Harris corners + NCC matching + RANSAC rigid
+   transform fitting) and ~bris-vision::panorama~ (compose chain across
+   frames to bridge body-frame to horizon-frame). IMU/gyro priors and
+   sidereal motion correction are documented as follow-ups; lens
+   distortion compensation across the chain is approximate (acceptable
+   for non-fisheye lenses).
 ** DONE Angle measurement pipeline
    Given a stitched scene + horizon line + body centroid + camera
    intrinsics, output measured altitude with uncertainty.

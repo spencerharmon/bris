@@ -135,6 +135,7 @@ dependencies = [
  "bris-nmea",
  "bris-platesolve",
  "bris-vision",
+ "chrono",
  "clap",
  "tracing",
  "tracing-subscriber",

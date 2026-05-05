@@ -23,6 +23,7 @@ bris-platesolve.workspace = true
 bris-nav.workspace = true
 bris-nmea.workspace = true
 anyhow.workspace = true
+chrono.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 clap = { version = "4", features = ["derive"] }
