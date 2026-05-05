@@ -277,12 +277,57 @@ pub fn track(
             cfg.min_inliers,
         ));
     }
+    let anchors: Vec<(u32, u32)> = corners_a.iter().map(|c| (c.x, c.y)).collect();
+    track_with_anchors(frame_a, frame_b, &anchors, cfg)
+}
 
-    // Match each corner in A to its best NCC candidate in B.
+/// Track a frame's star-like peaks in another frame.
+///
+/// Same NCC-matching + RANSAC-rigid pipeline as [`track`], but driven
+/// by [`crate::peak::detect_peaks`] instead of Harris corners. Use
+/// this for night frames where stars are the primary features.
+///
+/// # Errors
+///
+/// As [`track`].
+pub fn track_peaks(
+    frame_a: &Frame,
+    frame_b: &Frame,
+    peak_cfg: crate::peak::PeakConfig,
+    cfg: TrackConfig,
+) -> Result<RigidTransform, TrackError> {
+    let peaks_a = crate::peak::detect_peaks(frame_a, peak_cfg);
+    if peaks_a.len() < cfg.min_inliers as usize {
+        return Err(TrackError::InsufficientCorners(
+            peaks_a.len() as u32,
+            cfg.min_inliers,
+        ));
+    }
+    let anchors: Vec<(u32, u32)> = peaks_a
+        .iter()
+        .map(|p| (p.x.round() as u32, p.y.round() as u32))
+        .collect();
+    track_with_anchors(frame_a, frame_b, &anchors, cfg)
+}
+
+/// Shared implementation: given anchor pixels in A, find their NCC
+/// matches in B and RANSAC a rigid transform.
+fn track_with_anchors(
+    frame_a: &Frame,
+    frame_b: &Frame,
+    anchors: &[(u32, u32)],
+    cfg: TrackConfig,
+) -> Result<RigidTransform, TrackError> {
+    // Match each anchor in A to its best NCC candidate in B.
     let mut matches: Vec<MatchPair> = Vec::new();
-    for c in &corners_a {
-        if let Some((bx, by, _score)) = find_best_match(frame_a, frame_b, c, &cfg) {
-            matches.push(((f64::from(c.x), f64::from(c.y)), (bx, by)));
+    for &(ax, ay) in anchors {
+        let dummy = Corner {
+            x: ax,
+            y: ay,
+            strength: 0.0,
+        };
+        if let Some((bx, by, _score)) = find_best_match(frame_a, frame_b, &dummy, &cfg) {
+            matches.push(((f64::from(ax), f64::from(ay)), (bx, by)));
         }
     }
     if (matches.len() as u32) < cfg.min_inliers {
@@ -316,13 +361,9 @@ pub fn track(
         ));
     }
 
-    // Convert RMS pixel residual to a rotation σ. For a rotation of
-    // small angle θ about the image center, a pixel at distance r from
-    // the center moves r·θ. So θ_σ ≈ residual_px / r_typical, where
-    // r_typical ≈ image_diagonal / 4 (a conservative choice).
     let r_typical = ((frame_a.width().pow(2) + frame_a.height().pow(2)) as f64).sqrt() / 4.0;
     let theta_sigma_rad = fit.residual_rms_px / r_typical.max(1.0);
-    let theta_sigma = Sigma::new(theta_sigma_rad).unwrap_or(Sigma::ZERO);
+    let theta_sigma = bris_core::Sigma::new(theta_sigma_rad).unwrap_or(bris_core::Sigma::ZERO);
 
     Ok(RigidTransform {
         theta_rad: fit.theta_rad,
@@ -682,5 +723,75 @@ mod tests {
         assert!(xform.theta_sigma.value() >= 0.0);
         // For noiseless synthetic data the sigma should be small.
         assert!(xform.theta_sigma.value().to_degrees() < 1.0);
+    }
+
+    /// Build a star-field frame (Gaussian blobs over a dark sky)
+    /// shifted by the given pixel offset for cross-frame testing.
+    fn synth_starfield_frame(width: u32, height: u32, offset_x: i32, offset_y: i32) -> Frame {
+        let mut pixels = vec![100u16; (width as usize) * (height as usize)];
+        let centers = [
+            (60, 50),
+            (130, 70),
+            (200, 60),
+            (250, 110),
+            (90, 130),
+            (160, 150),
+            (220, 180),
+            (40, 90),
+            (290, 50),
+            (180, 30),
+        ];
+        let sigma = 1.5_f64;
+        let half = 4_i32;
+        for (cx, cy) in centers {
+            let cx_world = cx as f64 - offset_x as f64;
+            let cy_world = cy as f64 - offset_y as f64;
+            for dy in -half..=half {
+                for dx in -half..=half {
+                    let x = (cx_world + dx as f64).round() as i32;
+                    let y = (cy_world + dy as f64).round() as i32;
+                    if x < 0 || y < 0 || x >= width as i32 || y >= height as i32 {
+                        continue;
+                    }
+                    let r2 = (cx_world - x as f64).powi(2) + (cy_world - y as f64).powi(2);
+                    let g = (-r2 / (2.0 * sigma * sigma)).exp();
+                    let v = (30_000.0 * g) as u16;
+                    let idx = (y as usize) * (width as usize) + (x as usize);
+                    pixels[idx] = pixels[idx].saturating_add(v);
+                }
+            }
+        }
+        Frame::new(
+            width,
+            height,
+            pixels,
+            Tt::from_julian_date(JD_J2000),
+            1000,
+            Intrinsics::placeholder(width, height),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn track_peaks_detects_pure_translation_on_starfield() {
+        // Star-field equivalent of detects_pure_translation. Verifies
+        // the track_peaks entry point routes peaks through the same
+        // RANSAC machinery and recovers the known (-10, -5) shift.
+        let a = synth_starfield_frame(320, 240, 0, 0);
+        let b = synth_starfield_frame(320, 240, 10, 5);
+        let xform = track_peaks(
+            &a,
+            &b,
+            crate::peak::PeakConfig::default(),
+            TrackConfig::default(),
+        )
+        .unwrap();
+        assert!(
+            xform.theta_rad.abs() < 0.02,
+            "expected ~0 rotation, got {} rad",
+            xform.theta_rad
+        );
+        assert_relative_eq!(xform.tx_px, -10.0, epsilon = 1.0);
+        assert_relative_eq!(xform.ty_px, -5.0, epsilon = 1.0);
     }
 }
