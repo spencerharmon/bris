@@ -1,0 +1,74 @@
+# Regression metadata for sailing_sun_upper_left
+#
+# All values are recorded from the *current* output of the pipeline
+# at the time this case was added. The regression test asserts the
+# pipeline still produces values within tolerance.
+#
+# When intentionally improving an algorithm, update these recorded
+# values and the test tolerances together; the commit message must
+# explain why the change is an improvement (e.g. "previously detected
+# the deck edge as horizon; now correctly detects the sea-sky
+# boundary").
+
+[case]
+name = "sailing_sun_upper_left"
+description = "Sailing POV with sun in upper-left, sail mid-right, partially-occluded horizon"
+frame_count = 2
+frame_width = 640
+frame_height = 360
+
+# Reference observer for replay; the actual observer position when
+# this video was shot is unknown. Pipeline behavior under these
+# inputs is what we're regressing on, not the celestial-mechanics
+# correctness of the resulting fix.
+[reference_observer]
+lat_deg = 25.0
+lon_deg = -80.0
+eye_height_m = 2.0
+capture_utc = "2024-03-15T15:00:00Z"
+body = "sun"
+
+# Body centroid as detected by centroid_brightest_body on frame 0
+# (the first frame). Coordinates are in pixels of the original
+# 640x360 image. The centroid currently picks the saturated sun
+# correctly; if a regression breaks this we want to know.
+[expected_centroid_frame0]
+x_px = 98.8
+y_px = 47.7
+tolerance_px = 5.0
+
+# Horizon line as detected by each method, recorded so we can detect
+# regressions in any of them. The values here are NOT all "correct";
+# they're the current behavior. The "method_correctness" field
+# documents which method actually finds the right horizon.
+#
+# Format: y = slope * x + intercept, both at full image resolution.
+
+[expected_horizon_gradient]
+slope = -0.166
+intercept = 309.9
+method_correctness = "wrong"
+notes = "Picks deck-to-sea boundary on the left. See README."
+
+[expected_horizon_sky_region]
+slope = 0.753
+intercept = 41.0
+method_correctness = "wrong"
+notes = "Picks top of mainsail. See README."
+
+[expected_horizon_segmentation]
+slope = -0.187
+intercept = 322.3
+method_correctness = "approximately correct"
+notes = "172 of 512 columns produce sky→sea transitions; visually matches the sea-sky boundary on the right side of the frame."
+
+# Pipeline-survival assertions. These are the load-bearing
+# regression tests: the pipeline must not panic, errors must be
+# typed, etc. See regression_test.rs for the implementations.
+[pipeline_survival]
+loads_grayscale = true
+loads_rgb_for_segmentation = true
+gradient_detector_returns_ok = true
+sky_region_detector_returns_ok = true
+segmentation_detector_returns_ok = true
+centroid_returns_ok = true

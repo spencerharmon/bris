@@ -57,3 +57,4 @@ scripts/data/
 crates/bris-vision/data/segmentation.onnx
 crates/bris-vision/data/segmentation_labels.json
 test_video/
+tmp/

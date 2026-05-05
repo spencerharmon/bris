@@ -75,3 +75,14 @@ of a separate downstream tool that consumes the NMEA stream, not Bris.
   uncertainty. Optional opt-in drift correction uses a persisted rate
   learned during prior NTP-synced periods.
 - *Output protocol:* NMEA 0183 first. NMEA 2000 deferred (license + hardware).
+
+* Architecture and pipeline
+For an end-to-end view of how the camera-frame stream becomes a
+celestial fix — including the conditional branches between
+day / night / twilight method sets, the single-frame fast path vs.
+multi-frame stitching, and where each algorithm lives in the
+codebase — see [[file:docs/design/pipeline.md][docs/design/pipeline.md]]. That document includes
+a Mermaid diagram showing the full flow.
+
+For the design rationale and per-task roadmap, see [[file:plan.org][plan.org]]. For
+current status and what's next, see [[file:progress.md][progress.md]].
