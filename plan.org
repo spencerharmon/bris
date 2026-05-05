@@ -188,7 +188,7 @@ stable. Each task is sized to a meaningful unit of work, not a single commit.
    sea/sky boundary. Return line in image coords + uncertainty. Report
    low-confidence results explicitly so the operator can reject the
    sight rather than silently producing a bad fix.
-** TODO Sun/Moon centroiding
+** DONE Sun/Moon centroiding
    Threshold + connected components + ellipse fit, sub-pixel refinement.
    Account for partial occlusion by horizon (limb correction).
 ** TODO Multi-frame stitching
@@ -197,7 +197,7 @@ stable. Each task is sized to a meaningful unit of work, not a single commit.
    timestamps; do *not* average pixel data across time for moving bodies
    — instead, compute per-frame angles and combine with proper time
    correction.
-** TODO Angle measurement pipeline
+** DONE Angle measurement pipeline
    Given a stitched scene + horizon line + body centroid + camera
    intrinsics, output measured altitude with uncertainty.
 ** TODO Stitching/accuracy tradeoff knob
