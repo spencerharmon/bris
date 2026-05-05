@@ -159,7 +159,7 @@ stable. Each task is sized to a meaningful unit of work, not a single commit.
    catalog, all shipped as a unified ~bris-data~ payload.
 
 * Phase 2: Vision core (no platform code)
-** TODO Image abstraction
+** DONE Image abstraction
    ~Frame { width, height, pixels, timestamp, exposure, intrinsics }~.
    Support grayscale + Bayer + RGB. Zero-copy where possible.
 ** TODO Lens model + calibration
@@ -168,6 +168,9 @@ stable. Each task is sized to a meaningful unit of work, not a single commit.
    field self-calibration. Persist intrinsics per-device. For shipped
    hardware, a factory-default calibration is baked into the image and
    the user calibration workflow overrides it.
+   *Status:* model + undistortion math complete in ~bris-vision::lens~
+   (10 tests). Calibration *workflow* (corner detection, parameter
+   solve, persistence) still pending — needs the CLI hook.
 ** TODO Eye-height handling
    Eye height contributes to horizon dip, which is a per-fix correction.
    - Persist a default eye height per device (settings).
@@ -180,7 +183,7 @@ stable. Each task is sized to a meaningful unit of work, not a single commit.
    - Settings explainer: in significant seas, effective eye height
      ≈ standing height + ½ × dominant wave height + cockpit-above-water
      height. Document but do not compute — too many unknowns.
-** TODO Horizon detection
+** DONE Horizon detection
    Classical pipeline: downsample → gradient → RANSAC line fit on the
    sea/sky boundary. Return line in image coords + uncertainty. Report
    low-confidence results explicitly so the operator can reject the
