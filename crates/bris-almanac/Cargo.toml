@@ -20,3 +20,4 @@ vsop87.workspace = true
 [dev-dependencies]
 proptest.workspace = true
 approx.workspace = true
+chrono.workspace = true

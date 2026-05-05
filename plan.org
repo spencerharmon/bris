@@ -106,7 +106,7 @@ stable. Each task is sized to a meaningful unit of work, not a single commit.
    nutation, annual aberration, and atmospheric refraction at runtime.
 ** DONE Refraction model
    Bennett or Sæmundsson formula; allow temperature/pressure overrides.
-** TODO Almanac API surface
+** DONE Almanac API surface
    ~body_position(BodyId, Instant, Observer) -> ApparentPosition~
 ** TODO Benchmark on Pi Zero 2W
    Confirm <1 ms per body. Decide whether Chebyshev caching is needed.

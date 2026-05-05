@@ -118,6 +118,7 @@ version = "0.0.1"
 dependencies = [
  "approx",
  "bris-core",
+ "chrono",
  "proptest",
  "thiserror",
  "vsop87",
