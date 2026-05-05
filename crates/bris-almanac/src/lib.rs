@@ -11,8 +11,10 @@ pub mod catalog;
 pub mod ephemeris;
 pub mod frame;
 pub mod lunar;
+pub mod refraction;
 
 pub use catalog::{all_stars, by_hr, navigational_stars, position_at, StarPosition, StarRecord};
 pub use ephemeris::{heliocentric, sun_geocentric, Body, Heliocentric};
 pub use frame::{mean_obliquity, nutation, precession_angles, NutationAngles, PrecessionAngles};
 pub use lunar::{lunar_position, LunarPosition};
+pub use refraction::{bennett, Atmosphere, RefractionError};

@@ -101,7 +101,8 @@ fn parse_tsv(tsv: &str) -> Vec<ParsedStar> {
             continue;
         }
         let fields: Vec<&str> = line.split('\t').collect();
-        assert!(!(fields.len() < 9 || fields.len() > 10), 
+        assert!(
+            !(fields.len() < 9 || fields.len() > 10),
             "stars.tsv:{}: expected 9 or 10 fields, got {}: {:?}",
             line_no + 1,
             fields.len(),
@@ -134,19 +135,23 @@ fn parse_tsv(tsv: &str) -> Vec<ParsedStar> {
         // Sanity checks. Catch typos at build time rather than producing
         // a binary that quietly gives wrong fixes.
         let line_for_error = line_no + 1;
-        assert!((0.0..360.0).contains(&star.ra_deg), 
+        assert!(
+            (0.0..360.0).contains(&star.ra_deg),
             "stars.tsv:{line_for_error}: ra_deg out of [0, 360): {}",
             star.ra_deg
         );
-        assert!((-90.0..=90.0).contains(&star.dec_deg), 
+        assert!(
+            (-90.0..=90.0).contains(&star.dec_deg),
             "stars.tsv:{line_for_error}: dec_deg out of [-90, 90]: {}",
             star.dec_deg
         );
-        assert!((-2.0..=10.0).contains(&star.vmag), 
+        assert!(
+            (-2.0..=10.0).contains(&star.vmag),
             "stars.tsv:{line_for_error}: vmag out of plausible range [-2, 10]: {}",
             star.vmag
         );
-        assert!(!(star.parallax_mas < 0.0 || star.parallax_mas > 1000.0), 
+        assert!(
+            !(star.parallax_mas < 0.0 || star.parallax_mas > 1000.0),
             "stars.tsv:{line_for_error}: parallax_mas out of [0, 1000]: {}",
             star.parallax_mas
         );

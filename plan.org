@@ -104,7 +104,7 @@ stable. Each task is sized to a meaningful unit of work, not a single commit.
    Embed the 57 standard navigational stars + ~1000 brightest from
    Hipparcos as a ~const~ table. Apply proper motion, precession,
    nutation, annual aberration, and atmospheric refraction at runtime.
-** TODO Refraction model
+** DONE Refraction model
    Bennett or Sæmundsson formula; allow temperature/pressure overrides.
 ** TODO Almanac API surface
    ~body_position(BodyId, Instant, Observer) -> ApparentPosition~
