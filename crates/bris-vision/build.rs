@@ -92,7 +92,7 @@ fn emit_case_module(out: &mut String, case_name: &str, parsed: &ParsedCase) {
     let mod_name = sanitize_mod(case_name);
     let _ = writeln!(
         out,
-        "/// Generated tests for the `{case_name}` case ({:?}).",
+        "/// Generated tests for the `{case_name}` case (kind = `{:?}`).",
         parsed.case.kind
     );
     let _ = writeln!(out, "mod case_{mod_name} {{");

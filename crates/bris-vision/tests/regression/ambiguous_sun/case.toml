@@ -1,0 +1,70 @@
+# Regression metadata for ambiguous_sun.
+#
+# Ship's wake at dusk with sun glow but no defined sun disk visible
+# and broken cloud bands. The user flagged this scene with: "probably
+# won't produce a body fix — the centroid algorithm needs a saturated
+# bright disk. Useful as a test that the pipeline reports 'no body
+# found' cleanly rather than fabricating one."
+#
+# Empirical surprise: the unmasked centroid actually *does* land on
+# something (a 14891-px bright region from the dispersed sun glow) at
+# roughly (366, 115). It's not a "real" sun centroid — it's the
+# brightness-weighted center of a diffuse glow. The classifier and
+# the segmentation horizon both work fine.
+#
+# This is a useful case for the future "Sun/Moon peak-in-sky-mask"
+# work tracked in plan.org: peak detection inside the sky mask
+# should *fail* on this scene (no clear local maximum) where the
+# extended-disk centroider produces a meaningless answer. Once that
+# lands, this case's expectation should change to expected_failure
+# for centroiding.
+
+[case]
+name         = "ambiguous_sun"
+description  = "Ship's wake at dusk; diffuse sun glow without a defined disk; broken cloud bands"
+kind         = "working"
+frame_count  = 1
+frame_width  = 640
+frame_height = 360
+
+[expected_classifier]
+condition      = "day"
+min_confidence = 0.7
+
+# The unmasked centroid currently produces this position; not the
+# load-bearing assertion (it's a brightness-of-glow center, not a
+# real sun centroid), but recorded for regression-detection. If the
+# centroider's output shifts noticeably we want to know.
+[expected_centroid_frame0]
+x_px         = 365.77
+y_px         = 115.24
+tolerance_px = 5.0
+
+# Gradient detector finds too few candidate columns on this scene
+# (the diffuse glow doesn't produce a clean sea-sky gradient).
+[horizon.gradient]
+outcome       = "err"
+error_variant = "only 63 inliers"
+correctness   = "wrong"
+notes         = "Diffuse sun glow + broken clouds break the gradient detector's sea-sky assumption."
+
+# Sky-region detector works on this scene.
+[horizon.sky_region]
+outcome             = "ok"
+slope               = 0.063
+intercept           = 152.19
+slope_tolerance     = 0.05
+intercept_tolerance = 15.0
+inlier_count_min    = 100
+correctness         = "approximately_correct"
+
+# Segmentation detector finds every column producing a sky→sea
+# transition (512/512 — the model handles this scene well).
+[horizon.segmentation]
+outcome             = "ok"
+slope               = 0.017
+intercept           = 175.33
+slope_tolerance     = 0.05
+intercept_tolerance = 15.0
+inlier_count_min    = 400
+correctness         = "approximately_correct"

@@ -1,0 +1,58 @@
+# Regression metadata for sunrise.
+#
+# Container ship deck; sun on the horizon; very low altitude. The
+# user flagged: "hard for the current pipeline. Body very close to
+# horizon; refraction model uncertainty at low altitude is
+# documented to be large. May produce a sight with appropriately
+# wide σ; that itself is the success criterion."
+#
+# Empirical: the centroid lands at (312, 222) on a 2580-pixel
+# bright component — the sun on the horizon. **All three horizon
+# detectors fail**: the sky-region and segmentation detectors find
+# zero candidate columns (no clean sky→sea transition because the
+# sun is *on* the horizon, blending the two regions); the gradient
+# detector finds 71 candidates, below the 100-inlier threshold.
+#
+# This is an expected_failure case for horizon detection: until we
+# have either a near-horizon-aware horizon detector or a body-
+# excluding mask before horizon fitting, this scene cannot produce
+# a sight. The classifier and centroid both behave correctly.
+
+[case]
+name         = "sunrise"
+description  = "Container ship deck; sun rising on the horizon; low altitude"
+kind         = "expected_failure"
+frame_count  = 1
+frame_width  = 640
+frame_height = 360
+
+[expected_classifier]
+condition      = "day"
+min_confidence = 0.7
+
+# Centroid finds the sun even though it's on the horizon.
+[expected_centroid_frame0]
+x_px         = 312.09
+y_px         = 221.77
+tolerance_px = 5.0
+
+# All three horizon detectors fail: the sun blots out the sky→sea
+# transition in the columns where it's visible, leaving too few
+# clean candidates elsewhere.
+
+[horizon.gradient]
+outcome       = "err"
+error_variant = "only 71 inliers"
+correctness   = "wrong"
+
+[horizon.sky_region]
+outcome       = "err"
+error_variant = "not enough candidate columns"
+correctness   = "wrong"
+notes         = "Sun on horizon merges the sky and sea regions in the bright columns; no clean sky-region lower boundary exists across enough of the frame."
+
+[horizon.segmentation]
+outcome       = "err"
+error_variant = "not enough candidate columns"
+correctness   = "wrong"
+notes         = "Same failure mode: sun on horizon defeats the sky→sea transition extractor. A body-excluding mask before horizon fitting (future work) should resolve this."

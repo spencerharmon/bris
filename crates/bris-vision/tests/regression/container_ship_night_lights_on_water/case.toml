@@ -1,0 +1,47 @@
+# Regression metadata for container_ship_night_lights_on_water.
+#
+# Container ship deck at night with deck lights illuminating the
+# water. The user flagged: "adversarial case for night horizon.
+# Aurora-like glow on horizon will fool simple 'find dark/bright
+# transition' approaches; deck lights on water create false
+# features."
+#
+# Empirical: every detector currently fails. Centroid refuses (no
+# extended body). Sky-region and segmentation find zero candidate
+# columns. Gradient finds 65, below threshold. Classifier reports
+# Twilight at 0.69 confidence (mean luma 0.235, just past the 0.05
+# night threshold — deck-light glow contributes).
+#
+# This is a particularly hostile expected_failure case: even when a
+# future night-horizon detector lands, the deck-light glow on water
+# may fool it. Worth keeping as a regression-floor: if any future
+# detector starts producing a "horizon" on this scene, it's
+# probably wrong. Ideally the future detector also fails cleanly
+# rather than fabricating output.
+
+[case]
+name         = "container_ship_night_lights_on_water"
+description  = "Container ship at night; deck lights illuminate the water; aurora-like glow on horizon"
+kind         = "expected_failure"
+frame_count  = 1
+frame_width  = 640
+frame_height = 360
+
+[expected_classifier]
+condition = "twilight"
+notes     = "Image-only path. Astronomical prior would say Night; the deck-light glow lifts mean luma above the night threshold."
+
+[horizon.gradient]
+outcome       = "err"
+error_variant = "only 65 inliers"
+correctness   = "wrong"
+
+[horizon.sky_region]
+outcome       = "err"
+error_variant = "not enough candidate columns"
+correctness   = "wrong"
+
+[horizon.segmentation]
+outcome       = "err"
+error_variant = "not enough candidate columns"
+correctness   = "wrong"

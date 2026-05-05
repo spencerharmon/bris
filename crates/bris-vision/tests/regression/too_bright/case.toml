@@ -1,0 +1,74 @@
+# Regression metadata for too_bright.
+#
+# Sailboat with sail glare, sunset directly into the camera, and
+# water glare. The user flagged: "worst-case for unmasked centroid —
+# the sail and water are both saturated bright. Sky mask + masked
+# centroid is the correct test target here."
+#
+# Empirical: gradient and segmentation horizon detectors both
+# produce horizons (slope ≈ 0.15, intercept ≈ 120-124). They agree
+# to within 0.005 in slope and 5 px in intercept — good cross-method
+# confirmation. The sky-region detector fails (only 76 inliers, no
+# clear sky region against the sail glare). Centroid lands at
+# (222, 104) on a huge 22444-pixel saturated region, almost
+# certainly the wrong answer (a brightness-weighted center of the
+# sail glare rather than the actual sun position).
+#
+# Once peak-in-sky-mask centroiding lands (plan.org follow-up), this
+# case will exercise the corrected centroid path; the unmasked
+# centroid will remain in this case.toml as a documented failure
+# mode the masked variant should fix.
+#
+# Frame is JPEG q85 (45 KB) — re-encoded from a 214 KB PNG to fit
+# the corpus size constraint. Verified that compression doesn't
+# meaningfully change pipeline outputs (centroid shifted ~0.1 px,
+# horizon parameters unchanged within noise).
+
+[case]
+name         = "too_bright"
+description  = "Sailboat; sunset directly into camera; sail glare; water glare"
+kind         = "working"
+frame_count  = 1
+frame_width  = 640
+frame_height = 360
+frames       = ["frame.jpg"]
+
+[expected_classifier]
+condition      = "day"
+min_confidence = 0.7
+
+# Unmasked centroid: known wrong (lands in sail glare). Recorded to
+# detect regressions in the centroider's behavior, not as a target
+# for correctness.
+[expected_centroid_frame0]
+x_px         = 221.93
+y_px         = 104.01
+tolerance_px = 5.0
+
+# Gradient and segmentation both produce horizons that agree.
+[horizon.gradient]
+outcome             = "ok"
+slope               = 0.153
+intercept           = 119.64
+slope_tolerance     = 0.05
+intercept_tolerance = 15.0
+inlier_count_min    = 90
+correctness         = "approximately_correct"
+notes               = "Gradient detector picks up the deck-water boundary; happens to be co-linear with the sea horizon in this frame."
+
+# Sky-region fails: no clean sky region against the bright sail.
+[horizon.sky_region]
+outcome       = "err"
+error_variant = "only 76 inliers"
+correctness   = "wrong"
+notes         = "Saturated sail and bright sky merge — no clean sky-region lower boundary."
+
+[horizon.segmentation]
+outcome             = "ok"
+slope               = 0.148
+intercept           = 121.45
+slope_tolerance     = 0.05
+intercept_tolerance = 15.0
+inlier_count_min    = 150
+correctness         = "approximately_correct"
+notes               = "Segmentation correctly excludes the sail (vessel class) and finds the sea-sky horizon. Agrees with the gradient detector to within 0.005 in slope, 2 px in intercept — strong cross-method confirmation."

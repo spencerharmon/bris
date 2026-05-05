@@ -1,0 +1,68 @@
+# Regression metadata for night_test_highres.
+#
+# Stars over a ship's wake on a dark sky. The user flagged this as
+# a "night case we can't yet handle. Star peak detection should
+# produce points; plate solving doesn't exist yet so star
+# identification will fail. Horizon detection will fail because
+# there's no daylight contrast."
+#
+# Empirical: surprisingly, the sky-region and segmentation horizon
+# detectors *both* find a horizon (slope ≈ 0, intercept ≈ 71-87),
+# corresponding to the dark-water / dark-but-slightly-lighter-sky
+# boundary. The classifier currently says Twilight (mean luma
+# 0.155) — with an astronomical prior this would correctly
+# resolve to Night. The unmasked centroid lands at (253, 215) on a
+# 1156-pixel bright component — probably the brightest visible star
+# (or a small group of stars).
+#
+# Once plate solving lands, this case can flip from "ok-but-no-fix"
+# to a "working" night case. For now we record the current
+# pipeline behavior.
+
+[case]
+name         = "night_test_highres"
+description  = "Stars over ship's wake; dark sky; faint horizon visible"
+kind         = "working"
+frame_count  = 1
+frame_width  = 640
+frame_height = 360
+
+# Image-only classifier reads this as Twilight (luma is in the
+# [0.05, 0.30) band). Once the classifier consults an astronomical
+# prior (Sun altitude well below -12°) this will resolve to Night.
+[expected_classifier]
+condition = "twilight"
+notes     = "Image-only path. With astronomical prior this would resolve to Night."
+
+[expected_centroid_frame0]
+x_px         = 253.14
+y_px         = 215.40
+tolerance_px = 5.0
+
+[horizon.gradient]
+outcome       = "err"
+error_variant = "only 33 inliers"
+correctness   = "wrong"
+
+# Surprisingly, the sky-region detector finds a horizon at this
+# luma level — mean-brightness threshold catches the slight
+# sky-vs-sea brightness difference.
+[horizon.sky_region]
+outcome             = "ok"
+slope               = 0.002
+intercept           = 71.05
+slope_tolerance     = 0.05
+intercept_tolerance = 15.0
+inlier_count_min    = 60
+correctness         = "approximately_correct"
+notes               = "Picks up the slight luma difference between dark sea and dark-but-slightly-brighter sky. Useful unexpected outcome."
+
+[horizon.segmentation]
+outcome             = "ok"
+slope               = -0.021
+intercept           = 86.54
+slope_tolerance     = 0.05
+intercept_tolerance = 15.0
+inlier_count_min    = 400
+correctness         = "approximately_correct"
+notes               = "Segmentation finds 462 of 512 columns producing transitions on this dark-sky scene; the model generalizes better than expected here."

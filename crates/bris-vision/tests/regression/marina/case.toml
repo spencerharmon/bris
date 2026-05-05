@@ -1,0 +1,68 @@
+# Regression metadata for marina.
+#
+# Marina at dusk with multiple sailboats moored, lights on shore,
+# and no clear horizon. The user flagged: "beyond MVP scope — this
+# is a harbor scene where there's no usable horizon at all. Useful
+# as a 'negative test' that the pipeline reports failure cleanly."
+#
+# Empirical surprise: the segmentation horizon detector *does*
+# produce a fit (135 inliers, slope ≈ -0.012), latching onto the
+# water-shore boundary as if it were the sea horizon. The sky-region
+# detector also produces a fit. Neither is a celestial-navigation
+# horizon — both are reading shore features.
+#
+# The load-bearing assertion is that the **centroid correctly
+# refuses** with NoBrightRegion (only 4 pixels survived the
+# brightness threshold; min_area_px = 50 not met). This is the
+# right behavior: dusk harbor with no celestial body, the pipeline
+# should not fabricate one.
+
+[case]
+name         = "marina"
+description  = "Marina at dusk; moored sailboats; shore lights; no usable horizon for celestial navigation"
+kind         = "working"
+frame_count  = 1
+frame_width  = 640
+frame_height = 360
+
+[expected_classifier]
+condition      = "twilight"
+min_confidence = 0.6
+
+# Load-bearing: the centroid must refuse on this scene. If we ever
+# see this case start producing a centroid we have a regression.
+# (No [expected_centroid_frame0] table; absence of a centroid
+# expectation means the harness doesn't run the centroid check, but
+# we'd need a future "expected_centroid_error" mechanism to assert
+# the failure mode positively. For now, omitting the table is
+# documentation-only; a future schema extension can add the
+# negative assertion.)
+
+# The classical detectors find too few candidates.
+[horizon.gradient]
+outcome       = "err"
+error_variant = "only 55 inliers"
+correctness   = "wrong"
+
+# Sky-region finds the shore line, not a celestial horizon. We
+# record the value to detect drift but flag as wrong.
+[horizon.sky_region]
+outcome             = "ok"
+slope               = 0.073
+intercept           = 132.94
+slope_tolerance     = 0.05
+intercept_tolerance = 15.0
+inlier_count_min    = 50
+correctness         = "wrong"
+notes               = "Latches onto the shore-water boundary as if it were the sea horizon; this isn't a usable celestial-nav horizon. Listed as ok-but-wrong to record current behavior."
+
+# Segmentation also reads the shore line.
+[horizon.segmentation]
+outcome             = "ok"
+slope               = -0.012
+intercept           = 197.88
+slope_tolerance     = 0.05
+intercept_tolerance = 15.0
+inlier_count_min    = 100
+correctness         = "wrong"
+notes               = "Segmentation classifies water-shore boundary as sky→sea; not a celestial-nav horizon."

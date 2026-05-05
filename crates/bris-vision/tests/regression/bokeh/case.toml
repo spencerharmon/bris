@@ -1,0 +1,57 @@
+# Regression metadata for bokeh.
+#
+# Container ship at night (or near-night dusk) with the sun visible
+# through optical bokeh artifacts — concentric rings of light caused
+# by the lens aperture. The user flagged this with: "may surprise —
+# the bokeh 'rays' from the sun create false bright patterns. Sky
+# mask should still work; centroid will probably land near the
+# actual sun core."
+#
+# Empirical: the centroid lands at (335, 97) on a 698-pixel
+# component, which corresponds to the bokeh center (the actual sun's
+# brightest core). Sky-region horizon detector works. Segmentation
+# detector returns zero candidate columns — the bokeh artifacts
+# confuse the sky/sea/obstruction classification enough that no
+# clean sky→sea transition survives. This is documented behavior:
+# the segmentation detector is brittle in genuinely unusual lens
+# conditions.
+
+[case]
+name         = "bokeh"
+description  = "Container ship night; sun visible through optical bokeh artifacts"
+kind         = "working"
+frame_count  = 1
+frame_width  = 640
+frame_height = 360
+
+[expected_classifier]
+condition = "day"
+# No min_confidence: the classifier reports 0.69 here (mean luma
+# 0.36, just past the day threshold). Borderline-day is correct.
+
+[expected_centroid_frame0]
+x_px         = 335.40
+y_px         = 96.74
+tolerance_px = 5.0
+
+[horizon.gradient]
+outcome       = "err"
+error_variant = "only 75 inliers"
+correctness   = "wrong"
+
+[horizon.sky_region]
+outcome             = "ok"
+slope               = 0.0956
+intercept           = 226.97
+slope_tolerance     = 0.05
+intercept_tolerance = 15.0
+inlier_count_min    = 80
+correctness         = "approximately_correct"
+
+# Segmentation produces zero candidates on this scene. Documented as
+# a known-failure case for the segmentation detector under bokeh.
+[horizon.segmentation]
+outcome       = "err"
+error_variant = "not enough candidate columns"
+correctness   = "wrong"
+notes         = "Bokeh artifacts confuse the model's sky/sea/obstruction classification; no clean sky→sea transitions survive."

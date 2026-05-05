@@ -1,0 +1,61 @@
+# Regression metadata for cloudy_sun.
+#
+# Container ship deck with the sun behind clouds and a distant city
+# skyline visible. The user flagged: "likely to work for horizon
+# (clear sky-sea boundary on left); body centroid will pick up the
+# brightest cloud-haze region near the sun."
+#
+# Empirical: all three classical-ish horizon paths produce a fit.
+# Gradient and sky-region agree closely; segmentation finds 144
+# inliers, just below the default 173 threshold (= 0.5 × 287
+# candidates), so segmentation reports LowConfidence. Centroid lands
+# at (269, 104) on a large bright region (the cloud-haze near the
+# sun, exactly as the user predicted).
+
+[case]
+name         = "cloudy_sun"
+description  = "Container ship deck; sun behind clouds; distant city skyline visible on horizon"
+kind         = "working"
+frame_count  = 1
+frame_width  = 640
+frame_height = 360
+
+[expected_classifier]
+condition      = "day"
+min_confidence = 0.7
+
+# Centroid picks up the cloud-haze near the sun (not a clean sun
+# centroid, but the brightest connected component).
+[expected_centroid_frame0]
+x_px         = 269.35
+y_px         = 103.71
+tolerance_px = 5.0
+
+[horizon.gradient]
+outcome             = "ok"
+slope               = 0.003
+intercept           = 237.76
+slope_tolerance     = 0.05
+intercept_tolerance = 15.0
+inlier_count_min    = 80
+correctness         = "approximately_correct"
+
+[horizon.sky_region]
+outcome             = "ok"
+slope               = 0.019
+intercept           = 232.65
+slope_tolerance     = 0.05
+intercept_tolerance = 15.0
+inlier_count_min    = 80
+correctness         = "approximately_correct"
+notes               = "Sky-region and gradient detectors agree on this scene to ~5 px in intercept; both find the sea-sky horizon despite the city skyline being visible."
+
+# Segmentation finds 144/287 inliers — just below the default 0.5
+# threshold (need 173). Reports LowConfidence rather than producing
+# a fit. Documented as a scene where the model's confidence drops
+# because of the city skyline introducing an obstruction band.
+[horizon.segmentation]
+outcome       = "err"
+error_variant = "only 144 inliers"
+correctness   = "wrong"
+notes         = "City skyline along the horizon causes the obstruction-aware extractor to find candidates but RANSAC's inlier fraction drops below 0.5. The classical detectors fare better here."

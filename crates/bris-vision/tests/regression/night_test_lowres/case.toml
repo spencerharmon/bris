@@ -1,0 +1,76 @@
+# Regression metadata for night_test_lowres.
+#
+# Cellphone night shot, bright moon visible, faint horizon, very
+# dark. The user flagged this specifically: "I can make out the
+# horizon and the stars, so it's a perfect test case for us." This
+# is the highest-priority night case the user has captured.
+#
+# Frames are 9:16 portrait (1080×1920). The portrait orientation is
+# the *intended* viewing orientation — phones encode in viewing
+# order — so no rotation is applied. The pipeline processes the
+# frame at 1080×1920 directly.
+#
+# Frame is JPEG q85 (81 KB) — re-encoded from a 235 KB PNG to fit
+# the corpus size constraint. Verified that compression doesn't
+# change pipeline outputs (centroid shifted ~0.05 px).
+#
+# Empirical:
+#   - Classifier correctly says Night (mean luma 0.024). Confidence
+#     is moderate (0.52) because mean luma sits firmly in the night
+#     band but lacks the astronomical prior that would push
+#     confidence higher.
+#   - Centroid finds the moon at (454, 350) on an 812-pixel bright
+#     component. **This is the user's stated success criterion:
+#     "moon centroiding *should* work."** It does.
+#   - All three horizon detectors fail: too few candidates at this
+#     low overall brightness. This is exactly the case that
+#     motivates the night-horizon-detection design problem.
+#
+# Once a night-horizon detector lands, the horizon expectations
+# here flip from err to ok. The centroid + classifier behavior is
+# already correct.
+
+[case]
+name         = "night_test_lowres"
+description  = "Cellphone night shot; bright moon; faint horizon; portrait 1080x1920 (no rotation)"
+kind         = "working"
+frame_count  = 1
+frame_width  = 1080
+frame_height = 1920
+source_rotation_deg = 0
+frames       = ["frame.jpg"]
+
+[expected_classifier]
+condition = "night"
+# No min_confidence: the image-only classifier reports 0.52 here
+# (mean luma well in the night band, but image-only confidence is
+# capped without astronomical agreement). Asserting a floor would
+# either trip on borderline night scenes or be uninformative; we
+# rely on the condition match itself.
+
+# Load-bearing: the moon is found by the unmasked centroid. The
+# user's stated success criterion for this scene.
+[expected_centroid_frame0]
+x_px         = 454.54
+y_px         = 349.92
+tolerance_px = 5.0
+
+# All three horizon detectors fail. This is the motivating case
+# for the night-horizon detection work tracked in plan.org.
+[horizon.gradient]
+outcome       = "err"
+error_variant = "only 29 inliers"
+correctness   = "wrong"
+notes         = "Gradient threshold tuned for daylight luma; needs a night variant or a luma-adaptive threshold."
+
+[horizon.sky_region]
+outcome       = "err"
+error_variant = "only 40 inliers"
+correctness   = "wrong"
+notes         = "Sky-region detector requires a brightness percentile that can identify 'sky'; in a uniformly-dark frame this is meaningless."
+
+[horizon.segmentation]
+outcome       = "err"
+error_variant = "only 90 inliers"
+correctness   = "wrong"
+notes         = "ADE20K-trained model finds some sky/sea structure but RANSAC rejects most as outliers. A night-domain segmentation model (or a non-segmentation night detector) should resolve this."

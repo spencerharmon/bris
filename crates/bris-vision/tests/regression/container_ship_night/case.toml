@@ -1,0 +1,49 @@
+# Regression metadata for container_ship_night.
+#
+# Container ship deck on a truly dark night with a dense star
+# field. The user flagged this as "best plate-solving test case
+# when we have a plate solver. Many bright stars visible against
+# truly dark sky."
+#
+# Empirical: **every detector currently fails on this scene.** The
+# classifier reports Twilight (image-only path overestimates because
+# of moonlight or deck-light glow contributing to mean luma); with
+# an astronomical prior it would correctly resolve to Night. The
+# centroid refuses (only 9 px above threshold — no extended bright
+# body in frame, the stars are too small). All three horizon
+# detectors fail.
+#
+# This is the canonical expected_failure case for the current
+# pipeline. Once plate solving (Phase 3) and a night-horizon
+# detector land, this scene flips to a working night case.
+
+[case]
+name         = "container_ship_night"
+description  = "Container ship deck; dark night sky; dense star field; no body, no horizon"
+kind         = "expected_failure"
+frame_count  = 1
+frame_width  = 640
+frame_height = 360
+
+# Image-only path overestimates; with an astronomical prior this
+# resolves to Night. Documented and accepted.
+[expected_classifier]
+condition = "twilight"
+notes     = "Image-only. Once the engine consults the almanac this will report Night."
+
+# All three horizon detectors fail.
+[horizon.gradient]
+outcome       = "err"
+error_variant = "only 48 inliers"
+correctness   = "wrong"
+
+[horizon.sky_region]
+outcome       = "err"
+error_variant = "only 81 inliers"
+correctness   = "wrong"
+
+[horizon.segmentation]
+outcome       = "err"
+error_variant = "not enough candidate columns"
+correctness   = "wrong"
+notes         = "ADE20K-trained model has no class for 'dark sky with stars'; classifies the entire frame as something other than sky→sea."
