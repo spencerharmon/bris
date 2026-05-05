@@ -10,15 +10,18 @@
 //!
 //! UTC is offset from TAI by an integer number of seconds that grows
 //! whenever a leap second is inserted. The schedule is published by the
-//! IERS in Bulletin C. We embed the table as a `const` and refuse to
-//! convert times beyond a documented expiration; see [`LEAP_TABLE_EXPIRES`].
+//! IERS in Bulletin C, and a machine-readable form is mirrored by IANA
+//! at <https://data.iana.org/time-zones/data/leap-seconds.list>.
 //!
-//! As of the most recent commit, no leap second has been added since
-//! 2017-01-01 (TAI−UTC = 37 s). The IERS has announced an intent to
-//! deprecate leap seconds by 2035, but this code does not assume that.
-//! The table will be regenerated periodically; stale-table detection
-//! lives in `plan.org` Phase 1.5 and inflates time uncertainty rather
-//! than refusing to compute fixes.
+//! We vendor that file at `crates/bris-core/data/leap-seconds.list` and
+//! the build script (`crates/bris-core/build.rs`) parses it at compile
+//! time, emitting [`LEAP_TABLE`] and [`LEAP_TABLE_EXPIRES_UNIX`].
+//! Refreshing the table is a single-file `cp`; no Rust code changes
+//! are required.
+//!
+//! As of the most recent vendored update, no leap second has been added
+//! since 2017-01-01 (TAI−UTC = 37 s). The IERS has announced an intent
+//! to deprecate leap seconds by 2035, but this code does not assume that.
 //!
 //! # Floating-point precision
 //!
@@ -31,208 +34,63 @@
 //! navigation), a split (`jd_int`, `jd_frac`) representation would be the
 //! correct upgrade.
 
-use chrono::{DateTime, Datelike, NaiveDate, TimeZone, Timelike, Utc};
+use chrono::{DateTime, Datelike, Timelike, Utc};
 
-/// One entry in the historical leap second table.
-#[derive(Debug, Clone, Copy)]
-struct LeapEntry {
-    /// First UTC instant at which `tai_minus_utc` becomes effective.
-    /// All leap seconds historically have occurred at midnight UTC
-    /// at the end of June or December.
-    effective_utc_y: i32,
-    effective_utc_m: u32,
-    effective_utc_d: u32,
-    /// Integer seconds: `TAI = UTC + tai_minus_utc` from this instant on.
-    tai_minus_utc: i32,
+// Generated at build time from data/leap-seconds.list.
+#[allow(clippy::unreadable_literal)]
+mod leap_table {
+    include!(concat!(env!("OUT_DIR"), "/leap_table.rs"));
+}
+use leap_table::{LEAP_TABLE, LEAP_TABLE_EXPIRES_UNIX, LEAP_TABLE_UPDATED_UNIX};
+
+/// Unix timestamp at which the embedded `leap-seconds.list` was last
+/// updated. Phase 1.5 (time integrity) uses this to drive the
+/// stale-table-detection rule: if the table is older than a configured
+/// threshold, time uncertainty is inflated.
+pub const LEAP_TABLE_UPDATED_AT_UNIX: i64 = LEAP_TABLE_UPDATED_UNIX;
+
+/// Date through which the embedded leap-second table is authoritative,
+/// as `(year, month, day)` of the first day for which the table is no
+/// longer authoritative.
+///
+/// Computed at compile time from the vendored IANA `leap-seconds.list`.
+pub const LEAP_TABLE_EXPIRES: (i32, u32, u32) = compute_expires_ymd();
+
+const fn compute_expires_ymd() -> (i32, u32, u32) {
+    // We unconditionally trust the generated `LEAP_TABLE_EXPIRES_UNIX`
+    // here; computing it back to (Y, M, D) at const-eval time without
+    // the chrono crate is a small chore. Chrono's `from_timestamp` is
+    // not const, so we approximate with the standard civil-from-days
+    // algorithm. Reference: Howard Hinnant's "Date Algorithms".
+    let days = LEAP_TABLE_EXPIRES_UNIX / 86_400;
+    civil_from_days(days)
 }
 
-/// The embedded leap second table. Sourced from IERS Bulletin C history.
-///
-/// Order is chronological; the last entry is the currently-effective offset
-/// from the most recent leap second to [`LEAP_TABLE_EXPIRES`].
-const LEAP_TABLE: &[LeapEntry] = &[
-    // First IERS leap second (after the 1972 introduction of UTC with
-    // a 10-second TAI offset baseline). This table starts at the modern
-    // leap-second era; pre-1972 atomic time conventions are not supported.
-    LeapEntry {
-        effective_utc_y: 1972,
-        effective_utc_m: 1,
-        effective_utc_d: 1,
-        tai_minus_utc: 10,
-    },
-    LeapEntry {
-        effective_utc_y: 1972,
-        effective_utc_m: 7,
-        effective_utc_d: 1,
-        tai_minus_utc: 11,
-    },
-    LeapEntry {
-        effective_utc_y: 1973,
-        effective_utc_m: 1,
-        effective_utc_d: 1,
-        tai_minus_utc: 12,
-    },
-    LeapEntry {
-        effective_utc_y: 1974,
-        effective_utc_m: 1,
-        effective_utc_d: 1,
-        tai_minus_utc: 13,
-    },
-    LeapEntry {
-        effective_utc_y: 1975,
-        effective_utc_m: 1,
-        effective_utc_d: 1,
-        tai_minus_utc: 14,
-    },
-    LeapEntry {
-        effective_utc_y: 1976,
-        effective_utc_m: 1,
-        effective_utc_d: 1,
-        tai_minus_utc: 15,
-    },
-    LeapEntry {
-        effective_utc_y: 1977,
-        effective_utc_m: 1,
-        effective_utc_d: 1,
-        tai_minus_utc: 16,
-    },
-    LeapEntry {
-        effective_utc_y: 1978,
-        effective_utc_m: 1,
-        effective_utc_d: 1,
-        tai_minus_utc: 17,
-    },
-    LeapEntry {
-        effective_utc_y: 1979,
-        effective_utc_m: 1,
-        effective_utc_d: 1,
-        tai_minus_utc: 18,
-    },
-    LeapEntry {
-        effective_utc_y: 1980,
-        effective_utc_m: 1,
-        effective_utc_d: 1,
-        tai_minus_utc: 19,
-    },
-    LeapEntry {
-        effective_utc_y: 1981,
-        effective_utc_m: 7,
-        effective_utc_d: 1,
-        tai_minus_utc: 20,
-    },
-    LeapEntry {
-        effective_utc_y: 1982,
-        effective_utc_m: 7,
-        effective_utc_d: 1,
-        tai_minus_utc: 21,
-    },
-    LeapEntry {
-        effective_utc_y: 1983,
-        effective_utc_m: 7,
-        effective_utc_d: 1,
-        tai_minus_utc: 22,
-    },
-    LeapEntry {
-        effective_utc_y: 1985,
-        effective_utc_m: 7,
-        effective_utc_d: 1,
-        tai_minus_utc: 23,
-    },
-    LeapEntry {
-        effective_utc_y: 1988,
-        effective_utc_m: 1,
-        effective_utc_d: 1,
-        tai_minus_utc: 24,
-    },
-    LeapEntry {
-        effective_utc_y: 1990,
-        effective_utc_m: 1,
-        effective_utc_d: 1,
-        tai_minus_utc: 25,
-    },
-    LeapEntry {
-        effective_utc_y: 1991,
-        effective_utc_m: 1,
-        effective_utc_d: 1,
-        tai_minus_utc: 26,
-    },
-    LeapEntry {
-        effective_utc_y: 1992,
-        effective_utc_m: 7,
-        effective_utc_d: 1,
-        tai_minus_utc: 27,
-    },
-    LeapEntry {
-        effective_utc_y: 1993,
-        effective_utc_m: 7,
-        effective_utc_d: 1,
-        tai_minus_utc: 28,
-    },
-    LeapEntry {
-        effective_utc_y: 1994,
-        effective_utc_m: 7,
-        effective_utc_d: 1,
-        tai_minus_utc: 29,
-    },
-    LeapEntry {
-        effective_utc_y: 1996,
-        effective_utc_m: 1,
-        effective_utc_d: 1,
-        tai_minus_utc: 30,
-    },
-    LeapEntry {
-        effective_utc_y: 1997,
-        effective_utc_m: 7,
-        effective_utc_d: 1,
-        tai_minus_utc: 31,
-    },
-    LeapEntry {
-        effective_utc_y: 1999,
-        effective_utc_m: 1,
-        effective_utc_d: 1,
-        tai_minus_utc: 32,
-    },
-    LeapEntry {
-        effective_utc_y: 2006,
-        effective_utc_m: 1,
-        effective_utc_d: 1,
-        tai_minus_utc: 33,
-    },
-    LeapEntry {
-        effective_utc_y: 2009,
-        effective_utc_m: 1,
-        effective_utc_d: 1,
-        tai_minus_utc: 34,
-    },
-    LeapEntry {
-        effective_utc_y: 2012,
-        effective_utc_m: 7,
-        effective_utc_d: 1,
-        tai_minus_utc: 35,
-    },
-    LeapEntry {
-        effective_utc_y: 2015,
-        effective_utc_m: 7,
-        effective_utc_d: 1,
-        tai_minus_utc: 36,
-    },
-    LeapEntry {
-        effective_utc_y: 2017,
-        effective_utc_m: 1,
-        effective_utc_d: 1,
-        tai_minus_utc: 37,
-    },
-];
-
-/// Date through which the embedded leap-second table is authoritative.
-///
-/// This is the announced validity end of the most recent IERS Bulletin C
-/// known to the build. After this date, the table is considered stale
-/// and time uncertainty must be inflated; see `plan.org` Phase 1.5.
-///
-/// Stored as `(year, month, day)` of the first day for which the table
-/// is no longer authoritative.
-pub const LEAP_TABLE_EXPIRES: (i32, u32, u32) = (2027, 7, 1);
+/// Converts days since the Unix epoch (1970-01-01) to a proleptic
+/// Gregorian (year, month, day). const-fn version of Howard Hinnant's
+/// algorithm; published explicitly into the public domain by the
+/// author. The integer-narrowing casts are intentional: at any plausible
+/// input range (Unix-epoch days fit in i32 for any year < 5.8M AD) they
+/// don't lose information.
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_lossless,
+    clippy::cast_possible_wrap
+)]
+const fn civil_from_days(z: i64) -> (i32, u32, u32) {
+    let z = z + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = (z - era * 146_097) as u32;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe as i64 + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+    (y as i32, m, d)
+}
 
 /// TT − TAI is a defined constant: 32.184 seconds.
 const TT_MINUS_TAI: f64 = 32.184;
@@ -349,12 +207,7 @@ pub fn utc_to_ut1(utc: DateTime<Utc>, delta_ut1_secs: f64) -> Ut1 {
 /// offset) but callers should treat the result with elevated time
 /// uncertainty per `plan.org` Phase 1.5.
 pub fn leap_table_valid_for(utc: DateTime<Utc>) -> bool {
-    let (y, m, d) = LEAP_TABLE_EXPIRES;
-    let expires = NaiveDate::from_ymd_opt(y, m, d)
-        .and_then(|nd| nd.and_hms_opt(0, 0, 0))
-        .and_then(|ndt| Utc.from_local_datetime(&ndt).single())
-        .expect("LEAP_TABLE_EXPIRES is a valid date");
-    utc < expires
+    utc.timestamp() < LEAP_TABLE_EXPIRES_UNIX
 }
 
 /// Convert a UTC `DateTime` to its Julian Date.
@@ -387,38 +240,16 @@ fn utc_to_julian_date(utc: DateTime<Utc>) -> f64 {
 /// Look up the TAI−UTC integer-second offset effective at the given UTC
 /// instant.
 fn leap_offset_secs(utc: DateTime<Utc>) -> Result<i32, TimeError> {
+    let unix = utc.timestamp();
     let first = LEAP_TABLE.first().expect("leap table is non-empty");
-    let first_effective = build_utc(
-        first.effective_utc_y,
-        first.effective_utc_m,
-        first.effective_utc_d,
-    )?;
-    if utc < first_effective {
+    if unix < first.0 {
         return Err(TimeError::BeforeLeapTable);
     }
-    // Linear scan — table is small (< 30 entries) and called infrequently
-    // enough that a binary search would be premature optimization.
-    let mut current = first.tai_minus_utc;
-    for entry in LEAP_TABLE.iter().skip(1) {
-        let effective = build_utc(
-            entry.effective_utc_y,
-            entry.effective_utc_m,
-            entry.effective_utc_d,
-        )?;
-        if utc < effective {
-            break;
-        }
-        current = entry.tai_minus_utc;
-    }
-    Ok(current)
-}
-
-/// Construct a UTC `DateTime` at midnight on the given date.
-fn build_utc(y: i32, m: u32, d: u32) -> Result<DateTime<Utc>, TimeError> {
-    NaiveDate::from_ymd_opt(y, m, d)
-        .and_then(|nd| nd.and_hms_opt(0, 0, 0))
-        .and_then(|ndt| Utc.from_local_datetime(&ndt).single())
-        .ok_or(TimeError::InvalidDate)
+    // Binary search: find the entry with the largest effective_unix ≤ unix.
+    let idx = LEAP_TABLE
+        .binary_search_by_key(&unix, |&(u, _)| u)
+        .unwrap_or_else(|insert_pos| insert_pos.saturating_sub(1));
+    Ok(LEAP_TABLE[idx].1)
 }
 
 /// Errors converting between time scales.

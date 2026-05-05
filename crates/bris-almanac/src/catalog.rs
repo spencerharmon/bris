@@ -20,9 +20,14 @@
 use bris_core::time::{Tt, JD_J2000};
 
 // Generated at build time from data/stars.tsv. Suppress style lints on
-// the generated literals (long unreadable f64s) — they're machine-emitted
-// values, not human-edited code.
-#[allow(clippy::unreadable_literal)]
+// the generated literals — they're machine-emitted values, not human-
+// edited code, and contain pi/tau approximations from RA values near
+// 24h (= 2π radians).
+#[allow(
+    clippy::unreadable_literal,
+    clippy::approx_constant,
+    clippy::excessive_precision
+)]
 mod catalog_data {
     use super::StarRecord;
     include!(concat!(env!("OUT_DIR"), "/catalog_data.rs"));
@@ -156,10 +161,13 @@ mod tests {
 
     #[test]
     fn known_stars_present() {
-        // Spot-check a handful of well-known HR numbers.
-        assert_eq!(by_hr(2491).map(|s| s.name), Some("Sirius"));
-        assert_eq!(by_hr(7001).map(|s| s.name), Some("Vega"));
-        assert_eq!(by_hr(911).map(|s| s.name), Some("Polaris"));
+        // Spot-check a handful of well-known HR numbers. The BSC name
+        // field carries Bayer/Flamsteed designations, not the
+        // conventional "Sirius" / "Vega" names — those come from a
+        // separate name cross-reference (not yet imported).
+        assert_eq!(by_hr(2491).map(|s| s.name), Some("9Alp_CMa")); // Sirius
+        assert_eq!(by_hr(7001).map(|s| s.name), Some("3Alp_Lyr")); // Vega
+        assert_eq!(by_hr(424).map(|s| s.name), Some("1Alp_UMi")); // Polaris
     }
 
     #[test]
@@ -174,13 +182,17 @@ mod tests {
         // 57 embedded, but the ones we do should pass through.
         let count = navigational_stars().count();
         assert!(count > 0, "expected at least some navigational stars");
+        // Sirius (HR 2491) is a standard navigational star.
         assert!(
-            navigational_stars().any(|s| s.name == "Sirius"),
-            "Sirius should be in the navigational subset"
+            navigational_stars().any(|s| s.hr == 2491),
+            "Sirius (HR 2491) should be in the navigational subset"
         );
+        // Polaris (HR 424) is famously NOT one of the 57 navigational
+        // stars (it's at the pole, so its azimuth is meaningless for
+        // sight-reduction LOPs).
         assert!(
-            !navigational_stars().any(|s| s.name == "Polaris"),
-            "Polaris is famously NOT one of the 57 navigational stars"
+            !navigational_stars().any(|s| s.hr == 424),
+            "Polaris (HR 424) is famously NOT one of the 57 navigational stars"
         );
     }
 
@@ -194,10 +206,12 @@ mod tests {
 
     #[test]
     fn proper_motion_advances_correctly() {
-        // Sirius has very large proper motion: ~-546 mas/yr in RA,
-        // ~-1223 mas/yr in Dec. Over 100 years that's:
-        //   ΔRA × cos δ = -54600 mas = -54.6 arcsec
-        //   ΔDec       = -122300 mas = -122.3 arcsec
+        // Sirius has very large proper motion. BSC values:
+        //   pm_ra (tangent rate) = -553 mas/yr
+        //   pm_dec               = -1205 mas/yr
+        // Over 100 years that's:
+        //   ΔRA × cos δ = -55_300 mas = -55.3 arcsec on-sky
+        //   ΔDec        = -120_500 mas = -120.5 arcsec
         let sirius = by_hr(2491).unwrap();
         let pos = position_at(
             sirius,
@@ -207,17 +221,17 @@ mod tests {
         let ddec_arcsec = (pos.dec_rad - sirius.dec_rad).to_degrees() * 3600.0;
         // Tangent-rate convention: dα = (pm_ra / cos δ) × dt.
         let cos_dec = sirius.dec_rad.cos();
-        let expected_dra_arcsec = -546.01 * 100.0 / 1000.0 / cos_dec;
-        let expected_ddec_arcsec = -1223.07 * 100.0 / 1000.0;
+        let expected_dra_arcsec = -553.0 * 100.0 / 1000.0 / cos_dec;
+        let expected_ddec_arcsec = -1205.0 * 100.0 / 1000.0;
         assert_relative_eq!(dra_arcsec, expected_dra_arcsec, epsilon = 1e-3);
         assert_relative_eq!(ddec_arcsec, expected_ddec_arcsec, epsilon = 1e-3);
     }
 
     #[test]
     fn polaris_proper_motion_safe_near_pole() {
-        // Polaris is at δ ≈ 89.26°, so cos δ ≈ 0.013. Make sure the
-        // division-by-near-zero guard doesn't blow up.
-        let polaris = by_hr(911).unwrap();
+        // Polaris (HR 424) is at δ ≈ 89.26°, so cos δ ≈ 0.013. Make
+        // sure the division-by-near-zero guard doesn't blow up.
+        let polaris = by_hr(424).unwrap();
         let pos = position_at(
             polaris,
             Tt::from_julian_date(JD_J2000 + 100.0 * DAYS_PER_JULIAN_YEAR),
@@ -242,7 +256,15 @@ mod tests {
                 "{}: Dec out of range",
                 s.name
             );
-            assert!(s.parallax_mas >= 0.0, "{}: negative parallax", s.name);
+            // Parallax can be negative due to measurement noise (it
+            // happens for distant stars whose true parallax is below
+            // measurement uncertainty); BSC keeps these values rather
+            // than zeroing them. Cap the magnitude as a sanity check.
+            assert!(
+                s.parallax_mas.abs() <= 1500.0,
+                "{}: parallax magnitude implausible",
+                s.name
+            );
             assert!(
                 s.vmag >= -2.0 && s.vmag <= 10.0,
                 "{}: vmag implausible",

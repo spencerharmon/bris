@@ -151,8 +151,8 @@ fn parse_tsv(tsv: &str) -> Vec<ParsedStar> {
             star.vmag
         );
         assert!(
-            !(star.parallax_mas < 0.0 || star.parallax_mas > 1000.0),
-            "stars.tsv:{line_for_error}: parallax_mas out of [0, 1000]: {}",
+            star.parallax_mas.abs() <= 1500.0,
+            "stars.tsv:{line_for_error}: |parallax_mas| out of [0, 1500]: {}",
             star.parallax_mas
         );
 

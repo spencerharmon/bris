@@ -414,7 +414,7 @@ mod tests {
         let mut obs = Observer::default_dev();
         obs.latitude = bris_core::Latitude::from_degrees(42.4).unwrap();
         obs.longitude = bris_core::Longitude::from_degrees(-71.0).unwrap();
-        let polaris = crate::by_hr(911).unwrap();
+        let polaris = crate::by_hr(424).unwrap();
         let ap = star_apparent_place(polaris, tt, jd_ut1, obs).unwrap();
         let alt_deg = ap.direction.altitude.to_degrees();
         // Polaris should be within ~2° of observer latitude after all

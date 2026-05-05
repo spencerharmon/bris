@@ -60,7 +60,7 @@ stable. Each task is sized to a meaningful unit of work, not a single commit.
 ** DONE License, contributing guide, code of conduct
 ** DONE Set up ~rustfmt~, ~clippy~ (deny warnings in CI), ~cargo-deny~
 ** DONE Property-based test harness (proptest) wired up early
-** TODO Vendored leap-second source + build-time regenerator
+** DONE Vendored leap-second source + build-time regenerator
    Vendor an authoritative IERS leap-second source file (e.g. the
    IETF-mirrored ~leap-seconds.list~). A small build-time script or
    ~build.rs~ regenerates the ~LEAP_TABLE~ const in ~bris-core::time~
@@ -69,7 +69,7 @@ stable. Each task is sized to a meaningful unit of work, not a single commit.
    Rust source. The regenerator also produces the ~bris-data~ payload's
    leap-second portion, keeping in-binary defaults and OTA-update
    payloads in sync from one source.
-** TODO Vendored Yale BSC import + cross-check script
+** DONE Vendored Yale BSC import + cross-check script
    The catalog parser and runtime API (in ~bris-almanac::catalog~) work
    from a vetted starter ~data/stars.tsv~ with ~10 entries. To go from
    starter to production, write ~scripts/fetch_bsc.py~ which:

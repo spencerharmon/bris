@@ -43,3 +43,9 @@ ios/*.xcodeproj/xcuserdata/
 
 # Generated UniFFI bindings
 **/generated/
+
+# Vendored upstream data files re-fetched by scripts/import_*.
+# Checked-in TSVs in crates/bris-almanac/data/ are the source of truth
+# for the build; the raw upstream files in scripts/data/ are working
+# copies of the importer.
+scripts/data/
