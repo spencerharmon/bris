@@ -877,3 +877,96 @@ fn night_test_lowres_saturated_centroid_finds_moon() {
         TOL_PX,
     );
 }
+
+/// `sunrise` revisited: with the body-excluding column mask AND a
+/// relaxed inlier-fraction RANSAC config, the gradient detector
+/// finds the sea horizon. Without the mask + relaxed config (the
+/// default-config path tested by the `case_sunrise::*` generated
+/// tests), all three detectors fail because the saturated sun on
+/// the horizon blots out clean candidates and a third of the
+/// remaining candidates support the real horizon — strong absolute
+/// consensus but below the default 50% inlier-fraction floor.
+///
+/// This test demonstrates the path forward for low-altitude-body
+/// scenes: combine [`body_column_mask`] with a per-scene
+/// `min_inlier_fraction` adjustment. The resulting fix should be
+/// flagged with appropriately wide σ (large RMS residual) so the
+/// operator sees that low-altitude sights carry elevated
+/// uncertainty — which they correctly do.
+///
+/// The recorded values:
+///   - sun centroid: (311.74, 225.67)
+///   - horizon: y ≈ 241 (sun is ~15 px above horizon)
+///   - 71 inliers / ~190 candidates after body exclusion
+#[test]
+fn sunrise_horizon_findable_with_body_exclusion_and_relaxed_ransac() {
+    use bris_core::time::{Tt, JD_J2000};
+    use bris_vision::{
+        body_column_mask, centroid_saturated_body_in_mask, detect_horizon_with_column_mask,
+        load_frame_from_path, HorizonConfig, Intrinsics, SaturatedBodyConfig,
+    };
+    use std::path::Path;
+
+    let path = Path::new(harness::REGRESSION_DIR)
+        .join("sunrise")
+        .join("frame.png");
+    let dims = image::image_dimensions(&path).expect("dims");
+    let intrinsics = Intrinsics::placeholder(dims.0, dims.1);
+    let frame = load_frame_from_path(&path, Tt::from_julian_date(JD_J2000), 0, intrinsics)
+        .expect("load frame");
+
+    // Find the saturated sun.
+    let sun = centroid_saturated_body_in_mask(&frame, SaturatedBodyConfig::default(), None)
+        .expect("saturated sun should be detectable on this scene");
+
+    // Build a column mask that excludes the sun's columns + 8 px pad.
+    let radius_px = (f64::from(sun.area_px) / std::f64::consts::PI).sqrt();
+    let col_mask = body_column_mask(frame.width(), sun.x, radius_px, 8.0);
+    // Body should occupy a small fraction of the frame (~5% here).
+    let excluded = col_mask.iter().filter(|&&b| !b).count();
+    assert!(
+        excluded < 60,
+        "body-exclusion took out too many columns: {excluded}",
+    );
+
+    // Relaxed RANSAC config: 30% inlier fraction. The default 50%
+    // is too strict for low-altitude-body scenes where lens flare
+    // and sky-haze produce many spurious candidates.
+    let cfg = HorizonConfig {
+        min_inlier_fraction: 0.3,
+        ..HorizonConfig::default()
+    };
+    let line = detect_horizon_with_column_mask(&frame, cfg, Some(&col_mask))
+        .expect("body-excluding gradient detector with relaxed RANSAC should find the horizon");
+
+    // Recorded values: intercept ≈ 241, slope near zero.
+    assert!(
+        (line.intercept - 241.0).abs() < 5.0,
+        "horizon intercept {} not near recorded value 241",
+        line.intercept
+    );
+    assert!(
+        line.slope.abs() < 0.05,
+        "horizon slope {} not near horizontal",
+        line.slope
+    );
+    // Sun is above horizon (lower y is higher in image-space, and
+    // sun.y < line.intercept means above).
+    assert!(
+        sun.y < line.intercept,
+        "sun at y={} should be above horizon at y={}",
+        sun.y,
+        line.intercept
+    );
+    // Residual RMS is the load-bearing diagnostic that this scene
+    // produces a *low-confidence* horizon, even when the algorithm
+    // succeeds. ~2 px RMS at full resolution is on the high side;
+    // this would translate to elevated altitude σ in the eventual
+    // sight.
+    assert!(
+        line.residual_rms_px > 1.0,
+        "expected meaningful residual RMS (this is a hard scene); \
+         got {:.2} px",
+        line.residual_rms_px
+    );
+}

@@ -328,6 +328,37 @@ pub fn detect_horizon_via_segmentation(
     frame: &Frame,
     cfg: HorizonConfig,
 ) -> Result<HorizonLine, SegmentError> {
+    detect_horizon_via_segmentation_with_column_mask(frame, cfg, None)
+}
+
+/// As [`detect_horizon_via_segmentation`] but skips columns where
+/// `column_mask[x] == false`. The mask is in *frame-resolution*
+/// columns; pass `None` for "consider every column" (equivalent to
+/// [`detect_horizon_via_segmentation`]).
+///
+/// Use this when a saturated body sits on or near the horizon and
+/// would otherwise blot out the sky→sea transition in those
+/// columns. Construct the mask via [`crate::horizon::body_column_mask`]
+/// from the body's centroid + apparent radius.
+///
+/// # Errors
+///
+/// As [`detect_horizon_via_segmentation`].
+pub fn detect_horizon_via_segmentation_with_column_mask(
+    frame: &Frame,
+    cfg: HorizonConfig,
+    column_mask: Option<&[bool]>,
+) -> Result<HorizonLine, SegmentError> {
+    if let Some(m) = column_mask {
+        if m.len() != frame.width() as usize {
+            // Caller bug; surface as a typed error rather than
+            // silently treating as no-mask. Reuse the existing
+            // SegmentError variants by routing through HorizonError.
+            return Err(SegmentError::Horizon(
+                crate::horizon::HorizonError::InsufficientCandidates(0),
+            ));
+        }
+    }
     let path = frame.source_path.as_ref().ok_or_else(|| {
         SegmentError::LoadFailed(
             "segmentation requires Frame::with_source_path; \
@@ -364,6 +395,11 @@ pub fn detect_horizon_via_segmentation(
     let candidates_in_frame: Vec<(f64, f64)> = candidates
         .into_iter()
         .map(|c| (c.x * scale_x, c.y * scale_y))
+        // Filter by column mask in full-resolution column space.
+        .filter(|&(x, _)| match column_mask {
+            None => true,
+            Some(m) => m.get(x as usize).copied().unwrap_or(false),
+        })
         .collect();
 
     Ok(crate::horizon::finalize_horizon(

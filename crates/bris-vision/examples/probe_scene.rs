@@ -17,14 +17,18 @@ use std::path::PathBuf;
 
 use bris_core::time::{Tt, JD_J2000};
 use bris_vision::{
-    centroid_brightest_body, centroid_saturated_body_in_mask, classify, detect_horizon,
-    detect_horizon_via_sky_region, detect_peaks, load_frame_from_path_with_rotation,
+    body_column_mask, centroid_brightest_body, centroid_saturated_body_in_mask, classify,
+    detect_horizon, detect_horizon_via_sky_region, detect_horizon_via_sky_region_with_column_mask,
+    detect_horizon_with_column_mask, detect_peaks, load_frame_from_path_with_rotation,
     CentroidConfig, ConditionConfig, HorizonConfig, Intrinsics, PeakConfig, Rotation,
     SaturatedBodyConfig,
 };
 
 #[cfg(feature = "segmentation")]
-use bris_vision::{detect_horizon_via_segmentation, load_model, segment_with_rotation};
+use bris_vision::{
+    detect_horizon_via_segmentation, detect_horizon_via_segmentation_with_column_mask, load_model,
+    segment_with_rotation,
+};
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
@@ -124,12 +128,95 @@ fn main() {
 
     // Saturated-body centroid, unmasked.
     println!("\n[centroid_saturated_body_in_mask (no mask)]");
-    match centroid_saturated_body_in_mask(&frame, SaturatedBodyConfig::default(), None) {
+    let saturated_body =
+        centroid_saturated_body_in_mask(&frame, SaturatedBodyConfig::default(), None);
+    match &saturated_body {
         Ok(c) => println!(
             "  Ok: x = {:.2}, y = {:.2}, area_px = {}, mean_intensity = {:.0}",
             c.x, c.y, c.area_px, c.mean_intensity
         ),
         Err(e) => println!("  Err: {e}"),
+    }
+
+    // Body-excluding column mask + horizon detectors.
+    if let Ok(body) = &saturated_body {
+        let radius_px = (f64::from(body.area_px) / std::f64::consts::PI).sqrt();
+        let col_mask = body_column_mask(frame.width(), body.x, radius_px, 8.0);
+        let excluded = col_mask.iter().filter(|&&b| !b).count();
+        println!(
+            "\n[body-excluding column mask: r = {radius_px:.1} px, excludes {excluded} columns]"
+        );
+        println!("  detect_horizon (gradient) with body-excluding mask:");
+        match detect_horizon_with_column_mask(&frame, HorizonConfig::default(), Some(&col_mask)) {
+            Ok(line) => println!(
+                "    Ok: slope = {:.4}, intercept = {:.2}, inliers = {} / {}, RMS = {:.2} px",
+                line.slope,
+                line.intercept,
+                line.inlier_count,
+                line.candidate_count,
+                line.residual_rms_px
+            ),
+            Err(e) => println!("    Err: {e}"),
+        }
+        if std::env::var("PROBE_DUMP").is_ok() {
+            // Same with relaxed inlier fraction.
+            let cfg = HorizonConfig {
+                min_inlier_fraction: 0.3,
+                ..HorizonConfig::default()
+            };
+            println!(
+                "  detect_horizon (gradient) with body-excluding mask + min_inlier_fraction=0.3:"
+            );
+            match detect_horizon_with_column_mask(&frame, cfg, Some(&col_mask)) {
+                Ok(line) => {
+                    println!(
+                        "    Ok: slope = {:.4}, intercept = {:.2}, inliers = {} / {}, RMS = {:.2} px",
+                        line.slope, line.intercept, line.inlier_count, line.candidate_count,
+                        line.residual_rms_px
+                    );
+                }
+                Err(e) => println!("    Err: {e}"),
+            }
+        }
+        println!("  detect_horizon_via_sky_region with body-excluding mask:");
+        match detect_horizon_via_sky_region_with_column_mask(
+            &frame,
+            HorizonConfig::default(),
+            Some(&col_mask),
+        ) {
+            Ok(line) => println!(
+                "    Ok: slope = {:.4}, intercept = {:.2}, inliers = {} / {}, RMS = {:.2} px",
+                line.slope,
+                line.intercept,
+                line.inlier_count,
+                line.candidate_count,
+                line.residual_rms_px
+            ),
+            Err(e) => println!("    Err: {e}"),
+        }
+        #[cfg(feature = "segmentation")]
+        {
+            let model_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("data")
+                .join("segmentation.onnx");
+            if model_path.exists() {
+                load_model(&model_path).expect("load model");
+                let frame_with_path = frame.clone().with_source_path(path.clone());
+                println!("  detect_horizon_via_segmentation with body-excluding mask:");
+                match detect_horizon_via_segmentation_with_column_mask(
+                    &frame_with_path,
+                    HorizonConfig::default(),
+                    Some(&col_mask),
+                ) {
+                    Ok(line) => println!(
+                        "    Ok: slope = {:.4}, intercept = {:.2}, inliers = {} / {}, RMS = {:.2} px",
+                        line.slope, line.intercept, line.inlier_count, line.candidate_count,
+                        line.residual_rms_px
+                    ),
+                    Err(e) => println!("    Err: {e}"),
+                }
+            }
+        }
     }
 
     // Top peaks (for body localization comparison).
@@ -158,6 +245,24 @@ fn main() {
             line.residual_rms_px
         ),
         Err(e) => println!("  Err: {e}"),
+    }
+
+    // Threshold sweep on the gradient detector.
+    if std::env::var("PROBE_DUMP").is_ok() {
+        println!("\n[horizon.gradient threshold sweep]");
+        for &min_frac in &[0.5_f64, 0.4, 0.35, 0.3, 0.25] {
+            let cfg = HorizonConfig {
+                min_inlier_fraction: min_frac,
+                ..HorizonConfig::default()
+            };
+            match detect_horizon(&frame, cfg) {
+                Ok(line) => println!(
+                    "  min_frac {min_frac:.2}: Ok slope = {:.4}, intercept = {:.2}, inliers = {} / {}",
+                    line.slope, line.intercept, line.inlier_count, line.candidate_count
+                ),
+                Err(e) => println!("  min_frac {min_frac:.2}: Err {e}"),
+            }
+        }
     }
 
     println!("\n[horizon.sky_region]");

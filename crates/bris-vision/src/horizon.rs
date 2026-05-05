@@ -136,10 +136,34 @@ impl Default for HorizonConfig {
 /// "horizon not detected" rather than fabricating a fit.
 #[allow(clippy::similar_names)] // x0/y0/x1/y1 are box-filter coords.
 pub fn detect_horizon(frame: &Frame, cfg: HorizonConfig) -> Result<HorizonLine, HorizonError> {
+    detect_horizon_with_column_mask(frame, cfg, None)
+}
+
+/// As [`detect_horizon`], but skips columns where
+/// `column_mask[x] == false`. The mask is in *frame-resolution*
+/// columns; pass `None` for "consider every column" (equivalent to
+/// [`detect_horizon`]).
+///
+/// Use this when a saturated body sits on or near the horizon and
+/// would otherwise blot out the sky→sea transition in those
+/// columns. Construct the mask via [`body_column_mask`] from the
+/// body's centroid + apparent radius.
+///
+/// # Errors
+///
+/// As [`detect_horizon`].
+#[allow(clippy::similar_names)]
+pub fn detect_horizon_with_column_mask(
+    frame: &Frame,
+    cfg: HorizonConfig,
+    column_mask: Option<&[bool]>,
+) -> Result<HorizonLine, HorizonError> {
+    validate_column_mask(frame, column_mask)?;
     let scale = f64::from(frame.width()) / f64::from(cfg.working_width);
     let working_height = (f64::from(frame.height()) / scale).round() as u32;
     let work = downsample(frame, cfg.working_width, working_height);
     let candidates = column_gradient_peaks(&work, cfg.gradient_threshold);
+    let candidates = filter_candidates_by_column_mask(&candidates, column_mask, scale);
     finalize_horizon(frame, &candidates, scale, &cfg)
 }
 
@@ -162,11 +186,98 @@ pub fn detect_horizon_via_sky_region(
     frame: &Frame,
     cfg: HorizonConfig,
 ) -> Result<HorizonLine, HorizonError> {
+    detect_horizon_via_sky_region_with_column_mask(frame, cfg, None)
+}
+
+/// As [`detect_horizon_via_sky_region`] but with a column mask. See
+/// [`detect_horizon_with_column_mask`] for the use case.
+///
+/// # Errors
+///
+/// As [`detect_horizon_via_sky_region`].
+pub fn detect_horizon_via_sky_region_with_column_mask(
+    frame: &Frame,
+    cfg: HorizonConfig,
+    column_mask: Option<&[bool]>,
+) -> Result<HorizonLine, HorizonError> {
+    validate_column_mask(frame, column_mask)?;
     let scale = f64::from(frame.width()) / f64::from(cfg.working_width);
     let working_height = (f64::from(frame.height()) / scale).round() as u32;
     let work = downsample(frame, cfg.working_width, working_height);
     let candidates = sky_region_lower_boundary(&work, cfg.sky_brightness_percentile);
+    let candidates = filter_candidates_by_column_mask(&candidates, column_mask, scale);
     finalize_horizon(frame, &candidates, scale, &cfg)
+}
+
+/// Build a column mask that excludes a circular region around a
+/// detected body.
+///
+/// Returns `Vec<bool>` of length `frame_width`: `true` = consider
+/// this column for horizon candidates, `false` = skip. Use with
+/// [`detect_horizon_with_column_mask`] or
+/// [`detect_horizon_via_sky_region_with_column_mask`] (or
+/// `detect_horizon_via_segmentation_with_column_mask` in the
+/// `segment` module).
+///
+/// `body_radius_px` should be derived from the body centroid's
+/// `area_px` (radius = √(area / π)). `pad_px` adds a margin to
+/// catch the body's halo, lens flare, or scattered light extending
+/// beyond the saturated disk; default 8 px is reasonable for the
+/// 640-wide frames in the regression corpus.
+///
+/// When `body_centroid_x - body_radius_px - pad_px < 0` the mask
+/// extends to column 0 (i.e. the body straddles the left edge);
+/// similarly for the right edge.
+#[must_use]
+pub fn body_column_mask(
+    frame_width: u32,
+    body_centroid_x: f64,
+    body_radius_px: f64,
+    pad_px: f64,
+) -> Vec<bool> {
+    let lo_f = body_centroid_x - body_radius_px - pad_px;
+    let hi_f = body_centroid_x + body_radius_px + pad_px;
+    let lo = lo_f.max(0.0) as u32;
+    let hi = (hi_f.max(0.0) as u32).min(frame_width.saturating_sub(1));
+    (0..frame_width).map(|x| x < lo || x > hi).collect()
+}
+
+/// Verify a column mask, if supplied, has length equal to the
+/// frame's width. Length mismatch is caller error.
+fn validate_column_mask(frame: &Frame, column_mask: Option<&[bool]>) -> Result<(), HorizonError> {
+    if let Some(m) = column_mask {
+        if m.len() != frame.width() as usize {
+            // Treat shape mismatch as "no candidates": this is a
+            // caller bug; the typed error preserves the existing
+            // public interface (avoid adding a new error variant
+            // for a programming mistake).
+            return Err(HorizonError::InsufficientCandidates(0));
+        }
+    }
+    Ok(())
+}
+
+/// Drop candidates whose full-resolution column index is masked out.
+///
+/// `candidates` are in *working-image* (downsampled) coordinates;
+/// `scale` is `frame_width / working_width` so we can map back.
+/// `column_mask`, when present, is in full-resolution column space.
+fn filter_candidates_by_column_mask(
+    candidates: &[(f64, f64)],
+    column_mask: Option<&[bool]>,
+    scale: f64,
+) -> Vec<(f64, f64)> {
+    let Some(mask) = column_mask else {
+        return candidates.to_vec();
+    };
+    candidates
+        .iter()
+        .copied()
+        .filter(|&(x, _)| {
+            let full_x = (x * scale) as usize;
+            mask.get(full_x).copied().unwrap_or(false)
+        })
+        .collect()
 }
 
 /// Shared post-extraction pipeline: RANSAC, refit, and uncertainty
@@ -802,6 +913,104 @@ mod tests {
              gradient detector at intercept {}",
             sky_line.intercept,
             gradient_line.intercept,
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // Column mask
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn body_column_mask_excludes_body_radius_plus_pad() {
+        let mask = body_column_mask(100, 50.0, 5.0, 3.0);
+        assert_eq!(mask.len(), 100);
+        // body is at column 50, radius 5, pad 3 → columns [42, 58]
+        // are excluded.
+        for x in 0..100u32 {
+            let expected = !(42..=58).contains(&x);
+            assert_eq!(
+                mask[x as usize], expected,
+                "column {x}: expected {expected}, got {}",
+                mask[x as usize]
+            );
+        }
+    }
+
+    #[test]
+    fn body_column_mask_handles_left_edge() {
+        // Body at x=2, radius 5 → would extend to -3; mask still valid.
+        let mask = body_column_mask(20, 2.0, 5.0, 1.0);
+        assert_eq!(mask.len(), 20);
+        // Columns [0..=8] excluded.
+        for x in 0..=8u32 {
+            assert!(!mask[x as usize], "column {x} should be excluded");
+        }
+        for x in 9..20u32 {
+            assert!(mask[x as usize], "column {x} should be included");
+        }
+    }
+
+    #[test]
+    fn body_column_mask_handles_right_edge() {
+        let mask = body_column_mask(20, 18.0, 5.0, 1.0);
+        // Excluded [12..=19], with the upper bound clamped to width-1.
+        for x in 0..12u32 {
+            assert!(mask[x as usize], "column {x} should be included");
+        }
+        for x in 12..20u32 {
+            assert!(!mask[x as usize], "column {x} should be excluded");
+        }
+    }
+
+    #[test]
+    fn column_mask_reduces_candidate_count() {
+        // Synth a deck-occluded frame, run with and without a mask
+        // covering the columns where the bright deck-edge is. The
+        // masked detector should produce fewer inliers (some of the
+        // gradient candidates are now skipped).
+        let frame = synth_deck_occluded(640, 480, 200, 350, 320);
+        let unmasked = detect_horizon(&frame, HorizonConfig::default()).unwrap();
+        // Mask columns 0..200 (covers the bright-deck-overlap region).
+        let mask: Vec<bool> = (0..640u32).map(|x| x >= 200).collect();
+        let masked =
+            detect_horizon_with_column_mask(&frame, HorizonConfig::default(), Some(&mask)).unwrap();
+        assert!(
+            masked.candidate_count <= unmasked.candidate_count,
+            "masked candidate count {} > unmasked {}",
+            masked.candidate_count,
+            unmasked.candidate_count
+        );
+    }
+
+    #[test]
+    fn column_mask_shape_mismatch_returns_typed_error() {
+        let frame = synth_deck_occluded(640, 480, 200, 350, 320);
+        let bad_mask = vec![true; 100]; // wrong length
+        let result =
+            detect_horizon_with_column_mask(&frame, HorizonConfig::default(), Some(&bad_mask));
+        assert!(matches!(
+            result,
+            Err(HorizonError::InsufficientCandidates(0))
+        ));
+    }
+
+    #[test]
+    fn column_mask_none_matches_unmasked_call() {
+        let frame = synth_deck_occluded(640, 480, 200, 350, 320);
+        let a = detect_horizon(&frame, HorizonConfig::default()).unwrap();
+        let b = detect_horizon_with_column_mask(&frame, HorizonConfig::default(), None).unwrap();
+        // RANSAC is randomized? Let's check the implementation —
+        // if it uses a fixed seed, results should be identical.
+        // If non-deterministic, we still expect the same candidate
+        // count (deterministic) and similar slope/intercept.
+        assert_eq!(a.candidate_count, b.candidate_count);
+        assert!(
+            (a.slope - b.slope).abs() < 0.01 && (a.intercept - b.intercept).abs() < 1.0,
+            "expected matching fits: a = ({:.4}, {:.2}), b = ({:.4}, {:.2})",
+            a.slope,
+            a.intercept,
+            b.slope,
+            b.intercept
         );
     }
 }

@@ -29,7 +29,9 @@ pub use condition::{
 pub use frame::{rotate_pixels, Frame, FrameError, Intrinsics, Rotation};
 pub use fusion::{fuse_altitudes, FrameMeasurement, FusionConfig, FusionError};
 pub use horizon::{
-    detect_horizon, detect_horizon_via_sky_region, HorizonConfig, HorizonError, HorizonLine,
+    body_column_mask, detect_horizon, detect_horizon_via_sky_region,
+    detect_horizon_via_sky_region_with_column_mask, detect_horizon_with_column_mask, HorizonConfig,
+    HorizonError, HorizonLine,
 };
 pub use io::{
     load_frame_from_path, load_frame_from_path_with_rotation, save_frame_as_png, LoadError,
@@ -40,8 +42,8 @@ pub use panorama::{panorama_altitude, panorama_altitude_with_detector, FrameRole
 pub use peak::{detect_peaks, Peak, PeakConfig};
 #[cfg(feature = "segmentation")]
 pub use segment::{
-    detect_horizon_via_segmentation, load_model, segment, segment_with_rotation, SegmentError,
-    SegmentationMask,
+    detect_horizon_via_segmentation, detect_horizon_via_segmentation_with_column_mask, load_model,
+    segment, segment_with_rotation, SegmentError, SegmentationMask,
 };
 pub use track::{
     detect_corners, track, track_peaks, Corner, RigidTransform, TrackConfig, TrackError,
