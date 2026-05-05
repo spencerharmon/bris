@@ -14,6 +14,15 @@
 //! the same commit. The commit message should explain why the
 //! change is an improvement.
 
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_precision_loss,
+    clippy::cast_sign_loss,
+    clippy::similar_names,
+    clippy::items_after_statements
+)]
+
 use bris_core::time::{Tt, JD_J2000};
 use bris_vision::{
     centroid_brightest_body, detect_horizon, detect_horizon_via_sky_region, load_frame_from_path,
@@ -192,7 +201,84 @@ mod sailing_sun_upper_left {
         let result = detect_horizon_via_segmentation(&frame, HorizonConfig::default());
         assert!(
             result.is_err(),
-            "expected SegmentError when source_path is None"
+            "expected SegError when source_path is None"
+        );
+    }
+
+    /// End-to-end ML-assisted centroiding: segment the frame, build
+    /// a sky-only mask, run masked centroid. Two assertions:
+    ///   1. The masked centroid lands inside the sky mask (load-
+    ///      bearing — proves the masking actually constrains output).
+    ///   2. The masked centroid is plausibly near the Sun, accepting
+    ///      that area-weighted centroiding over "all bright sky
+    ///      pixels" pulls the answer toward whichever side has
+    ///      brighter haze. The unmasked centroid happens to be near
+    ///      the Sun *because* the saturated Sun is the strongest
+    ///      signal anywhere in the frame; masking restricts the
+    ///      search but the area-weighted average over the bright sky
+    ///      region is biased.
+    ///
+    /// **Known limitation** documented here so the next person to
+    /// touch this test understands it: for tight Sun/Moon centroids
+    /// inside a sky mask, the right algorithm is the peak detector
+    /// (`detect_peaks`) rather than the connected-component centroid,
+    /// because Sun/Moon are *peaks* of brightness rather than
+    /// largest connected regions. Tracked as a follow-up; the
+    /// brightness-weighted centroid is "approximately Sun" not
+    /// "Sun centroid to sub-pixel."
+    #[cfg(feature = "segmentation")]
+    #[test]
+    fn segmentation_sky_mask_centroids_to_sky_region() {
+        use bris_vision::{centroid_brightest_body_in_mask, segment, CentroidConfig};
+
+        let model_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("data")
+            .join("segmentation.onnx");
+        if !model_path.exists() {
+            return;
+        }
+        load_model(&model_path).expect("model should load");
+
+        let frame = load_regression_frame(CASE, "frame.png");
+        let img_path = frame
+            .source_path
+            .clone()
+            .expect("frame should carry source_path");
+        let mask = segment(&img_path).expect("segmentation should succeed");
+        let allow = mask.sky_mask(frame.width(), frame.height());
+
+        let sky_centroid =
+            centroid_brightest_body_in_mask(&frame, CentroidConfig::default(), Some(&allow))
+                .expect("masked centroid should succeed");
+
+        // (1) The masked centroid must land on a pixel that the mask
+        //     says is sky. Load-bearing invariant.
+        let cx_int = sky_centroid.x.round() as u32;
+        let cy_int = sky_centroid.y.round() as u32;
+        let idx = (cy_int as usize) * (frame.width() as usize) + (cx_int as usize);
+        assert!(
+            allow[idx],
+            "sky-masked centroid at ({cx_int}, {cy_int}) should be inside the sky mask"
+        );
+
+        // (2) Plausibly near the Sun. Tolerance accommodates the
+        //     known area-weighting bias when the bright sky region
+        //     includes haze around the saturated body. See test
+        //     docstring for details.
+        const SUN_X: f64 = 99.0;
+        const SUN_Y: f64 = 48.0;
+        const TOL_PX: f64 = 30.0;
+        let dist = ((sky_centroid.x - SUN_X).powi(2) + (sky_centroid.y - SUN_Y).powi(2)).sqrt();
+        assert!(
+            dist < TOL_PX,
+            "sky-masked centroid at ({:.1}, {:.1}) is {:.1} px from Sun at ({}, {}); \
+             expected within {} px",
+            sky_centroid.x,
+            sky_centroid.y,
+            dist,
+            SUN_X,
+            SUN_Y,
+            TOL_PX,
         );
     }
 }

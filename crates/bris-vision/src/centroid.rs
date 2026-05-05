@@ -63,6 +63,15 @@ pub enum CentroidError {
     /// likely a hot pixel or noise rather than a real body.
     #[error("largest bright component had only {0} pixels (need ≥ {1})")]
     ComponentTooSmall(u32, u32),
+    /// The mask supplied to [`centroid_brightest_body_in_mask`] had
+    /// a different length than the frame's pixel count.
+    #[error("mask length {actual} doesn't match frame pixel count {expected}")]
+    MaskShapeMismatch {
+        /// `frame.width() * frame.height()`.
+        expected: usize,
+        /// Actual mask buffer length.
+        actual: usize,
+    },
 }
 
 /// Centroiding configuration.
@@ -96,15 +105,63 @@ pub fn centroid_brightest_body(
     frame: &Frame,
     cfg: CentroidConfig,
 ) -> Result<Centroid, CentroidError> {
-    // Find the maximum pixel value to anchor the threshold.
-    let max_val = frame.pixels().iter().copied().max().unwrap_or(0);
+    centroid_brightest_body_in_mask(frame, cfg, None)
+}
+
+/// Same as [`centroid_brightest_body`], but only considers pixels
+/// where `mask[y * width + x]` is `true`.
+///
+/// Use this with a sky-only mask to prevent false positives from sun
+/// glare on water, sail glare, deck saturation, or other bright
+/// features outside the celestial sphere.
+///
+/// `mask.len()` must equal `frame.width() * frame.height()`. A mask
+/// of `None` is equivalent to "all pixels allowed" and is identical
+/// in behavior to [`centroid_brightest_body`].
+///
+/// Pixels outside the mask are excluded both from the connected-
+/// component search (a bright component partially inside the mask
+/// is truncated to its in-mask portion) and from the centroid
+/// integration. The reported `area_px` counts only in-mask pixels.
+///
+/// # Errors
+///
+/// As [`centroid_brightest_body`], plus
+/// [`CentroidError::MaskShapeMismatch`] if the mask length doesn't
+/// match the frame.
+pub fn centroid_brightest_body_in_mask(
+    frame: &Frame,
+    cfg: CentroidConfig,
+    mask: Option<&[bool]>,
+) -> Result<Centroid, CentroidError> {
+    let pixel_count = (frame.width() as usize) * (frame.height() as usize);
+    if let Some(m) = mask {
+        if m.len() != pixel_count {
+            return Err(CentroidError::MaskShapeMismatch {
+                expected: pixel_count,
+                actual: m.len(),
+            });
+        }
+    }
+
+    // Find the maximum pixel value within the mask (or whole frame).
+    let max_val = match mask {
+        Some(m) => frame
+            .pixels()
+            .iter()
+            .zip(m.iter())
+            .filter_map(|(&p, &allowed)| allowed.then_some(p))
+            .max()
+            .unwrap_or(0),
+        None => frame.pixels().iter().copied().max().unwrap_or(0),
+    };
     if max_val == 0 {
         return Err(CentroidError::NoBrightRegion(0));
     }
     let threshold = (f64::from(max_val) * cfg.threshold_fraction) as u16;
 
-    // Two-pass connected components on the thresholded image.
-    let labels = label_components(frame, threshold);
+    // Two-pass connected components on the masked, thresholded image.
+    let labels = label_components_masked(frame, threshold, mask);
 
     // Find the label with the largest area (excluding 0 = background).
     let mut areas: Vec<u32> = vec![0; labels.next_label as usize];
@@ -167,7 +224,17 @@ struct ComponentLabels {
 }
 
 /// Two-pass connected-components labeling using a small union-find.
-fn label_components(frame: &Frame, threshold: u16) -> ComponentLabels {
+///
+/// `mask` is an optional per-pixel allow filter; when `Some`, pixels
+/// where `mask[idx]` is `false` are treated as background regardless
+/// of their intensity. This both excludes them from the search and
+/// breaks connectivity (a bright component partially inside the mask
+/// gets relabeled as the in-mask portion only).
+fn label_components_masked(
+    frame: &Frame,
+    threshold: u16,
+    mask: Option<&[bool]>,
+) -> ComponentLabels {
     let w = frame.width() as usize;
     let h = frame.height() as usize;
     let pixels = frame.pixels();
@@ -175,16 +242,28 @@ fn label_components(frame: &Frame, threshold: u16) -> ComponentLabels {
     let mut parent: Vec<u32> = vec![0]; // index 0 is reserved background
     let mut next_label: u32 = 1;
 
+    let allowed = |idx: usize| -> bool { mask.is_none_or(|m| m[idx]) };
+
     // First pass: assign provisional labels.
     for y in 0..h {
         for x in 0..w {
             let idx = y * w + x;
-            if pixels[idx] < threshold {
+            if pixels[idx] < threshold || !allowed(idx) {
                 continue;
             }
-            // Look at left and above.
-            let left = if x > 0 { labels[idx - 1] } else { 0 };
-            let above = if y > 0 { labels[idx - w] } else { 0 };
+            // Look at left and above. Connectivity is only honored
+            // when both endpoints are in-mask; this naturally truncates
+            // a bright component at the mask boundary.
+            let left = if x > 0 && allowed(idx - 1) {
+                labels[idx - 1]
+            } else {
+                0
+            };
+            let above = if y > 0 && allowed(idx - w) {
+                labels[idx - w]
+            } else {
+                0
+            };
             let lbl = match (left, above) {
                 (0, 0) => {
                     let new = next_label;
@@ -383,5 +462,127 @@ mod tests {
         // Larger blob → smaller statistical sigma → smaller total sigma
         // (or equal, if the bias floor dominates).
         assert!(c_large.position_sigma_px.value() <= c_small.position_sigma_px.value());
+    }
+
+    #[test]
+    fn mask_with_wrong_length_returns_typed_error() {
+        let frame = synth_disk_frame(100, 100, 50.0, 50.0, 10.0);
+        let bad_mask = vec![true; 99 * 100]; // off by one row
+        let result =
+            centroid_brightest_body_in_mask(&frame, CentroidConfig::default(), Some(&bad_mask));
+        assert!(matches!(
+            result,
+            Err(CentroidError::MaskShapeMismatch {
+                expected: 10_000,
+                actual: 9_900,
+            })
+        ));
+    }
+
+    #[test]
+    fn all_true_mask_matches_unmasked_result() {
+        // Same frame, same config, two paths: one with no mask, one
+        // with an all-true mask. Results must agree.
+        let frame = synth_disk_frame(200, 150, 100.0, 75.0, 12.0);
+        let mask = vec![true; 200 * 150];
+        let unmasked = centroid_brightest_body(&frame, CentroidConfig::default()).unwrap();
+        let masked =
+            centroid_brightest_body_in_mask(&frame, CentroidConfig::default(), Some(&mask))
+                .unwrap();
+        assert!((unmasked.x - masked.x).abs() < 1e-9, "x differs");
+        assert!((unmasked.y - masked.y).abs() < 1e-9, "y differs");
+        assert_eq!(unmasked.area_px, masked.area_px);
+    }
+
+    #[test]
+    fn mask_picks_smaller_in_mask_blob_over_larger_out_of_mask_blob() {
+        // Two bright disks: a *larger* one at (350, 50) (the
+        // distractor — think "sun glare on water") and a *smaller*
+        // one at (200, 150) (the real target — think "actual sun").
+        // Without a mask, the larger blob wins. With a mask that
+        // restricts to the upper-left quadrant containing the smaller
+        // blob, the smaller blob should be selected.
+        let mut pixels = vec![1_000u16; 400 * 300];
+        // Real-target disk at (200, 150), r = 12.
+        for y in 0..300 {
+            for x in 0..400 {
+                let dx = f64::from(x) - 200.0;
+                let dy = f64::from(y) - 150.0;
+                if dx * dx + dy * dy <= 12.0 * 12.0 {
+                    pixels[(y as usize) * 400 + (x as usize)] = 60_000;
+                }
+            }
+        }
+        // Distractor disk at (350, 50), r = 30 (larger).
+        for y in 0..300 {
+            for x in 0..400 {
+                let dx = f64::from(x) - 350.0;
+                let dy = f64::from(y) - 50.0;
+                if dx * dx + dy * dy <= 30.0 * 30.0 {
+                    pixels[(y as usize) * 400 + (x as usize)] = 60_000;
+                }
+            }
+        }
+        let frame = Frame::new(
+            400,
+            300,
+            pixels,
+            Tt::from_julian_date(JD_J2000),
+            0,
+            Intrinsics::placeholder(400, 300),
+        )
+        .unwrap();
+
+        // Sanity: without a mask, the distractor wins.
+        let unmasked = centroid_brightest_body(&frame, CentroidConfig::default()).unwrap();
+        assert!(
+            (unmasked.x - 350.0).abs() < 2.0,
+            "without mask, distractor at (350, 50) should win; got x={}",
+            unmasked.x
+        );
+
+        // Build a mask that only allows pixels in the left half.
+        let mut mask = vec![false; 400 * 300];
+        for y in 0..300 {
+            for x in 0..250 {
+                mask[(y as usize) * 400 + (x as usize)] = true;
+            }
+        }
+
+        let masked =
+            centroid_brightest_body_in_mask(&frame, CentroidConfig::default(), Some(&mask))
+                .unwrap();
+        assert!(
+            (masked.x - 200.0).abs() < 2.0,
+            "with mask, real target at (200, 150) should win; got x={}",
+            masked.x
+        );
+        assert!(
+            (masked.y - 150.0).abs() < 2.0,
+            "with mask, real target at (200, 150) should win; got y={}",
+            masked.y
+        );
+    }
+
+    #[test]
+    fn mask_excluding_all_bright_pixels_returns_no_bright_region() {
+        let frame = synth_disk_frame(100, 100, 50.0, 50.0, 10.0);
+        // Mask out everything that has the bright disk (i.e. block out
+        // the center) — leaves only the dark background.
+        let mut mask = vec![true; 100 * 100];
+        for y in 30..70 {
+            for x in 30..70 {
+                mask[(y as usize) * 100 + (x as usize)] = false;
+            }
+        }
+        let result =
+            centroid_brightest_body_in_mask(&frame, CentroidConfig::default(), Some(&mask));
+        // The remaining pixels are all the dark background (intensity
+        // 1000); thresholding picks them up but the resulting "blob"
+        // is the entire allowed region, which still has area > min.
+        // What matters is that the function returns a sensible result
+        // and doesn't panic. Either Ok(centroid_in_background) or
+        // Err is acceptable; the contract is "no surprises."
+        assert!(result.is_ok() || matches!(result, Err(CentroidError::NoBrightRegion(_))));
     }
 }

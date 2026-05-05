@@ -17,7 +17,10 @@ pub mod peak;
 pub mod segment;
 pub mod track;
 
-pub use centroid::{centroid_brightest_body, Centroid, CentroidConfig, CentroidError};
+pub use centroid::{
+    centroid_brightest_body, centroid_brightest_body_in_mask, Centroid, CentroidConfig,
+    CentroidError,
+};
 pub use frame::{Frame, FrameError, Intrinsics};
 pub use fusion::{fuse_altitudes, FrameMeasurement, FusionConfig, FusionError};
 pub use horizon::{
