@@ -40,6 +40,105 @@ stable. Each task is sized to a meaningful unit of work, not a single commit.
   the operational complexity.
 - *No telemetry, no analytics, no automatic network calls.*
 
+* Crucial findings (validated against real footage)
+This section captures algorithm-level findings that have been
+empirically validated against captured frames in
+~test_video/~. These are not design assumptions — they are
+observations from running the pipeline against real data, with
+references to the regression tests that pin the behavior. See
+~progress.md~ for the per-scene inventory.
+
+** Horizon detection on cluttered shipboard scenes requires ML
+   Both classical detectors (gradient and sky-region) fail on the
+   typical sailing-camera scene where the deck and sail occupy the
+   lower half of the frame. The gradient detector picks a
+   deck-to-sea boundary as its strongest horizontal edge; the
+   sky-region detector picks the top of the mainsail.
+
+   The ML segmentation detector (SegFormer-B0 / ADE20K) cleanly
+   separates sky / sea / boat / ship pixels and finds 172 of 512
+   columns with clean sky→sea transitions on the
+   ~sailing_sun_upper_left~ regression scene. This is the only
+   approach that works on real shipboard footage.
+
+   Implication: the production system must ship the segmentation
+   model. Classical detectors remain available as fast-path options
+   for clean open-ocean scenes where they're equally accurate, but
+   they cannot be the only horizon detector.
+
+** Obstruction-aware horizon doubles available evidence on real scenes
+   The ~sailing_with_distant_shore~ regression scene has a distant
+   shoreline visible between sea and sky on the right. Strict
+   sky→sea-only matching finds 162 candidate columns. The
+   obstruction-aware variant adds 168 more by walking past the
+   shore band looking for sea below it — total 330 of 512.
+
+   The shore band is treated as a horizon proxy at the
+   sky→shore transition row. When weighted RANSAC lands (currently
+   the SkyToObstructionToSea source is treated identically to
+   SkyToSea in RANSAC), the latter source's σ contribution will be
+   inflated to reflect lower confidence.
+
+** Sky-mask centroiding has a brightness-bias failure mode
+   Restricting the centroid search to a sky mask correctly excludes
+   non-sky distractors (sun glare on water, sail glare). However,
+   when the bright sky region near a saturated body has its own
+   internal brightness gradient (haze on one side, deck on the
+   other), the area-weighted centroid is pulled toward the brighter
+   side of the *sky region*, not the body's actual peak.
+
+   Documented in ~tests/regression/sailing_sun_upper_left/~: visually
+   correct Sun is at ~(99, 48); unmasked centroid lands at (99, 48)
+   "by accident" because the saturated Sun is the strongest signal
+   anywhere in the frame; sky-masked centroid lands at (122, 64).
+
+   The fix (tracked as a Phase 2 TODO): use the existing
+   ~detect_peaks~ primitive inside the sky mask. Peak detection finds
+   the brightest local maximum (the Sun's saturated core) and
+   sub-pixel-refines, which is what we want.
+
+** Camera calibration is currently the dominant absolute-altitude error
+   Every test uses ~Intrinsics::placeholder(w, h)~ which sets
+   fx = fy = 1000. Real wide-angle cameras (GoPro-style at 640×360)
+   have fy more like 350-500. Reported altitudes are off by a factor
+   of ~2-3 from sky-space truth, even when the horizon and body
+   pixel positions are correct.
+
+   This is calibration, not algorithm. The lens-calibration workflow
+   (Phase 2 TODO) is required before any absolute altitude reading
+   is meaningful. Until then, the regression tests assert pixel-space
+   behavior (centroid x/y, horizon slope/intercept, candidate
+   counts), not sky-space altitude.
+
+** Single-LOP sights need an assumed position
+   This is geometry, not a bug. One body sight gives a line of
+   position, not a point. The streaming engine (Phase 3.5) will
+   accumulate ≥ 2 azimuth-diverse sights into a real fix; until
+   then ~bris replay~ synthesizes a perpendicular zero-intercept
+   anchor and labels the result "advisory."
+
+** Horizon and body detection run per-frame, not on a stitched panorama
+   The panorama path
+   (~bris-vision::panorama::panorama_altitude~) selects the best
+   per-frame horizon detection and the best per-frame body
+   centroiding across all input frames; if those came from
+   different frames, it computes a rigid-transform chain to
+   project the body's pixel into the horizon frame's coordinates.
+
+   Implication: the single-frame fast path (body and horizon both
+   visible in one frame) is dramatically cheaper than the chain. A
+   wide-FOV camera that gets both in one frame doesn't need
+   stitching at all. A telephoto camera at high body altitude
+   *requires* the chain because no single frame can contain both.
+
+** Night algorithms don't exist yet
+   The peak detector handles per-star detection. Plate solving
+   (star identification) is not implemented. Night horizon
+   detection is not implemented — there's no daylight contrast for
+   the existing detectors to find. The user's
+   ~night_test_lowres~ footage is the highest-priority test case
+   for the next round of algorithm design.
+
 * Phase 0: Project scaffolding
 ** DONE Choose workspace layout
    Cargo workspace with members:
@@ -265,26 +364,37 @@ stable. Each task is sized to a meaningful unit of work, not a single commit.
 ** TODO ML-assisted classical detection: catalog of opportunities
    The segmentation-based horizon detector is one application of ML;
    there are several more places where the ML output can *assist* a
-   classical detector rather than *replace* it. Catalog of ideas:
+   classical detector rather than *replace* it. Catalog of ideas,
+   with current implementation status:
 
-   1. *Vessel-mask the centroid search.* The classical body
-      centroider (~centroid_brightest_body~) can be wildly fooled
-      by a saturated sail or sun glint on the water. Pre-mask the
-      vessel region from the segmentation output, then run the
-      centroider only on non-vessel pixels.
+   1. *(DONE)* *Vessel-mask the centroid search.* Implemented as
+      ~centroid_brightest_body_in_mask~ + ~SegmentationMask::non_vessel_mask~.
 
-   2. *Sky-mask the body search.* The Sun/Moon are by definition in
-      the sky. The classical centroider currently picks the largest
-      bright region anywhere in the frame; restricting to sky pixels
-      eliminates entire categories of false positives (deck glare,
-      sun reflections on water, white sail edges).
+   2. *(DONE, with caveat)* *Sky-mask the body search.* Implemented
+      as ~SegmentationMask::sky_mask~ + the masked centroid above.
+      *Caveat:* on real frames where the bright sky region near a
+      saturated Sun has its own internal brightness gradient, the
+      area-weighted centroid is biased toward the brighter side of
+      the bright region, not the body's actual peak. Documented in
+      the regression test for ~sailing_sun_upper_left~. The right
+      fix is to use the peak detector inside the mask rather than
+      the connected-component centroider — see the standalone TODO
+      "Switch Sun/Moon centroiding to peak detection inside sky mask"
+      below.
 
-   3. *Obstruction-aware horizon RANSAC.* Currently the segmentation
-      detector skips columns where ship/boat is between sky and sea.
-      With an explicit ~obstruction~ class (distant shore, distant
-      vessels), we'd accept the bottom of the obstruction as a
-      horizon candidate but inflate that column's σ contribution so
-      RANSAC weights it less than clean sky→sea columns.
+   3. *(DONE)* *Obstruction-aware horizon RANSAC.* Implemented as
+      ~sky_to_sea_transitions_with_obstruction~ with a ~CandidateSource~
+      enum (SkyToSea / SkyToObstructionToSea / SkyToObstructionOnly).
+      The detector accepts SkyToSea + SkyToObstructionToSea by
+      default; SkyToObstructionOnly is filtered out. Empirical:
+      on the ~sailing_with_distant_shore~ regression scene, the
+      obstruction-aware variant adds 168 distant-shore candidate
+      columns to the 162 clean sky→sea columns, doubling the
+      available horizon evidence. *Future work:* weighted RANSAC
+      that prefers SkyToSea over SkyToObstructionToSea, with the
+      latter's σ contribution inflated to reflect its lower
+      confidence. The current implementation treats both sources
+      identically.
 
    4. *Star-region prior for night.* A trained model that identifies
       "this region of the image looks like night sky with stars" can
@@ -336,9 +446,31 @@ stable. Each task is sized to a meaningful unit of work, not a single commit.
    is preserved because each ML stage adds a σ contribution
    reflecting its own confidence.
 
-   None of these are required for MVP. Items 1-3 (vessel/sky-aware
-   centroiding and obstruction-aware horizon) are highest leverage:
-   they directly address known failure modes on real footage.
+   Items 1-3 are now done. Items 4-10 remain as future work.
+
+** TODO Switch Sun/Moon centroiding to peak detection inside sky mask
+   The current ~centroid_brightest_body_in_mask~ uses connected-
+   components and intensity-weighted moments. On synthetic disks
+   against a dark background this works perfectly. On real frames
+   where the saturated Sun is surrounded by a bright halo of sky and
+   the sky region near the Sun has its own brightness gradient
+   (toward the cloudy side, toward the deck, etc.), the area-weighted
+   centroid is biased toward whichever side of the bright sky region
+   has more mass. The regression case ~sailing_sun_upper_left~
+   demonstrates this: visually-correct Sun position is ~(99, 48),
+   unmasked centroid is also (99, 48), but sky-masked centroid lands
+   at (122, 64).
+
+   The fix: inside the sky mask, use the existing ~detect_peaks~
+   primitive to find the brightest local maximum (the Sun's saturated
+   core), then take that peak's location as the body centroid.
+   ~detect_peaks~ already does sub-pixel refinement via Gaussian
+   centroid in a 3×3 neighborhood around the peak.
+
+   Estimated work: small, well-bounded. Reuses the existing peak
+   detector and mask machinery. Update the regression test
+   ~segmentation_sky_mask_centroids_to_sky_region~ to assert tighter
+   tolerance once this lands.
 ** DONE Sun/Moon centroiding
    Threshold + connected components + ellipse fit, sub-pixel refinement.
    Account for partial occlusion by horizon (limb correction).
@@ -380,9 +512,74 @@ stable. Each task is sized to a meaningful unit of work, not a single commit.
    User-facing "quality" setting controlling number of frames, RANSAC
    iterations, refinement passes. Document expected runtime per tier.
 
+* Phase 2.5: Real-data validation against captured footage
+  The user has captured a substantial test corpus (see ~progress.md~
+  for the full inventory). Each scene exercises the algorithms against
+  conditions Bris will see in production. The work here is to *run
+  the existing pipeline against each scene*, document what it does,
+  promote successes to the regression test corpus, and turn failures
+  into concrete algorithm-design problems.
+
+** TODO Run replay against each scene in ~test_video/~
+   For each subdirectory, run ~bris replay~ with each
+   ~--horizon-method~ (gradient, sky-region, segmentation) and
+   record:
+   - Whether the pipeline runs end-to-end without crashing.
+   - Per-method horizon line (slope, intercept, inlier count).
+   - Body centroid (with and without sky mask, when applicable).
+   - The visually-correct horizon and body position for comparison.
+
+   For successful runs, add the scene to
+   ~crates/bris-vision/tests/regression/~ with ~case.toml~ +
+   ~README.md~ + sample frame(s).
+
+   For failures, document the failure mode and add it to the
+   appropriate algorithm-design TODO below.
+
+** TODO Design and implement night-horizon detection
+   Highest-priority new algorithm. The ~night_test_lowres~ and
+   ~night_test_highres~ scenes both have visually-discernible
+   horizons but the current detectors all rely on daytime contrast
+   and segmentation classes that don't apply to dark scenes.
+
+   Three candidate approaches discussed in
+   ~docs/design/pipeline.md~, ranked by independence from
+   not-yet-built infrastructure:
+
+   1. *Sea-sky luma boundary at night* — find the darkest
+      horizontal band in the frame's lower portion. Works when the
+      moon or city lights illuminate either the sky (slightly
+      brighter than sea) or the sea (sea brighter than sky from
+      moonglint). Failure mode: when sky and sea have similar
+      brightness, no boundary exists.
+
+   2. *Low-altitude detected stars as a horizon proxy* — find the
+      star peaks closest to image-bottom and use their declination
+      band as the implied horizon. Requires plate solving (Phase 3)
+      to identify the stars. Higher accuracy than approach 1 when
+      both work, but predicated on a feature we haven't built.
+
+   3. *IMU prior* — gyro integration since the last reliable
+      sun-sight gives a horizon direction. Phone-only; not
+      available in the embedded headless deployment without
+      additional hardware. The right answer when available, but
+      not a primary mechanism.
+
+   Likely path: implement approach 1 first (smallest change,
+   immediately useful for the user's footage); approach 2 lands
+   alongside plate solving; approach 3 is a Phase 7 concern.
+
+** TODO Catalog of scene-specific failure modes (placeholder; populate from real runs)
+   As we run the pipeline against each scene, document the failure
+   modes here so they accumulate into a list of "things that need
+   fixing for production-quality vision."
+
 * Phase 3: Plate solving (night)
 ** TODO Star detection in frame
-   Local-max + PSF fit, magnitude estimation, hot-pixel rejection.
+   *Status:* peak detection primitive exists in ~bris-vision::peak~
+   (~detect_peaks~). Hot-pixel rejection via min-area + non-max
+   suppression. PSF/magnitude estimation not yet implemented but
+   adequate for plate-solving input as-is.
 ** TODO Geometric hash database
    Build at compile time from the embedded star catalog. Tetra3-style
    4-star pattern hashing. Tunable FOV range.
