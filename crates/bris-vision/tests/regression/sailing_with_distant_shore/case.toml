@@ -1,0 +1,50 @@
+# Regression metadata for sailing_with_distant_shore.
+#
+# This case demonstrates the obstruction-aware horizon detector's
+# contribution: roughly half of the accepted horizon candidates come
+# from columns where a thin shore is visible between sea and sky.
+# The strict sky→sea-only detector would skip those columns.
+#
+# Counts below are at the inference resolution (512×512). Tolerances
+# allow ±20 columns to absorb model-output noise.
+
+[case]
+name = "sailing_with_distant_shore"
+description = "Sailing POV with sun high, sun glare on water, and a distant shoreline on the right between sea and sky"
+frame_count = 1
+frame_width = 640
+frame_height = 360
+
+[reference_observer]
+lat_deg = 25.0
+lon_deg = -80.0
+eye_height_m = 2.0
+capture_utc = "2024-03-15T15:00:00Z"
+body = "sun"
+
+# The body centroid (Sun) detected by unmasked centroid_brightest_body.
+[expected_centroid_frame0]
+x_px = 429.7
+y_px = 46.5
+tolerance_px = 10.0
+
+# Horizon line as detected by the segmentation method (the load-
+# bearing one for this scene; the gradient and sky-region detectors
+# are still expected to fail in scene-specific ways).
+[expected_horizon_segmentation]
+slope = -0.06
+intercept = 188.5
+slope_tolerance = 0.05
+intercept_tolerance = 20.0
+inlier_count_min = 200
+method_correctness = "approximately correct"
+notes = "Robust horizon thanks to obstruction-aware columns adding distant-shore evidence."
+
+# Per-column transition counts at the inference resolution. The
+# load-bearing assertion: the obstruction-aware detector contributes
+# meaningfully more columns than the strict sky-to-sea detector
+# would.
+[expected_transition_counts]
+col_sky_to_sea_min = 100
+col_sky_to_obstr_to_sea_min = 100
+notes = "On this scene we observe ~162 + ~168 = ~330 accepted candidates; the obstruction-aware contribution is roughly equal to the clean sky-to-sea contribution."

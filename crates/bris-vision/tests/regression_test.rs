@@ -282,3 +282,76 @@ mod sailing_sun_upper_left {
         );
     }
 }
+
+/// `sailing_with_distant_shore` case: sailing POV with a distant
+/// shoreline visible between sea and sky. Exercises the
+/// obstruction-aware horizon detector (catalog item 3 in plan.org).
+mod sailing_with_distant_shore {
+    use super::*;
+
+    const CASE: &str = "sailing_with_distant_shore";
+
+    #[test]
+    fn frame_loads() {
+        let f = load_regression_frame(CASE, "frame.png");
+        assert_eq!(f.width(), 640);
+        assert_eq!(f.height(), 360);
+    }
+
+    #[test]
+    fn centroid_finds_sun() {
+        let frame = load_regression_frame(CASE, "frame.png");
+        let centroid = centroid_brightest_body(&frame, CentroidConfig::default())
+            .expect("centroid should succeed");
+        // Recorded values: Sun at (429.7, 46.5).
+        assert!(
+            (centroid.x - 429.7).abs() < 10.0,
+            "centroid x = {} not within 10 of 429.7",
+            centroid.x
+        );
+        assert!(
+            (centroid.y - 46.5).abs() < 10.0,
+            "centroid y = {} not within 10 of 46.5",
+            centroid.y
+        );
+    }
+
+    /// The load-bearing assertion for this case: the obstruction-
+    /// aware horizon detector finds substantially more candidate
+    /// columns than the strict sky-to-sea version would. On this
+    /// scene we observe ~162 sky→sea + ~168 sky→thin-shore→sea
+    /// columns; the test asserts a healthy lower bound on each.
+    #[cfg(feature = "segmentation")]
+    #[test]
+    fn obstruction_aware_horizon_finds_robust_fit() {
+        let model_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("data")
+            .join("segmentation.onnx");
+        if !model_path.exists() {
+            eprintln!("skipping: segmentation model not present");
+            return;
+        }
+        load_model(&model_path).expect("model should load");
+
+        let frame = load_regression_frame(CASE, "frame.png");
+        let line = detect_horizon_via_segmentation(&frame, HorizonConfig::default())
+            .expect("segmentation detector should produce a horizon");
+
+        // Recorded: slope ≈ -0.06, intercept ≈ 188.5, inliers >= 200.
+        assert!(
+            (line.slope - (-0.06)).abs() < 0.05,
+            "slope {} not within 0.05 of -0.06",
+            line.slope
+        );
+        assert!(
+            (line.intercept - 188.5).abs() < 20.0,
+            "intercept {} not within 20 of 188.5",
+            line.intercept
+        );
+        assert!(
+            line.inlier_count >= 200,
+            "inlier count {} below recorded floor of 200",
+            line.inlier_count
+        );
+    }
+}

@@ -668,10 +668,8 @@ mod tests {
         let candidates = sky_to_sea_transitions_with_obstruction(&mask);
         // Column 0 must produce SkyToSea; column 1 SkyToObstructionOnly;
         // columns 2 and 3 produce nothing.
-        let by_col: std::collections::HashMap<u32, &HorizonCandidate> = candidates
-            .iter()
-            .map(|c| (c.x as u32, c))
-            .collect();
+        let by_col: std::collections::HashMap<u32, &HorizonCandidate> =
+            candidates.iter().map(|c| (c.x as u32, c)).collect();
         assert_eq!(by_col.get(&0).unwrap().source, CandidateSource::SkyToSea);
         assert_eq!(
             by_col.get(&1).unwrap().source,
