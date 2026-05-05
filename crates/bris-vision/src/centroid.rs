@@ -95,6 +95,39 @@ impl Default for CentroidConfig {
     }
 }
 
+/// Configuration for [`centroid_saturated_body_in_mask`].
+///
+/// Distinct from [`CentroidConfig`] because the threshold semantics
+/// differ: this is an absolute saturation threshold (in u16 units),
+/// not a fraction of the frame's brightest pixel.
+#[derive(Debug, Clone, Copy)]
+pub struct SaturatedBodyConfig {
+    /// Minimum pixel value to count as "saturated" for body
+    /// detection. Default 95% of `u16::MAX` (= 62258). Pixels at or
+    /// above this contribute to the candidate component.
+    ///
+    /// Why absolute, not relative: the sun's saturated disk is at
+    /// or near `u16::MAX`. Surrounding sky haze can be at 80-90%
+    /// of `u16::MAX` — bright but not saturated. A relative
+    /// threshold (e.g. "85% of frame max") catches the haze along
+    /// with the sun, biasing the resulting centroid toward whichever
+    /// side has more haze. An absolute saturation threshold
+    /// isolates only the genuinely-saturated body pixels.
+    pub saturation_threshold: u16,
+    /// Minimum component area (pixels) to accept. Filters out hot
+    /// pixels and small reflections. Default 50.
+    pub min_area_px: u32,
+}
+
+impl Default for SaturatedBodyConfig {
+    fn default() -> Self {
+        Self {
+            saturation_threshold: (u32::from(u16::MAX) * 95 / 100) as u16,
+            min_area_px: 50,
+        }
+    }
+}
+
 /// Detect the Sun or Moon centroid in a frame.
 ///
 /// # Errors
@@ -204,6 +237,104 @@ pub fn centroid_brightest_body_in_mask(
 
     // Centroid σ: ~1/√N from photon counting + small bias term from
     // thresholding effects (we pick this as 0.5 px, conservative).
+    let stat_sigma_px = 1.0 / (best_area as f64).sqrt();
+    let bias_sigma_px = 0.5;
+    let total_sigma_px = (stat_sigma_px * stat_sigma_px + bias_sigma_px * bias_sigma_px).sqrt();
+    let position_sigma_px = Sigma::new(total_sigma_px).unwrap_or(Sigma::ZERO);
+
+    Ok(Centroid {
+        x: cx,
+        y: cy,
+        area_px: best_area,
+        mean_intensity,
+        position_sigma_px,
+    })
+}
+
+/// Centroid the brightest *saturated* body inside a mask.
+///
+/// Distinct from [`centroid_brightest_body_in_mask`] in that the
+/// threshold is **absolute** (`cfg.saturation_threshold`), not a
+/// fraction of the frame's brightest pixel. This isolates only
+/// genuinely-saturated pixels, which is what you want when:
+///
+/// 1. The body of interest is the Sun or Moon (both saturate a
+///    correctly-exposed daytime camera).
+/// 2. A relative threshold over a sky-only mask would catch bright
+///    haze around the body and bias the centroid. The bright sky
+///    near a saturated Sun can sit at 80-90% of `u16::MAX`; a
+///    relative threshold of 0.85 includes both the body and the
+///    haze and computes a centroid pulled toward the brighter side
+///    of the haze rather than the body's actual core.
+///
+/// `mask` filters which pixels are considered. Pass the segmentation
+/// sky-mask to exclude saturated sail glare, water glare, deck
+/// reflections, etc.
+///
+/// Returns [`CentroidError::NoBrightRegion`] when no pixels above
+/// the saturation threshold survive the mask — the right behavior
+/// for scenes without a saturated body (overcast, dusk, ambiguous
+/// sun glow). Use [`centroid_brightest_body_in_mask`] for those
+/// cases if you want to fall back to a relative-threshold search.
+///
+/// # Errors
+///
+/// As [`centroid_brightest_body_in_mask`].
+pub fn centroid_saturated_body_in_mask(
+    frame: &Frame,
+    cfg: SaturatedBodyConfig,
+    mask: Option<&[bool]>,
+) -> Result<Centroid, CentroidError> {
+    let pixel_count = (frame.width() as usize) * (frame.height() as usize);
+    if let Some(m) = mask {
+        if m.len() != pixel_count {
+            return Err(CentroidError::MaskShapeMismatch {
+                expected: pixel_count,
+                actual: m.len(),
+            });
+        }
+    }
+
+    // Connected components on saturated pixels only, masked.
+    let labels = label_components_masked(frame, cfg.saturation_threshold, mask);
+
+    let mut areas: Vec<u32> = vec![0; labels.next_label as usize];
+    for &lbl in &labels.labels {
+        if lbl > 0 {
+            areas[lbl as usize] += 1;
+        }
+    }
+    let (best_label, &best_area) = areas
+        .iter()
+        .enumerate()
+        .skip(1)
+        .max_by_key(|&(_, area)| *area)
+        .ok_or(CentroidError::NoBrightRegion(cfg.saturation_threshold))?;
+    if best_area < cfg.min_area_px {
+        return Err(CentroidError::ComponentTooSmall(best_area, cfg.min_area_px));
+    }
+
+    let mut sum_x: f64 = 0.0;
+    let mut sum_y: f64 = 0.0;
+    let mut sum_w: f64 = 0.0;
+    let mut sum_intensity: f64 = 0.0;
+    let w = frame.width();
+    for y in 0..frame.height() {
+        for x in 0..w {
+            let idx = (y as usize) * (w as usize) + (x as usize);
+            if labels.labels[idx] == best_label as u32 {
+                let intensity = f64::from(frame.pixels()[idx]);
+                sum_x += f64::from(x) * intensity;
+                sum_y += f64::from(y) * intensity;
+                sum_w += intensity;
+                sum_intensity += intensity;
+            }
+        }
+    }
+    let cx = sum_x / sum_w;
+    let cy = sum_y / sum_w;
+    let mean_intensity = sum_intensity / f64::from(best_area);
+
     let stat_sigma_px = 1.0 / (best_area as f64).sqrt();
     let bias_sigma_px = 0.5;
     let total_sigma_px = (stat_sigma_px * stat_sigma_px + bias_sigma_px * bias_sigma_px).sqrt();
@@ -584,5 +715,156 @@ mod tests {
         // and doesn't panic. Either Ok(centroid_in_background) or
         // Err is acceptable; the contract is "no surprises."
         assert!(result.is_ok() || matches!(result, Err(CentroidError::NoBrightRegion(_))));
+    }
+
+    // -----------------------------------------------------------------
+    // Saturated body centroiding
+    // -----------------------------------------------------------------
+
+    /// Build a frame with a saturated disk surrounded by a bright
+    /// halo (the failure case the saturated-body centroider exists
+    /// to handle): the disk is at `u16::MAX`, and a larger
+    /// surrounding ring is at 90% of `u16::MAX`. The unmasked
+    /// extended-disk centroider would treat both as one component
+    /// and compute a centroid that's pulled toward the haze; the
+    /// saturated-body centroider should isolate just the saturated
+    /// disk.
+    #[allow(clippy::similar_names)] // dx_halo/dy_halo vs dx_sat/dy_sat are intentional pairs
+    fn synth_saturated_disk_with_halo(
+        width: u32,
+        height: u32,
+        cx: f64,
+        cy: f64,
+        sat_radius: f64,
+        halo_radius: f64,
+        halo_offset_x: f64,
+    ) -> Frame {
+        let mut pixels = vec![1_000u16; (width as usize) * (height as usize)];
+        let halo_intensity = (u32::from(u16::MAX) * 90 / 100) as u16;
+        for y in 0..height {
+            for x in 0..width {
+                let fx = f64::from(x);
+                let fy = f64::from(y);
+                let dx_halo = fx - (cx + halo_offset_x);
+                let dy_halo = fy - cy;
+                if dx_halo * dx_halo + dy_halo * dy_halo <= halo_radius * halo_radius {
+                    pixels[(y as usize) * (width as usize) + (x as usize)] = halo_intensity;
+                }
+                let dx_sat = fx - cx;
+                let dy_sat = fy - cy;
+                if dx_sat * dx_sat + dy_sat * dy_sat <= sat_radius * sat_radius {
+                    pixels[(y as usize) * (width as usize) + (x as usize)] = u16::MAX;
+                }
+            }
+        }
+        Frame::new(
+            width,
+            height,
+            pixels,
+            Tt::from_julian_date(JD_J2000),
+            1000,
+            Intrinsics::placeholder(width, height),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn saturated_body_centers_on_saturated_disk_not_haze() {
+        // Saturated disk at (200, 150) radius 15; halo offset by
+        // (+30, 0) with radius 50 — the halo's "center of mass"
+        // is somewhere between the disk center and the halo center.
+        let frame = synth_saturated_disk_with_halo(400, 300, 200.0, 150.0, 15.0, 50.0, 30.0);
+        let c =
+            centroid_saturated_body_in_mask(&frame, SaturatedBodyConfig::default(), None).unwrap();
+        // Should be on the saturated disk, not pulled by the halo.
+        assert_relative_eq!(c.x, 200.0, epsilon = 1.0);
+        assert_relative_eq!(c.y, 150.0, epsilon = 1.0);
+        // Area should be the saturated disk's area (π·15² ≈ 707),
+        // not the disk + halo.
+        assert!(
+            c.area_px > 600 && c.area_px < 800,
+            "expected saturated-disk area ~707, got {}",
+            c.area_px
+        );
+    }
+
+    #[test]
+    fn saturated_body_refuses_unsaturated_frame() {
+        // Synth a non-saturated body (max 60000, below threshold).
+        let frame = synth_disk_frame(200, 150, 100.0, 75.0, 20.0);
+        let result = centroid_saturated_body_in_mask(&frame, SaturatedBodyConfig::default(), None);
+        assert!(matches!(
+            result,
+            Err(CentroidError::NoBrightRegion(_) | CentroidError::ComponentTooSmall(_, _))
+        ));
+    }
+
+    #[test]
+    fn saturated_body_honors_mask() {
+        // Two saturated disks; mask out one and expect the centroid
+        // to land on the other.
+        let mut pixels = vec![1_000u16; 400 * 300];
+        // Disk A at (100, 100), radius 12.
+        // Disk B at (300, 200), radius 12.
+        for y in 0..300 {
+            for x in 0..400 {
+                let in_a = (f64::from(x) - 100.0).powi(2) + (f64::from(y) - 100.0).powi(2) <= 144.0;
+                let in_b = (f64::from(x) - 300.0).powi(2) + (f64::from(y) - 200.0).powi(2) <= 144.0;
+                if in_a || in_b {
+                    pixels[(y as usize) * 400 + (x as usize)] = u16::MAX;
+                }
+            }
+        }
+        let frame = Frame::new(
+            400,
+            300,
+            pixels,
+            Tt::from_julian_date(JD_J2000),
+            1000,
+            Intrinsics::placeholder(400, 300),
+        )
+        .unwrap();
+        // Mask: only allow the right half (x >= 200) — excludes A.
+        let mask: Vec<bool> = (0..300).flat_map(|_y| (0..400).map(|x| x >= 200)).collect();
+        let c =
+            centroid_saturated_body_in_mask(&frame, SaturatedBodyConfig::default(), Some(&mask))
+                .unwrap();
+        // Should land on disk B at (300, 200).
+        assert_relative_eq!(c.x, 300.0, epsilon = 1.0);
+        assert_relative_eq!(c.y, 200.0, epsilon = 1.0);
+    }
+
+    #[test]
+    fn saturated_body_rejects_too_few_saturated_pixels() {
+        // A handful of saturated noise pixels shouldn't trigger.
+        let mut pixels = vec![1_000u16; 200 * 150];
+        // 5 saturated noise pixels scattered.
+        for &(x, y) in &[(10, 10), (50, 50), (100, 75), (150, 100), (190, 140)] {
+            pixels[(y as usize) * 200 + (x as usize)] = u16::MAX;
+        }
+        let frame = Frame::new(
+            200,
+            150,
+            pixels,
+            Tt::from_julian_date(JD_J2000),
+            1000,
+            Intrinsics::placeholder(200, 150),
+        )
+        .unwrap();
+        let result = centroid_saturated_body_in_mask(&frame, SaturatedBodyConfig::default(), None);
+        assert!(matches!(
+            result,
+            Err(CentroidError::ComponentTooSmall(_, _) | CentroidError::NoBrightRegion(_))
+        ));
+    }
+
+    #[test]
+    fn saturated_body_rejects_mask_shape_mismatch() {
+        let frame = synth_disk_frame(100, 100, 50.0, 50.0, 10.0);
+        let mask = vec![true; 99 * 100]; // wrong size
+        let err =
+            centroid_saturated_body_in_mask(&frame, SaturatedBodyConfig::default(), Some(&mask))
+                .unwrap_err();
+        assert!(matches!(err, CentroidError::MaskShapeMismatch { .. }));
     }
 }

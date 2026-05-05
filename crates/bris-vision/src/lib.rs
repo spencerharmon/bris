@@ -19,8 +19,8 @@ pub mod segment;
 pub mod track;
 
 pub use centroid::{
-    centroid_brightest_body, centroid_brightest_body_in_mask, Centroid, CentroidConfig,
-    CentroidError,
+    centroid_brightest_body, centroid_brightest_body_in_mask, centroid_saturated_body_in_mask,
+    Centroid, CentroidConfig, CentroidError, SaturatedBodyConfig,
 };
 pub use condition::{
     classify, AstronomicalEvidence, Classification, Condition, ConditionConfig, ImageEvidence,
