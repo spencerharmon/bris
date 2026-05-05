@@ -316,10 +316,10 @@ stable. Each task is sized to a meaningful unit of work, not a single commit.
    Combine the relevant per-stage uncertainties into a single 1σ altitude
    uncertainty for each sight. Document the combination rule (assumed
    independent, root-sum-square) and its limits.
-** TODO Single sight LOP
+** DONE Single sight LOP
    Compute computed altitude (Hc) from almanac, intercept (Ho − Hc),
    azimuth. Output a line of position with associated uncertainty.
-** TODO Multi-sight fix with full covariance
+** DONE Multi-sight fix with full covariance
    Weighted least-squares intersection of ≥2 LOPs using per-sight
    altitude variances. Time uncertainty enters as a one-dimensional
    longitude variance (≈15′ per second × cos(lat)) added to the position

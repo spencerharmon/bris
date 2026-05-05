@@ -3,3 +3,9 @@
 //! streaming pipeline.
 //!
 //! See `plan.org` Phase 3.5 and Phase 4.
+
+pub mod fix;
+pub mod sight;
+
+pub use fix::{multi_sight_fix, Fix, FixError};
+pub use sight::{line_of_position, LineOfPosition, LopError, NM_PER_ARCMIN};
