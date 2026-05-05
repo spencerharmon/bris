@@ -1,10 +1,12 @@
 //! Probe: run the vision pipeline against a frame and print results.
 //!
 //! Usage:
-//!   cargo run -p bris-vision --example probe_scene -- <frame.png>
+//!   `cargo run -p bris-vision --example probe_scene -- <frame.png>`
 //!
-//! Used to drive the corpus-pass workflow when promoting test_video/
+//! Used to drive the corpus-pass workflow when promoting `test_video/`
 //! scenes to regression cases. Not part of the shipped product.
+
+#![allow(clippy::too_many_lines)]
 
 use std::path::PathBuf;
 

@@ -18,274 +18,275 @@ For the end-to-end pipeline architecture and data flow, see
   three horizon detectors (gradient / sky-region / segmentation),
   body centroiding (with optional mask), star-peak detector,
   cross-frame Harris+NCC+RANSAC stitching, end-to-end altitude
-  measurement. Calibration *workflow* and a streaming-engine quality
-  knob remain.
+  measurement, **load-time rotation infrastructure for opt-in
+  use by capture pipelines**, **day/night/twilight classifier**.
+  Calibration *workflow* and a streaming-engine quality knob remain.
 - Phase 4 (sight reduction & fix) — 3 of 4 tasks; running fix
   remains.
 - Phase 5 (NMEA output) — 4 of 6 tasks; transport layer and OpenCPN
   integration test remain.
-- Phase 6 (CLI) — `bris replay` subcommand operational; everything
-  else (capture, calibrate, fix, serve, log, update) still stubs.
+- Phase 6 (CLI) — `bris replay` subcommand exists but is **no
+  longer the validation surface**; the regression-test harness is.
+  Replay is kept as a manual smoke-test tool; not invested in.
+  Capture, calibrate, fix, serve, log, update remain stubs.
+
+**Phase 2.5 (real-data validation): 12 regression cases now in the
+corpus** covering working day, working night-with-moon, working
+day-with-shore-obstruction, expected-failure (sunrise, dense
+star-field night, deck-light night), and clean-refusal (marina,
+ambiguous sun glow). The user's full `test_video/` corpus is
+exercised end-to-end.
 
 **Not started:** Phase 1.5 (time integrity), Phase 3 (plate solving),
-Phase 3.5 (continuous-operation engine, day/night detection), Phase 7
-(mobile frontends), Phase 8 (validation), Phase 9 (stretch).
+Phase 3.5 (continuous-operation engine, day/night detection wired
+through the engine), Phase 7 (mobile frontends), Phase 8
+(validation), Phase 9 (stretch).
 
-**Workspace metrics:** 25 commits, **198 tests passing**, 6 crates with
-active code, zero clippy warnings, zero `cargo fmt` diffs.
-
-**Last commit:** `3806eab` — sailing_with_distant_shore regression
-case proving the obstruction-aware horizon detector adds 168
-distant-shore columns to the 162 clean sky→sea columns on real
-footage.
+**Workspace metrics:** 293 tests passing, 7 crates with active code,
+zero clippy warnings, zero `cargo fmt` diffs. Last commit:
+`7ece25a` — 10 regression cases promoted from `test_video/` corpus.
 
 ---
 
 ## What we proved this session
 
-### Pipeline architecture is now concrete and documented
+### TOML-driven regression test harness
 
-**`docs/design/pipeline.md`** has a Mermaid diagram and per-component
-status table for the entire camera→fix flow. Key clarifications it
-captures:
+`crates/bris-vision/tests/regression/*/case.toml` describes each
+regression case; `build.rs` walks the directory at build time and
+emits one `mod case_<name>` per case with one `#[test] fn` per
+declared check. **Adding a new case is a TOML-write, not a
+Rust-write.** Each generated test is named after the case + check
+(`case_marina::horizon_segmentation_outcome`) so CI failures point
+at the exact assertion.
 
-- **Horizon and body detection run per-frame**, not on a stitched
-  panorama. The panorama path picks the best per-frame results, and
-  uses cross-frame stitching only when the body and horizon are in
-  different frames. Single-frame path is the common case and the
-  fast path.
-- **The stitching window is bounded by accuracy tolerance**, not
-  frame count. At 30-60 fps a ~1 second window keeps body sidereal
-  motion below per-sight σ for a 0.5 nm fix.
-- **Three method sets:** day, night, twilight. Day is operational;
-  night (peak detection + plate solving) is partially built (peak
-  detector exists; plate solver doesn't); twilight is the hybrid that
-  hasn't been designed.
-- **Single-LOP "fix" is a hack** in `bris replay` (synthesizes a fake
-  perpendicular LOP) so a single-body sight produces a position. Real
-  fixes need ≥ 2 azimuth-diverse sights from the streaming engine.
+The schema supports three case kinds:
 
-### ML segmentation works on the deck-occluded shipboard case
+- `kind = "working"` — pipeline should produce a usable result.
+- `kind = "expected_failure"` — pipeline should refuse cleanly with
+  a typed error. **Critical**: catches regressions where Bris
+  starts fabricating output from scenes that don't have enough
+  information.
+- `kind = "expected_low_confidence"` — pipeline should produce
+  output but flag wide σ.
 
-Both classical horizon detectors fail on real shipboard footage where
-the deck occupies the lower half of the frame:
+Per-method horizon expectations carry an `outcome = "ok" | "err"`
+plus optional `error_variant` substring matching, so `expected_failure`
+cases can assert specific typed errors rather than vague "it failed."
 
-- **Gradient detector** picks the deck-to-sea boundary on the left
-  rather than the sea-sky horizon on the right (deck has stronger
-  horizontal gradient than the small visible horizon).
-- **Sky-region detector** picks the top of the mainsail (sky→sail-edge
-  is a stronger linear feature than sky→sea).
+### Portrait support, opt-in only (no aspect heuristic)
 
-The ML segmentation detector (SegFormer-B0 / ADE20K via `ort`) cleanly
-identifies sky/sea/boat/ship and the per-column sky→sea transitions
-yield a robust horizon. **172 of 512 columns** produce clean
-candidates on the original sailing scene; **330 of 512** with
-obstruction tolerance on the new footage with distant shore.
+A `Rotation` enum + `rotate_pixels` primitive + `Frame::source_rotation`
+field + `load_frame_from_path_with_rotation` lets capture pipelines
+or fixtures explicitly declare a load-time rotation. The
+`segment_with_rotation` function rotates source RGB before model
+inference so segmentation masks align with rotated frames.
 
-### ML-assistance items 1-3 implemented
+**Default is no rotation.** Aspect ratio cannot distinguish 4:3
+landscape from 3:4 portrait, and phone JPEGs / conventional camera
+images are saved in viewing orientation already (often after EXIF
+orientation has been baked in). Auto-rotating based on aspect
+silently broke the user's portrait `night_test_lowres` footage —
+the photo is already in viewing orientation, the horizon runs
+left-to-right across the bottom, and the pipeline handles it as-is
+at 1080×1920. The retained rotation surface stays useful for
+sensor-mounted-sideways captures (V4L2 / libcamera) and the
+occasional sideways-stored fixture.
 
-Catalog items from `plan.org`:
+### Day/night/twilight classifier
 
-1. **Vessel-mask centroid (item 1)** — `centroid_brightest_body_in_mask`
-   takes an optional `&[bool]` allow-mask. Pixels outside the mask are
-   excluded from both the connected-component search and the centroid
-   integration. Connectivity breaks at the mask boundary.
+`bris-vision::condition::classify(frame, sun_altitude_deg, cfg)`
+returns a `Classification { condition, confidence, image_evidence,
+astronomical_evidence, disagreement }`. Two evidence sources:
 
-2. **Sky-mask body search (item 2)** — `SegmentationMask::sky_mask`
-   builds a `Vec<bool>` from the segmentation. A regression test
-   proves a mask containing only the sky region causes the centroid
-   to land on the Sun rather than on a competing bright distractor
-   elsewhere in the frame.
+1. **Image**: mean luma over the middle horizontal third (avoids
+   deck/sky bias) plus saturated-pixel fraction over the full
+   frame. Day ≥ 0.30 mean luma, twilight 0.05 to 0.30, night below
+   0.05; saturated-pixel fraction ≥ 0.5% forces day regardless of
+   mean luma (so a saturated sun in a dim deck shot still
+   classifies correctly).
 
-3. **Obstruction-aware horizon RANSAC (item 3)** —
-   `sky_to_sea_transitions_with_obstruction` walks past thin (≤ 25
-   px in mask resolution, ~5% frame height) obstructions looking for
-   sea below. The obstruction's *top* row is the horizon candidate,
-   tagged with `CandidateSource::SkyToObstructionToSea` so future
-   weighted-RANSAC can prefer cleaner sources. **On the new sailing
-   scene this doubles the available horizon evidence** (162 clean +
-   168 thin-shore-tolerant = 330 total).
+2. **Astronomical prior** (optional): caller computes sun altitude
+   from `bris-almanac` and passes it in. Maps to civil / nautical /
+   astronomical twilight bands per Bowditch §22.
 
-### Regression test corpus established and growing
+When both sources agree, confidence = max of the two underlying
+confidences. When they disagree (e.g. dark image but sun should be
+high — a covered camera, or bright image at midnight — a flashlight),
+the classifier picks the more conservative (less-bright) condition,
+sets `disagreement = true`, and clamps confidence ≤ 0.4 so callers
+know not to trust the result. The classifier deliberately doesn't
+depend on `bris-almanac`; the engine that has both crates as deps
+does the almanac call once per batch.
 
-`crates/bris-vision/tests/regression/` has two cases now:
+### 12-case regression corpus exercising every detector
 
-- **`sailing_sun_upper_left`** (376 KB): the original deck-occluded
-  scene with sun in upper-left. Demonstrates the gradient and
-  sky-region detector failures and proves segmentation finds the
-  right horizon.
-- **`sailing_with_distant_shore`** (172 KB): scene with sun directly
-  ahead, water glare on the right, and a distant shoreline. Proves
-  the obstruction-aware detector contributes ~168 additional columns
-  beyond the strict version.
+The full `test_video/` corpus has been promoted to the
+regression-test surface. Each case records what the pipeline
+*currently does* with explicit assertions; algorithm changes
+produce visible diffs.
 
-10 regression tests run as part of `cargo test`. The corpus is the
-primary validation surface: every algorithm change touches it, and
-the recorded values in `case.toml` move forward together with the
-test assertions in the same commit.
+| Case | Kind | Highlights |
+|---|---|---|
+| `sailing_sun_upper_left` | working | Existing; deck-occluded horizon, sun upper-left |
+| `sailing_with_distant_shore` | working | Existing; obstruction-aware horizon |
+| `ambiguous_sun` | working | Diffuse glow; segmentation horizon OK; centroider-on-glow documented |
+| `bokeh` | working | Bokeh defeats segmentation (zero candidates); sky-region works |
+| `cloudy_sun` | working | Gradient + sky-region agree; segmentation declines on city skyline |
+| `marina` | working | **Centroid correctly refuses** with NoBrightRegion; no fabricated body |
+| `night_test_highres` | working | Stars; surprisingly sky-region + segmentation find dim horizon |
+| `night_test_lowres` | working | **Portrait 1080×1920**; classifier says Night; **moon centroided successfully**; horizon detectors all fail (motivating night-horizon work) |
+| `sunrise` | expected_failure | Sun on horizon defeats every horizon detector |
+| `too_bright` | working | Gradient + segmentation agree; sky-region fails on sail glare |
+| `container_ship_night` | expected_failure | Dense star field; every detector fails (canonical plate-solving target) |
+| `container_ship_night_lights_on_water` | expected_failure | Adversarial: deck-light glow on water; should keep failing cleanly |
+
+### Workflow tools
+
+`crates/bris-vision/examples/probe_scene.rs` runs the full pipeline
++ classifier on a frame and prints structured results — used to
+author each `case.toml` from real observations.
+
+`crates/bris-vision/examples/convert_to_jpeg.rs` re-encodes
+oversized PNGs to JPEG for the corpus 200 KB ceiling. Verified
+empirically that quality 85 doesn't move centroids or horizon
+parameters meaningfully.
 
 ---
 
 ## Honest limitations we know about
 
-1. **Brightness-weighted centroid + sky mask biases toward the sky's
-   center of mass.** On the original sailing scene, the masked
-   centroid landed at (122, 64) instead of the visually-correct
-   ~(99, 48) Sun position. The sky region around the saturated Sun is
-   itself bright, and area-weighted centroiding pulls toward whichever
-   side has more bright pixels. **The right algorithm for Sun/Moon in
-   a sky mask is the peak detector (`detect_peaks`)**, not the
-   connected-component centroider. Documented in the relevant test
-   docstring; tracked as a follow-up.
+1. **The image-only classifier under-classifies night scenes as
+   twilight** when there's any ambient light (deck lights, moon
+   glow on sea). `night_test_highres` and both `container_ship_night*`
+   cases all read as Twilight on luma alone; with the astronomical
+   prior they correctly resolve to Night. This is the right
+   behavior for the image-only path — overestimating brightness is
+   safer than underestimating — but downstream code should consult
+   the almanac before deciding which method set to invoke.
 
-2. **Placeholder camera intrinsics make absolute altitudes wrong.**
-   Every test uses `Intrinsics::placeholder(w, h)` which sets
-   `fx = fy = 1000`. For a real wide-angle camera (GoPro-style at
-   640×360) `fy` is more like 350-500. Reported altitudes are off by
-   a factor of ~2-3 from the actual sky-space altitude, even when the
-   horizon and body pixel positions are correct. This is calibration,
-   not algorithm; tracked as Phase 2 task "lens calibration workflow."
+2. **`marina` makes the segmentation and sky-region detectors
+   fabricate a horizon** along the shore-water boundary. The
+   `correctness = "wrong"` field documents this, but the harness
+   still asserts the line as `outcome = "ok"` because that's what
+   the detectors return. The load-bearing assertion for `marina`
+   is that **the centroid refuses** — the pipeline correctly
+   declines to invent a body. A future "no usable horizon"
+   classifier could promote this to a clean failure end-to-end.
 
-3. **Single-LOP fix needs an --assumed-position.** This isn't a bug,
-   it's geometry. One sight gives a line, not a point. The streaming
-   engine (Phase 3.5) accumulates ≥ 2 azimuth-diverse sights into a
-   real fix; until then `bris replay` synthesizes a perpendicular
-   anchor and labels the result "advisory."
+3. **`sunrise` cannot produce a fix** because the sun-on-horizon
+   defeats every horizon detector simultaneously (the sun itself
+   blots out the sky→sea transition in the columns where it's
+   visible). A body-excluding mask before horizon fitting would
+   resolve this. Tracked under "exclude detected body from horizon
+   candidates" in plan.org.
 
-4. **Night and twilight algorithms don't exist yet.** The peak
-   detector handles the per-star detection; everything else (plate
-   solving for star ID, horizon at night without bright sea-sky
-   contrast, twilight hybrid) is unimplemented.
+4. **All night scenes except `night_test_lowres` (which has a
+   bright moon) currently fail end-to-end.** Centroid refuses, all
+   three horizon detectors fail. This is the canonical case for
+   plate solving + night-horizon detection.
 
-5. **The pretrained SegFormer / ADE20K is 14.5 MB ONNX + ~50 MB ort
-   native lib.** Acceptable for embedded Linux; meaningful for mobile
-   builds when we get there. The "Train a Bris-specific segmentation
-   model" task in `plan.org` is the planned fix: 4-class model,
-   1-5 MB target, plausibly runnable with `tract` instead of `ort`
-   to drop the native lib entirely.
+5. **Brightness-weighted centroid + sky mask biases toward sky
+   center of mass.** Documented before; the fix (peak detector
+   inside sky mask) is a queued plan.org TODO. The corpus has the
+   relevant test scene already; once the algorithm lands, the
+   `sailing_sun_upper_left_sky_mask_centroids_to_sky_region` test's
+   tolerance can be tightened.
 
-6. **No camera capture yet.** All testing goes through `bris replay`
-   on saved frames. V4L2 (Linux) and platform-native equivalents are
-   future Phase 6 work.
+6. **Placeholder camera intrinsics make absolute altitudes wrong**
+   by a factor of ~2-3. Calibration workflow is unchanged.
+
+7. **Single-LOP fix needs an `--assumed-position`.** Geometry, not
+   a bug. Phase 3.5 streaming engine resolves this.
 
 ---
 
 ## Test footage available (in `test_video/`, gitignored)
 
-The user has captured / collected a substantial test corpus. I've
-viewed one frame from each and described what's there. Bris should be
-exercised against each of these in the next session — some will work,
-some will surface new problems, and some are documented up front as
-beyond current capability.
+The user's captured corpus has been fully exercised against the
+pipeline and 10 of the 11 scenes promoted to regression cases.
+`orig_test_video/` (603 frames of the same scene as
+`sailing_sun_upper_left`) is the lone remaining unrepresented one,
+and it's redundant with the regression case it duplicates — kept
+as a source for future multi-frame stitching tests when needed.
 
-| Directory | Frames | Conditions | Expected behavior |
-|---|---|---|---|
-| `orig_test_video/` | 603 | Sailboat POV, sun upper-left, deck-occluded horizon, day | **Working** — already in regression corpus as `sailing_sun_upper_left`. |
-| `new_test_video/` | 25 | Sailboat POV, sun centered, water glare on right, distant shoreline | **Working** — already in regression corpus as `sailing_with_distant_shore`. |
-| `cloudy_sun/` | 21 | Container ship deck, sun behind clouds, distant city skyline visible | Likely to work for horizon (clear sky-sea boundary on left); body centroid will pick up the brightest cloud-haze region near the sun. Worth running and adding as a regression case if it produces reasonable output. |
-| `sunrise/` | 21 | Container ship deck, sun on horizon, low altitude | **Hard for the current pipeline.** Body very close to horizon; refraction model uncertainty at low altitude is documented to be large. May produce a sight with appropriately wide σ; that itself is the success criterion. |
-| `ambiguous_sun/` | 152 | Ship's wake at dusk, sun glow but no defined sun disk visible, broken cloud bands | **Probably won't produce a body fix** — the centroid algorithm needs a saturated bright disk. Useful as a test that the pipeline reports "no body found" cleanly rather than fabricating one. |
-| `bokeh/` | 21 | Container ship night, sun visible through optical bokeh artifacts | May surprise — the bokeh "rays" from the sun create false bright patterns. Sky mask should still work; centroid will probably land near the actual sun core. Worth a quick run. |
-| `too_bright/` | 21 | Sailboat with sail glare, sunset directly into camera, water glare | **Worst-case for unmasked centroid** — the sail and water are both saturated bright. Sky mask + masked centroid is the correct test target here. |
-| `marina/` | 21 | Marina at dusk, multiple sailboats, no clear horizon, lights on shore | **Beyond MVP scope** — this is a harbor scene where there's no usable horizon at all. Useful as a "negative test" that the pipeline reports failure cleanly. |
-| `night_test_highres/` | 21 | Stars over ship's wake, dark sky, defined horizon | **Night case we can't yet handle.** Star peak detection should produce points; plate solving doesn't exist yet so star identification will fail. Horizon detection will fail because there's no daylight contrast. Useful test data for when we tackle Phase 3 (plate solving) and Phase 3.5 (continuous engine with night-mode). |
-| `night_test_lowres/` | 234 | **Cellphone night shot, bright moon visible, faint horizon, very dark** | **Highest-priority night case.** User flagged this specifically: "I can make out the horizon and the stars, so it's a perfect test case for us." Moon centroiding *should* work (saturated bright body in the dark — the peak detector or even the connected-components centroider should find it). Horizon detection at night is the open problem. Worth pointing at the existing horizon detectors to see what they do (likely fail), then designing the night-horizon algorithm against this specific footage. Note that **frames are 9:16 portrait orientation** (1080×1920 vs landscape), which may surface aspect-ratio assumptions in the pipeline. |
-| `container_ship/night/` | 21 | Container ship deck, dark night sky, dense star field | **Best plate-solving test case** when we have a plate solver. Many bright stars visible against truly dark sky. |
-| `container_ship/night_lights_on_water/` | 21 | Container ship deck at night with lights illuminating the water | **Adversarial case for night horizon.** Aurora-like glow on horizon will fool simple "find dark/bright transition" approaches; deck lights on water create false features. |
+The full `test_video/` directory remains gitignored (~10 MB of
+PNG); the regression corpus carries one or two representative
+frames per scene.
 
 ---
 
 ## Next concrete steps (recommended ordering)
 
-### Immediate: exercise new test footage
+### Highest-leverage algorithm work, motivated directly by the corpus
 
-Run `bris replay` against each of the new test directories and:
-- Add cases that produce reasonable output to the regression corpus.
-- Document failure modes for cases that don't work, so they become
-  motivating examples for the next round of algorithm work.
-- For `night_test_lowres` specifically: this is the user's
-  highest-priority night case. First step is to characterize what the
-  current pipeline does on it (likely: horizon detectors fail,
-  centroid finds the moon). Second step is to design and implement a
-  night-horizon detector based on what the data actually looks like.
+1. **Sun/Moon peak detection inside sky mask.** Fixes the
+   documented brightness-bias on `sailing_sun_upper_left` and the
+   wrong-centroid behavior on `too_bright` and `ambiguous_sun`.
+   Small change: replace the connected-component centroider with
+   `detect_peaks` constrained to the sky-mask region. ~1 work
+   session. Updates 3 regression cases on landing.
 
-### Highest-leverage algorithm work
+2. **Night-horizon detection v1: sea-sky luma boundary.** Smallest
+   independent change (no new infrastructure dependency). Find the
+   horizontal band of maximum luma transition in the lower portion
+   of the frame; should work on `night_test_lowres` (where the
+   moon illuminates the sea-sky boundary) and possibly on
+   `container_ship_night` (faint horizon with star-density
+   transition). Will *not* work on `container_ship_night_lights_on_water`
+   — that case is the regression floor: if any future detector
+   produces a horizon there, it's probably wrong.
 
-1. **Use the peak detector for Sun/Moon centroiding inside a sky
-   mask.** Fixes the documented brightness-bias limitation. Likely a
-   small change: detect peaks within the mask, take the brightest,
-   refine sub-pixel as the existing peak detector already does. ~1
-   work session.
+3. **Plate solving (Phase 3).** Tetra3-style 4-star geometric
+   hash matcher. Unlocks night fixes from peak detections on
+   `night_test_highres` and `container_ship_night`. Requires the
+   star catalog import (already done).
 
-2. **Night-horizon design.** No current detector handles dark scenes.
-   Three approaches discussed in `docs/design/pipeline.md`: IMU prior
-   (when we have one), low-altitude detected stars as a horizon
-   proxy, sea-sky luma boundary with bright moonlight. The
-   `night_test_lowres` and `container_ship/night/` cases are the
-   testbeds. Prerequisite for any night functionality.
+### Larger pieces
 
-3. **Lens calibration workflow.** Without real intrinsics, every
-   altitude reading is wrong by the FOV-error factor. The current
-   placeholder `fy=1000` is far from real wide-angle camera values.
-   `bris-vision::lens` already has the math; this is the CLI hook for
-   capturing a calibration target and persisting per-camera
-   intrinsics.
+4. **Body-excluding mask before horizon fitting.** Resolves
+   `sunrise`. Probably reuses the segmentation mask but would also
+   work with the body's centroid + a circular dilation.
 
-### Larger pieces, in priority order
+5. **Streaming engine + continuous-operation engine** (Phase 3.5).
+   Reads frames continuously, classifies day/night/twilight,
+   accumulates sights, publishes fixes when ≥2 azimuth-diverse
+   sights are available.
 
-1. **Plate solving** (Phase 3) — unlocks night fixes without
-   `--body` selection. Requires the full BSC import (already done) and
-   a Tetra3-style geometric-hash matcher (not started). Would let
-   `night_test_highres` and `container_ship/night/` produce real
-   sights.
+6. **NMEA transport** (Phase 5 remainder).
 
-2. **Streaming engine with continuous-operation logic** (Phase 3.5).
-   Reads frames from a buffer, classifies day/night/twilight, picks
-   method set, accumulates sights into a rolling window, publishes
-   fixes when ≥ 2 azimuth-diverse sights are available. This is the
-   piece that turns Bris from "run a single replay" into a real
-   continuously-running system.
+7. **Live camera capture** (Phase 6) — V4L2 on Linux. The
+   capture-side rotation surface (`load_frame_from_path_with_rotation`
+   already in place) means a sideways-mounted sensor can be
+   handled without pipeline changes.
 
-3. **NMEA transport layer** (Phase 5 remainder) — TCP/UDP/serial
-   wrapping the existing formatters. Once in place, `bris fix` against
-   live capture can actually drive a chartplotter.
-
-4. **Live camera capture** (Phase 6) — V4L2 on Linux, then
-   platform-native equivalents. Last piece before "point a camera at
-   the sky" works end-to-end.
-
-5. **Train a Bris-specific segmentation model** (Phase 2 follow-up).
-   4-class model, ~1-5 MB, drops `ort` for `tract`. Not blocking but
-   substantially reduces binary size and improves accuracy.
-
-6. **Phase 1.5 time integrity** as a cleanup pass.
+8. **Train a Bris-specific segmentation model**. Substantially
+   reduces binary size and improves accuracy in the dark / bokeh /
+   shore-on-horizon cases that the current ADE20K-trained model
+   handles poorly.
 
 ---
 
 ## Open questions
 
-1. **Are wide-angle frames (most of the new test data) useful for
-   validation, or should we focus on telephoto/normal-FOV captures?**
-   The accuracy budget at the design target (0.5 nm) requires
-   sub-arcmin pixel resolution, which means longer focal lengths.
-   Wide-angle test data exercises the algorithms but won't validate
-   the accuracy claim. Both are useful; worth being explicit about
-   which we're using each footage for.
+1. **What sun-altitude lookup goes where in the eventual streaming
+   engine?** The classifier takes it as a parameter; the engine
+   has both `bris-vision` and `bris-almanac` and does the call
+   once per batch. The exact engine API is Phase 3.5.
 
-2. **What's the intended user experience for night?** Full plate
-   solving and automatic body identification (cool but big) vs.
-   "point at the moon, it's identified by name from the almanac
-   matching its expected position" (simpler, works tonight).
+2. **`marina`'s shore-fabricated horizon** — should the harness
+   assert `outcome = "ok"` (what currently happens) or
+   `outcome = "wrong"` (what we'd prefer)? The schema doesn't
+   currently distinguish "this output is technically OK but
+   navigationally wrong"; the `correctness = "wrong"` field is
+   documentation only. Adding a `"navigation_correct"` flag to the
+   harness would let `marina` and similar cases assert the right
+   thing.
 
-3. **The pretrained SegFormer expects RGB input.** We currently
-   re-load the source image from disk for inference and use Bris's
-   grayscale `Frame` for everything else. For live-camera capture the
-   capture path will need to keep the RGB version available alongside
-   the grayscale one. Needs a small `Frame` API extension.
-
-4. **`night_test_lowres` is portrait orientation (1080×1920).**
-   Several pipeline assumptions (horizon is approximately horizontal
-   in the frame, body is "above" in image coordinates) may not hold
-   in portrait. Worth checking whether portrait frames need to be
-   pre-rotated based on EXIF orientation, or whether the pipeline can
-   be made orientation-agnostic.
+3. **Should the centroider's known-wrong outputs on
+   `too_bright` / `ambiguous_sun` / `marina` (when not refusing)
+   be regression-asserted or removed?** Currently we assert the
+   recorded values to detect drift; once peak-in-sky-mask lands,
+   those positions will move and the cases will need updating.
+   Worth noting that the current assertions are
+   detection-of-drift, not target-of-correctness.

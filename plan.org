@@ -259,8 +259,14 @@ references to the regression tests that pin the behavior. See
 
 * Phase 2: Vision core (no platform code)
 ** DONE Image abstraction
-   ~Frame { width, height, pixels, timestamp, exposure, intrinsics }~.
-   Support grayscale + Bayer + RGB. Zero-copy where possible.
+   ~Frame { width, height, pixels, timestamp, exposure, intrinsics,
+   source_path, source_rotation }~. Pipeline-internal pixels are
+   u16 grayscale; color and bit-depth conversion happens at the
+   I/O boundary. Optional ~source_rotation~ field records any
+   load-time rotation applied (for capture pipelines that read
+   sensor pixels in non-viewing orientation); default is no
+   rotation, since phone JPEGs and conventional camera images are
+   already in viewing orientation.
 ** TODO Lens model + calibration
    Pinhole + Brown-Conrady distortion (k1, k2, k3, p1, p2). Calibration
    workflow: capture N frames of a printed checkerboard or use star
@@ -520,21 +526,97 @@ references to the regression tests that pin the behavior. See
   promote successes to the regression test corpus, and turn failures
   into concrete algorithm-design problems.
 
-** TODO Run replay against each scene in ~test_video/~
-   For each subdirectory, run ~bris replay~ with each
-   ~--horizon-method~ (gradient, sky-region, segmentation) and
-   record:
-   - Whether the pipeline runs end-to-end without crashing.
-   - Per-method horizon line (slope, intercept, inlier count).
-   - Body centroid (with and without sky mask, when applicable).
-   - The visually-correct horizon and body position for comparison.
+** DONE TOML-driven regression test harness
+   ~tests/regression/*/case.toml~ is parsed by ~build.rs~ and
+   emits one ~mod case_<name>~ per case with one ~#[test] fn~
+   per declared check. Adding a new case is a TOML-write, not a
+   Rust-write. Schema supports three case kinds (~working~,
+   ~expected_failure~, ~expected_low_confidence~) so cases can
+   assert the negative — "the pipeline correctly refuses on this
+   scene" — as well as the positive. Per-method horizon outcomes
+   carry ~outcome = "ok" | "err"~ with optional ~error_variant~
+   substring matching.
 
-   For successful runs, add the scene to
-   ~crates/bris-vision/tests/regression/~ with ~case.toml~ +
-   ~README.md~ + sample frame(s).
+** DONE Day/night/twilight classifier
+   ~bris-vision::condition::classify~ combines image evidence (mean
+   luma over middle band + saturated-pixel fraction) with optional
+   astronomical prior (sun altitude in degrees, supplied by the
+   caller from ~bris-almanac~). When sources agree, confidence is
+   high. When they disagree the classifier picks the conservative
+   (less-bright) condition, sets ~disagreement = true~, and clamps
+   confidence ≤ 0.4. The module deliberately doesn't depend on
+   ~bris-almanac~; the streaming engine (which has both) makes the
+   almanac call once per batch. Wired into the regression harness
+   via ~[expected_classifier]~ in ~case.toml~.
 
-   For failures, document the failure mode and add it to the
-   appropriate algorithm-design TODO below.
+** DONE Load-time rotation infrastructure (opt-in)
+   ~Rotation~ enum + ~rotate_pixels~ primitive + ~Frame::source_rotation~
+   + ~load_frame_from_path_with_rotation~ + ~segment_with_rotation~.
+   Lets capture pipelines that read sensor pixels in non-viewing
+   orientation (sideways-mounted V4L2/libcamera) explicitly declare
+   a rotation. *Default is no rotation*: aspect ratio cannot
+   distinguish 4:3 landscape from 3:4 portrait, and phone JPEGs and
+   conventional camera images are saved in viewing orientation
+   already. Auto-rotating based on aspect would silently break
+   already-correctly-oriented input. The ~night_test_lowres~ portrait
+   fixture (1080×1920) is processed at native dimensions with no
+   rotation.
+
+** DONE Promote test_video/ scenes to regression cases
+   10 new cases added to ~crates/bris-vision/tests/regression/~,
+   covering working day, working night-with-moon, working
+   shore-obstruction, expected-failure (sunrise, dense star-field
+   night, deck-light night), and clean-refusal (marina,
+   ambiguous-sun glow). Each ~case.toml~ records the current
+   pipeline behavior with explicit assertions; algorithm changes
+   produce visible diffs. See ~progress.md~ for the per-case
+   inventory.
+
+** TODO Catalog of scene-specific failure modes (populated from real runs)
+   The corpus pass surfaced specific failure modes the pipeline
+   has on real captured footage. Each is tracked as a regression
+   case and motivates a queued algorithm task:
+
+   - *Diffuse sun glow* (~ambiguous_sun~): unmasked centroider
+     produces a brightness-of-mass position that's not a real
+     sun centroid. Peak-in-sky-mask centroiding (queued) should
+     fail cleanly here instead.
+   - *Sail / water glare* (~too_bright~): unmasked centroider
+     lands in glare, not on the sun. Peak-in-sky-mask (queued)
+     fixes this.
+   - *Bokeh artifacts* (~bokeh~): segmentation detector returns
+     zero candidates. Sky-region detector and centroid both
+     work; documented behavior, no action required.
+   - *City skyline on horizon* (~cloudy_sun~): segmentation finds
+     too few inliers (city skyline introduces obstruction band
+     that drops the inlier fraction below 0.5). Gradient and
+     sky-region work fine. Worth revisiting once weighted RANSAC
+     lands.
+   - *Sun on horizon* (~sunrise~): every horizon detector fails
+     because the sun blots out the sky→sea transition in the
+     columns where it's visible. Body-excluding mask before
+     horizon fitting (queued) resolves this.
+   - *Marina / harbor scenes* (~marina~): segmentation and
+     sky-region produce shore-as-horizon outputs that aren't
+     navigationally useful. Centroid correctly refuses. A future
+     "no usable horizon" classifier could promote this to an
+     end-to-end failure.
+   - *Truly dark night* (~container_ship_night~,
+     ~container_ship_night_lights_on_water~): every detector
+     fails. Canonical case for plate solving + night-horizon
+     detection.
+   - *Bright moon, dark sky* (~night_test_lowres~): centroider
+     successfully finds the moon; horizon detectors all fail.
+     Motivating case for night-horizon detection v1.
+
+** DONE Run pipeline against each scene in test_video/
+   Replaced by the TOML-driven regression harness above. The
+   ~bris replay~ subcommand was originally going to be the
+   validation surface but the regression harness gives a cleaner
+   answer: assertions live in version control next to the data
+   they assert on, CI catches regressions automatically, and per-
+   case failures point at the exact assertion. Replay is kept as
+   a manual smoke-test tool but is no longer invested in.
 
 ** TODO Design and implement night-horizon detection
    Highest-priority new algorithm. The ~night_test_lowres~ and
@@ -569,11 +651,6 @@ references to the regression tests that pin the behavior. See
    immediately useful for the user's footage); approach 2 lands
    alongside plate solving; approach 3 is a Phase 7 concern.
 
-** TODO Catalog of scene-specific failure modes (placeholder; populate from real runs)
-   As we run the pipeline against each scene, document the failure
-   modes here so they accumulate into a list of "things that need
-   fixing for production-quality vision."
-
 * Phase 3: Plate solving (night)
 ** TODO Star detection in frame
    *Status:* peak detection primitive exists in ~bris-vision::peak~
@@ -605,6 +682,18 @@ references to the regression tests that pin the behavior. See
    Per-frame mean luminance + presence of saturated regions selects
    between day pipeline (sun/moon centroiding) and night pipeline
    (plate solving). Hysteresis prevents twilight flapping. No user toggle.
+
+   *Status:* the classifier itself is implemented in
+   ~bris-vision::condition::classify~ (Phase 2.5; tested against
+   12 corpus scenes). It produces a ~Classification~ with
+   condition + confidence + image and astronomical evidence + a
+   disagreement flag for when sources contradict. The streaming
+   engine still needs to:
+   - Call the almanac once per batch to get sun altitude.
+   - Apply hysteresis (the per-frame classifier currently doesn't;
+     a dim cloud transit could flip day → twilight on a single
+     frame).
+   - Feed the result into method-set selection.
 ** TODO Day-mode body identification
    Detect saturated bright blob; classify Sun vs Moon by apparent angular
    diameter and time-of-day priors. Apply semi-diameter correction from
