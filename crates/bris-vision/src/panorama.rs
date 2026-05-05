@@ -112,11 +112,49 @@ pub fn panorama_altitude(
     // Phase 1: classify each frame.
     let roles: Vec<FrameRoles> = frames
         .iter()
-        .map(|f| FrameRoles {
-            horizon: detect_horizon(f, horizon_cfg).ok(),
-            body_centroid: centroid_brightest_body(f, centroid_cfg)
-                .ok()
-                .map(|c| (c.x, c.y, c.position_sigma_px)),
+        .enumerate()
+        .map(|(i, f)| {
+            let horizon = match detect_horizon(f, horizon_cfg) {
+                Ok(h) => {
+                    tracing::debug!(
+                        frame = i,
+                        slope = h.slope,
+                        intercept = h.intercept,
+                        inliers = h.inlier_count,
+                        candidates = h.candidate_count,
+                        residual_rms_px = h.residual_rms_px,
+                        altitude_sigma_arcmin = h.altitude_sigma.value().to_degrees() * 60.0,
+                        "panorama: horizon detected"
+                    );
+                    Some(h)
+                }
+                Err(e) => {
+                    tracing::debug!(frame = i, error = %e, "panorama: horizon detection failed");
+                    None
+                }
+            };
+            let body_centroid = match centroid_brightest_body(f, centroid_cfg) {
+                Ok(c) => {
+                    tracing::debug!(
+                        frame = i,
+                        x = c.x,
+                        y = c.y,
+                        area_px = c.area_px,
+                        intensity = c.mean_intensity,
+                        position_sigma_px = c.position_sigma_px.value(),
+                        "panorama: body centroid detected"
+                    );
+                    Some((c.x, c.y, c.position_sigma_px))
+                }
+                Err(e) => {
+                    tracing::debug!(frame = i, error = %e, "panorama: centroiding failed");
+                    None
+                }
+            };
+            FrameRoles {
+                horizon,
+                body_centroid,
+            }
         })
         .collect();
 
@@ -140,6 +178,17 @@ pub fn panorama_altitude(
     let horizon_line = roles[horizon_idx].horizon.expect("checked above");
     let (body_x_in_body_frame, body_y_in_body_frame, body_sigma) =
         roles[body_idx].body_centroid.expect("checked above");
+
+    tracing::info!(
+        horizon_frame = horizon_idx,
+        horizon_slope = horizon_line.slope,
+        horizon_intercept_y_at_x0 = horizon_line.intercept,
+        horizon_inliers = horizon_line.inlier_count,
+        body_frame = body_idx,
+        body_x = body_x_in_body_frame,
+        body_y = body_y_in_body_frame,
+        "panorama: selected horizon and body frames"
+    );
 
     // Phase 3: if body and horizon are in the same frame, no chain
     // needed — fall through to direct measurement.

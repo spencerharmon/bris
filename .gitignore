@@ -49,3 +49,4 @@ ios/*.xcodeproj/xcuserdata/
 # for the build; the raw upstream files in scripts/data/ are working
 # copies of the importer.
 scripts/data/
+test_video/
