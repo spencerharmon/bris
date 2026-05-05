@@ -28,3 +28,9 @@ segmentation = ["dep:ort", "dep:ndarray"]
 proptest.workspace = true
 approx.workspace = true
 tempfile.workspace = true
+serde.workspace = true
+toml.workspace = true
+
+[build-dependencies]
+serde.workspace = true
+toml.workspace = true
