@@ -12,11 +12,14 @@ For the project overview, see `readme.org`.
 **Phase 0 (scaffolding):** complete except two follow-ups.
 **Phase 1 (almanac):** **8 of 9 tasks complete.** Only Pi Zero 2W
 benchmarking remains.
-**Phase 2 (vision):** **5 of 8 tasks complete + 2 partial + 1 not
-started.** Within-FOV altitude measurement works end-to-end.
-Calibration *workflow* and the streaming-engine quality knob are
-pending; full panorama stitching is required for the 0.5 nm target
-and not yet implemented.
+**Phase 2 (vision):** **6 of 8 tasks complete + 2 partial.** End-to-end
+within-FOV altitude measurement and cross-frame panorama stitching
+both work on synthetic data. The classic problem case (telephoto +
+high altitude, body and horizon in different frames) is handled by
+`bris-vision::panorama` via Harris corners + NCC matching + RANSAC
+rigid alignment. Calibration *workflow* and the streaming-engine
+quality knob remain.
+
 **Phase 4 (sight reduction & fix):** **3 of 4 tasks complete.**
 End-to-end synthetic LOP path works: from observed altitude +
 assumed position + body's apparent place → line of position →
@@ -32,18 +35,23 @@ multi-subtype `$PBRIS` payload (VER / TIME / UNC / SIGHT / ERR)
 are implemented as pure formatters. Quality field degrades from a
 single `QualityThresholds::classify(σ_nm)` call. Every emission
 logs at debug level via `tracing` with the sentence bytes and a
-small context payload. `docs/protocol/pbris.md` carries the
-canonical wire spec. Transport layer (TCP/UDP/serial) and the
+small context payload. Transport layer (TCP/UDP/serial) and the
 OpenCPN integration test still pending.
+
+**Phase 6 (CLI / embedded Linux):** **1 task partially complete.**
+`bris demo` runs the end-to-end synthetic pipeline (no camera
+hardware) and emits a debug log of the full NMEA stream that
+would go on the wire. Other subcommands (capture, calibrate, fix,
+serve, replay, log, update) are still stubs.
 
 All other phases not started.
 
-**Workspace metrics:** 18 commits, 148 tests passing (29 in
-`bris-core`, 53 in `bris-almanac`, 28 in `bris-vision`, 18 in
+**Workspace metrics:** 19 commits, 156 tests passing (29 in
+`bris-core`, 53 in `bris-almanac`, 36 in `bris-vision`, 18 in
 `bris-nav`, 20 in `bris-nmea`), zero clippy warnings under
 `-D warnings`, zero `cargo fmt` diffs.
 
-**Last commit:** `e090382` — NMEA standard + `$PBRIS` formatters.
+**Last commit:** `3dde1b0` — panorama stitching + `bris demo`.
 
 ---
 
@@ -109,15 +117,20 @@ All other phases not started.
   geometry on lens-undistorted ray directions. End-to-end test:
   body 200 px above horizon at fy=1000 → 11.31° altitude (matches
   atan(200/1000)).
-- ⚠️ **Multi-frame stitching** (`bris-vision::fusion`). *Only the
-  within-FOV angle-fusion path is implemented* (inverse-variance
-  weighted mean of per-frame altitude measurements within a bounded
-  time window). The full ORB-feature panorama stitching path is
-  *not yet implemented* and is genuinely required for high-altitude
-  or telephoto sights — with a telephoto lens, body and horizon
-  cannot fit in a single frame above the lens's vertical FOV.
-  Wide-angle-only operation caps accuracy at ~5 nm. The 0.5 nm design
-  target is unreachable without panorama stitching.
+- ⚠️ **Multi-frame stitching** (`bris-vision::fusion`,
+  `bris-vision::track`, `bris-vision::panorama`). Two paths:
+  - Within-FOV: `fuse_altitudes` inverse-variance combines per-frame
+    altitude measurements within a bounded time window.
+  - Cross-frame: Harris corner detection (`detect_corners`) with
+    3×3 box-windowed structure tensor, NCC patch matching with
+    sub-pixel best candidate, RANSAC rigid-transform fitting +
+    closed-form Procrustes refit on inliers (`track`). The
+    `panorama_altitude` function composes pairwise transforms into
+    a chain that bridges the body frame to the horizon frame and
+    runs the standard angle-measurement pipeline at the end.
+  Documented limitations: assumes frame-to-frame overlap (no IMU
+  prior yet), no sidereal motion correction within a sweep, pose
+  chain in pixel coordinates is approximate for fisheye lenses.
 - ⏳ **Stitching/accuracy tradeoff knob.** A streaming-engine setting,
   not a vision-module change. Pending the streaming engine in Phase
   3.5.
@@ -193,16 +206,20 @@ All other phases not started.
 - ⏳ **Lunar topocentric parallax** (~1°! — required before Moon
   sights are accurate).
 
+### Phase 6: CLI / embedded Linux (partial)
+
+- ⚠️ **`bris demo`** runs the end-to-end synthetic pipeline (no
+  camera hardware) and prints a debug log of every NMEA sentence
+  that would go on the wire. Useful as a smoke test for the build
+  and for verifying the wire format before pointing OpenCPN at
+  Bris. All other CLI subcommands (capture, calibrate, fix, serve,
+  replay, log, update) are still stubs.
+
 ### Phase 2 remainder
 
 - ⏳ **Lens calibration workflow** (checkerboard capture, corner
   detection, parameter solve, persistence). Math is in place; needs
   the CLI hook.
-- ⏳ **Multi-frame panorama stitching** (ORB feature alignment +
-  pose chain across frames + IMU/sidereal soft constraints +
-  projection into a common surface). Required for telephoto / high-
-  altitude sights and therefore for the 0.5 nm accuracy target.
-  Within-FOV angle fusion is in place but is not a substitute.
 - ⏳ **Stitching/accuracy tradeoff knob** (streaming-engine setting).
 
 ### Phase 4 remainder
@@ -230,9 +247,12 @@ All other phases not started.
   icon appears at expected position and `$GPGST` uncertainty is
   rendered.
 
-### All later phases (1.5, 3, 3.5, 5.5, 6, 7, 8, 9)
+### All later phases (1.5, 3, 3.5, 7, 8, 9)
 
-Not started. See `plan.org` for the full task list.
+Not started. See `plan.org` for the full task list. Phase 6 is
+partially started (just the `bris demo` subcommand for end-to-end
+testing); rest of Phase 6 (capture, serve, replay, etc.) and the
+related Phase 5 transport layer remain.
 
 ---
 
@@ -351,28 +371,25 @@ Not started. See `plan.org` for the full task list.
 
 Three reasonable paths, with explicit tradeoffs:
 
-**A. Multi-frame panorama stitching in `bris-vision`.** The largest
-single piece of remaining vision work. Required for telephoto / high-
-altitude sights and therefore for the 0.5 nm accuracy target. ORB-
-feature alignment + pose chain + projection into a common surface.
-**This is the single most important piece for real-world capability.**
-
-**B. Phase 5 transport layer.** Wrap the existing `bris-nmea`
+**A. Phase 5 transport layer.** Wrap the existing `bris-nmea`
 formatters with TCP server / UDP broadcast / serial transports.
-Small commit; closes the loop from `Fix` to a real network
-connection. Testable by pointing OpenCPN at the local TCP port
-and watching it render a synthetic fix with uncertainty ellipse.
-The OpenCPN integration test then becomes a natural follow-up.
+Once the TCP server is in place, the `bris demo` subcommand can
+also write its NMEA stream to a configurable port, enabling the
+OpenCPN integration test as a natural follow-up.
 
-**C. Phase 1.5 (time integrity).** Self-contained, unblocks
+**B. Phase 1.5 (time integrity).** Self-contained, unblocks
 nothing else, pays off for offshore use.
 
-I'd lean **B → A → C**: get the transport layer + OpenCPN integration
-test in place so we have a complete end-to-end demo path (synthetic
-frame → fix → NMEA on TCP → OpenCPN rendering a position with
-uncertainty ellipse). That validates the entire stack at the
-integration level, even before stitching makes the fix accurate
-enough for real use.
+**C. Phase 4 follow-ups: running fix + dominant-source attribution
+plumbing.** Connect the per-stage σ values from the vision pipeline
+into a real `UncertaintyBudget` (the `$PBRIS,UNC` formatter exists
+but is currently fed from hardcoded values in the demo).
+
+I'd lean **A → C → B**: get TCP serving in place so the OpenCPN
+integration test can land, then plumb the real per-stage σ values
+into `UncertaintyBudget` so the dominant-source attribution
+becomes meaningful end-to-end, then time integrity as a cleanup
+pass.
 
 ---
 

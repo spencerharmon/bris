@@ -191,7 +191,7 @@ stable. Each task is sized to a meaningful unit of work, not a single commit.
 ** DONE Sun/Moon centroiding
    Threshold + connected components + ellipse fit, sub-pixel refinement.
    Account for partial occlusion by horizon (limb correction).
-** TODO Multi-frame stitching
+** DONE Multi-frame stitching
    *Required for any high-altitude or telephoto sight,* not optional.
    With a telephoto lens (which we need for sub-arcmin accuracy at
    the 0.5 nm target), the body and the horizon cannot fit in a single
