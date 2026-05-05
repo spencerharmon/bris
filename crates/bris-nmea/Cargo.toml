@@ -14,8 +14,10 @@ workspace = true
 [dependencies]
 bris-core.workspace = true
 bris-nav.workspace = true
+chrono.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
 proptest.workspace = true
+tracing-subscriber.workspace = true

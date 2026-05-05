@@ -369,10 +369,10 @@ stable. Each task is sized to a meaningful unit of work, not a single commit.
    the ~$DR*~ stream is a navigational aid, not a correction.
 
 * Phase 5: Output
-** TODO NMEA 0183 sentence builders
+** DONE NMEA 0183 sentence builders
    ~$GPGLL~, ~$GPRMC~, ~$GPGGA~ with correct checksums and "manual
    input" mode flag where the spec allows it.
-** TODO Uncertainty in NMEA output
+** DONE Uncertainty in NMEA output
    Implement all of the following; they are complementary, not alternatives.
    The thresholds operate on the *combined* fix uncertainty (time +
    optical + stitching + calibration + horizon + refraction), not on any
@@ -438,7 +438,7 @@ stable. Each task is sized to a meaningful unit of work, not a single commit.
    Default-on for the embedded image (~tracing-journald~). On non-systemd
    systems, fall back to ~tracing-syslog~ or stderr. ~journalctl -u bris~
    is the baseline diagnostic command.
-** TODO Structured ~$PBRIS~ payload (multi-sentence)
+** DONE Structured ~$PBRIS~ payload (multi-sentence)
    NMEA 0183 has an 82-character per-sentence limit. Split diagnostics
    across typed subtype sentences, all sharing a common timestamp:
    - ~$PBRIS,UNC,...~ — per-source 1σ contributions to the fix
@@ -452,7 +452,7 @@ stable. Each task is sized to a meaningful unit of work, not a single commit.
    Each sentence stays under 82 chars; downstream tools reassemble by
    the shared timestamp. Field-level spec lives in
    ~docs/protocol/pbris.md~ as the canonical contract.
-** TODO Document the "NMEA → metrics" extraction contract
+** DONE Document the "NMEA → metrics" extraction contract
    Field-by-field spec of every ~$PBRIS~ subtype sentence in
    ~docs/protocol/pbris.md~ so a future converter tool, an operator
    reading raw NMEA, or a downstream alerting system can be built

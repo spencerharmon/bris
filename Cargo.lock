@@ -171,9 +171,11 @@ version = "0.0.1"
 dependencies = [
  "bris-core",
  "bris-nav",
+ "chrono",
  "proptest",
  "thiserror",
  "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
