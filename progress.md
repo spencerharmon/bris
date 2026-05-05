@@ -26,14 +26,24 @@ catches obvious bad sights without rejecting honest uncertainty.
 Running fix (DR advance) and per-stage uncertainty propagation
 refinements still pending.
 
+**Phase 5 (NMEA output):** **4 of 6 tasks complete.** All standard
+sentences (`$GPGLL`, `$GPRMC`, `$GPGGA`, `$GPGST`) and the full
+multi-subtype `$PBRIS` payload (VER / TIME / UNC / SIGHT / ERR)
+are implemented as pure formatters. Quality field degrades from a
+single `QualityThresholds::classify(σ_nm)` call. Every emission
+logs at debug level via `tracing` with the sentence bytes and a
+small context payload. `docs/protocol/pbris.md` carries the
+canonical wire spec. Transport layer (TCP/UDP/serial) and the
+OpenCPN integration test still pending.
+
 All other phases not started.
 
-**Workspace metrics:** 16 commits, 128 tests passing (29 in
+**Workspace metrics:** 18 commits, 148 tests passing (29 in
 `bris-core`, 53 in `bris-almanac`, 28 in `bris-vision`, 18 in
-`bris-nav`), zero clippy warnings under `-D warnings`, zero
-`cargo fmt` diffs.
+`bris-nav`, 20 in `bris-nmea`), zero clippy warnings under
+`-D warnings`, zero `cargo fmt` diffs.
 
-**Last commit:** `7fb0bb5` — per-sight blunder screening.
+**Last commit:** `e090382` — NMEA standard + `$PBRIS` formatters.
 
 ---
 
@@ -134,6 +144,34 @@ All other phases not started.
   consistent value is kept and down-weighted, never rejected for
   being uncertain.
 
+### Phase 5: NMEA output
+
+- ✅ **NMEA 0183 sentence builders** (`bris-nmea::checksum`,
+  `bris-nmea::standard`). Pure formatters returning `String` for
+  `$GPGLL`, `$GPRMC`, `$GPGGA`, `$GPGST`. Cross-checked against
+  the classic GPGGA documentation example (checksum 0x47).
+- ✅ **Uncertainty in NMEA output** (`bris-nmea::standard`). The
+  `FixQuality` enum + `QualityThresholds::classify(σ_nm)` produce
+  the GGA quality digit (1/6/0) and RMC status (A/V) from the
+  fix's overall σ. `$GPGST` emits per-axis position σ in metres
+  for OpenCPN. Same fix produces consistent classification across
+  all sentence types.
+- ✅ **Structured `$PBRIS` payload (multi-sentence)**
+  (`bris-nmea::pbris`). Full subtype set: VER, TIME, UNC (with
+  dominant-source attribution), SIGHT × N, ERR. All subtypes verified
+  to fit under the NMEA 82-char limit even with maximum-magnitude
+  inputs. `pbris_full()` emits the canonical set in canonical order.
+- ✅ **Documented `$PBRIS` schema** (`docs/protocol/pbris.md`). The
+  contract that downstream metrics-converter tools build against,
+  with per-field tables and emission ordering. Schema versioned
+  via `$PBRIS,VER`.
+- ✅ **Debug logging of every emitted sentence.** Every formatter
+  calls `tracing::debug!` with the sentence type, the sentence
+  bytes, and a small context payload (σ, dominant source, etc.).
+  A test installs a temporary `tracing-subscriber` and asserts the
+  log fired with the expected sentence type — proves the logging
+  works, doesn't just trust the call site.
+
 ---
 
 ## Not yet done
@@ -178,9 +216,21 @@ All other phases not started.
   combines them; the dominant-source attribution task (per
   plan.org) needs explicit identification of which source
   contributes most to each fix, surfaced in the `$PBRIS,UNC`
-  diagnostic.
+  diagnostic. *Note:* the `$PBRIS,UNC` formatter already emits a
+  dominant-source field; the pipeline that *populates* the
+  `UncertaintyBudget` from real per-stage σ values is still the
+  open work.
 
-### All later phases (1.5, 3, 3.5, 5, 5.5, 6, 7, 8, 9)
+### Phase 5 remainder
+
+- ⏳ **Transport layer** (TCP server, UDP broadcast, serial via
+  `serialport` crate). Configurable via small TOML/JSON config.
+- ⏳ **OpenCPN integration test.** Scripted: spin up Bris emitting
+  a canned fix, connect OpenCPN in a container/VM, assert vessel
+  icon appears at expected position and `$GPGST` uncertainty is
+  rendered.
+
+### All later phases (1.5, 3, 3.5, 5.5, 6, 7, 8, 9)
 
 Not started. See `plan.org` for the full task list.
 
@@ -301,28 +351,28 @@ Not started. See `plan.org` for the full task list.
 
 Three reasonable paths, with explicit tradeoffs:
 
-**A. Multi-frame panorama stitching in `bris-vision`.** Build the
-ORB-feature alignment + pose chain + projection pipeline. This
-unblocks the 0.5 nm accuracy target and is the largest single piece
-of remaining vision work. Substantial commit (probably 2-3 work
-sessions; either implement ORB ourselves or pick a permissive
-pure-Rust crate). **This is the single most important piece for
-real-world capability.**
+**A. Multi-frame panorama stitching in `bris-vision`.** The largest
+single piece of remaining vision work. Required for telephoto / high-
+altitude sights and therefore for the 0.5 nm accuracy target. ORB-
+feature alignment + pose chain + projection into a common surface.
+**This is the single most important piece for real-world capability.**
 
-**B. NMEA 0183 sentence emission in `bris-nmea`** (Phase 5). The
-fix path now produces a typed `Fix` with full position covariance;
-emitting `$GPGLL`/`$GPRMC`/`$GPGGA`/`$GPGST` and the multi-subtype
-`$PBRIS` from a `Fix` would close the loop end-to-end at the API
-level, even before panorama stitching makes the fix accurate enough
-for real use. This is a self-contained smaller commit.
+**B. Phase 5 transport layer.** Wrap the existing `bris-nmea`
+formatters with TCP server / UDP broadcast / serial transports.
+Small commit; closes the loop from `Fix` to a real network
+connection. Testable by pointing OpenCPN at the local TCP port
+and watching it render a synthetic fix with uncertainty ellipse.
+The OpenCPN integration test then becomes a natural follow-up.
 
 **C. Phase 1.5 (time integrity).** Self-contained, unblocks
-nothing else, pays off for offshore use. Same priority as before.
+nothing else, pays off for offshore use.
 
-I'd lean **B → A → C**: get the NMEA-emission loop closed first
-(it's small and gives us an end-to-end testable surface from frame
-to NMEA stream), then tackle panorama stitching to make the fix
-real, then time integrity as a cleanup pass.
+I'd lean **B → A → C**: get the transport layer + OpenCPN integration
+test in place so we have a complete end-to-end demo path (synthetic
+frame → fix → NMEA on TCP → OpenCPN rendering a position with
+uncertainty ellipse). That validates the entire stack at the
+integration level, even before stitching makes the fix accurate
+enough for real use.
 
 ---
 
