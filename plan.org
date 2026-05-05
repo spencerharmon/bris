@@ -41,7 +41,7 @@ stable. Each task is sized to a meaningful unit of work, not a single commit.
 - *No telemetry, no analytics, no automatic network calls.*
 
 * Phase 0: Project scaffolding
-** TODO Choose workspace layout
+** DONE Choose workspace layout
    Cargo workspace with members:
    - ~bris-core~ — pure Rust, no_std-friendly where possible, no I/O
    - ~bris-almanac~ — ephemeris + star catalog
@@ -52,14 +52,14 @@ stable. Each task is sized to a meaningful unit of work, not a single commit.
    - ~bris-ffi~ — UniFFI bindings layer
    - ~bris-cli~ — desktop/embedded reference frontend
    - ~bris-android~, ~bris-ios~ — thin shells (separate repos optional)
-** TODO Set up CI matrix
+** DONE Set up CI matrix
    Build + test on: ~x86_64-unknown-linux-gnu~, ~aarch64-unknown-linux-gnu~
    (Pi Zero 2W), ~aarch64-linux-android~, ~aarch64-apple-ios~,
    ~x86_64-apple-darwin~, ~aarch64-apple-darwin~. Use ~cross~ or
    ~cargo-zigbuild~ for cross-compilation.
-** TODO License, contributing guide, code of conduct
-** TODO Set up ~rustfmt~, ~clippy~ (deny warnings in CI), ~cargo-deny~
-** TODO Property-based test harness (proptest) wired up early
+** DONE License, contributing guide, code of conduct
+** DONE Set up ~rustfmt~, ~clippy~ (deny warnings in CI), ~cargo-deny~
+** DONE Property-based test harness (proptest) wired up early
 ** TODO Vendored leap-second source + build-time regenerator
    Vendor an authoritative IERS leap-second source file (e.g. the
    IETF-mirrored ~leap-seconds.list~). A small build-time script or
@@ -85,22 +85,22 @@ stable. Each task is sized to a meaningful unit of work, not a single commit.
    query parameters and verifying record counts.
 
 * Phase 1: Almanac
-** TODO Define coordinate types
+** DONE Define coordinate types
    Strongly typed wrappers for radians/degrees, RA/Dec, Az/Alt, JD/JDE,
    UT1/TT/TAI conversions. Use ~uom~ or hand-rolled newtypes.
-** TODO Time scales
+** DONE Time scales
    Implement UTC ↔ TAI ↔ TT ↔ UT1 conversions. Bundle a leap second table
    with a build-time check that warns if the table is older than N months.
    Allow user override of ΔUT1 (default 0).
-** TODO Precession / nutation
+** DONE Precession / nutation
    IAU 2006/2000A model (or simplified IAU 1980 if size matters).
-** TODO Solar System ephemeris
+** DONE Solar System ephemeris
    Truncated VSOP87 for Sun + planets. Decide accuracy threshold
    (target: <1 arcsec for navigational use; 0.1 arcsec is overkill).
    Validate against JPL Horizons for a sampled set of dates.
-** TODO Lunar ephemeris
+** DONE Lunar ephemeris
    Truncated ELP2000-82B. Validate against Horizons.
-** TODO Star catalog
+** DONE Star catalog
    Embed the 57 standard navigational stars + ~1000 brightest from
    Hipparcos as a ~const~ table. Apply proper motion, precession,
    nutation, annual aberration, and atmospheric refraction at runtime.
