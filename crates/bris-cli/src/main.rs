@@ -20,9 +20,10 @@ use bris_nmea::{
     UncertaintyBudget,
 };
 use bris_vision::{
-    centroid_brightest_body, detect_horizon, detect_horizon_via_sky_region, load_frame_from_path,
-    measure_altitude, panorama_altitude_with_detector, CentroidConfig, Frame, HorizonConfig,
-    HorizonError, HorizonLine, Intrinsics, TrackConfig,
+    centroid_brightest_body, detect_horizon, detect_horizon_via_segmentation,
+    detect_horizon_via_sky_region, load_frame_from_path, load_model, measure_altitude,
+    panorama_altitude_with_detector, CentroidConfig, Frame, HorizonConfig, HorizonLine, Intrinsics,
+    TrackConfig,
 };
 use chrono::{DateTime, Utc};
 use clap::{Parser, Subcommand};
@@ -98,23 +99,62 @@ struct ReplayArgs {
     /// best for open-ocean scenes. `sky-region` finds the bright sky's
     /// lower boundary; better for cluttered shipboard scenes where the
     /// deck or sail dominates the lower half of the frame.
+    /// `segmentation` runs a pretrained semantic-segmentation model to
+    /// classify sky/boat/other and uses the per-column sky→sea
+    /// transitions (skipping vessel-occluded columns) as horizon
+    /// candidates. Most robust on cluttered scenes; ~180ms per frame
+    /// on `x86_64` (slower on Pi-class hardware). Requires the
+    /// `segmentation` feature flag (on by default).
     #[arg(long, value_enum, default_value_t = HorizonMethod::SkyRegion)]
     horizon_method: HorizonMethod,
+    /// Path to the segmentation ONNX model (only used with
+    /// `--horizon-method segmentation`). Defaults to the vendored
+    /// `crates/bris-vision/data/segmentation.onnx`.
+    #[arg(long)]
+    segmentation_model: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Copy, clap::ValueEnum)]
 enum HorizonMethod {
     Gradient,
     SkyRegion,
+    Segmentation,
 }
 
 impl HorizonMethod {
-    fn detect(self, frame: &Frame, cfg: HorizonConfig) -> Result<HorizonLine, HorizonError> {
+    fn detect(
+        self,
+        frame: &Frame,
+        cfg: HorizonConfig,
+        seg_model_path: Option<&Path>,
+    ) -> Result<HorizonLine, anyhow::Error> {
         match self {
-            Self::Gradient => detect_horizon(frame, cfg),
-            Self::SkyRegion => detect_horizon_via_sky_region(frame, cfg),
+            Self::Gradient => detect_horizon(frame, cfg).map_err(anyhow::Error::from),
+            Self::SkyRegion => {
+                detect_horizon_via_sky_region(frame, cfg).map_err(anyhow::Error::from)
+            }
+            Self::Segmentation => {
+                let path = seg_model_path
+                    .map_or_else(default_segmentation_model_path, std::path::PathBuf::from);
+                load_model(&path).map_err(|e| anyhow::anyhow!("load segmentation model: {e}"))?;
+                detect_horizon_via_segmentation(frame, cfg)
+                    .map_err(|e| anyhow::anyhow!("segmentation horizon detection: {e}"))
+            }
         }
     }
+}
+
+fn default_segmentation_model_path() -> std::path::PathBuf {
+    // The model file lives next to the source for the bris-vision
+    // crate. We resolve it relative to the cargo manifest of bris-cli
+    // for development; for shipped binaries the user must pass an
+    // explicit --segmentation-model path or set up bris-data with the
+    // file in a known location (TBD).
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("bris-vision")
+        .join("data")
+        .join("segmentation.onnx")
 }
 
 #[derive(Debug, Clone, Copy, clap::ValueEnum)]
@@ -209,12 +249,13 @@ fn run_replay(args: &ReplayArgs) -> anyhow::Result<()> {
     // per-frame failures inside; if every frame fails this returns
     // an error and we surface it cleanly.
     let horizon_method = args.horizon_method;
+    let seg_model_path = args.segmentation_model.as_deref();
     let observed_altitude = match panorama_altitude_with_detector(
         &frames,
         HorizonConfig::default(),
         CentroidConfig::default(),
         TrackConfig::default(),
-        |frame, cfg| horizon_method.detect(frame, cfg),
+        |frame, cfg| horizon_method.detect(frame, cfg, seg_model_path),
     ) {
         Ok(alt) => {
             info!(
@@ -226,7 +267,7 @@ fn run_replay(args: &ReplayArgs) -> anyhow::Result<()> {
         }
         Err(e) => {
             warn!(error = %e, "replay: panorama failed; trying single-frame measurement");
-            single_frame_fallback(&frames, horizon_method)?
+            single_frame_fallback(&frames, horizon_method, seg_model_path)?
         }
     };
 
@@ -324,7 +365,8 @@ fn load_all_frames(paths: &[PathBuf], tt: Tt) -> anyhow::Result<Vec<Frame>> {
             .with_context(|| format!("read dimensions of {}", path.display()))?;
         let intrinsics = Intrinsics::placeholder(dims.0, dims.1);
         let frame = load_frame_from_path(path, tt, 1000, intrinsics)
-            .with_context(|| format!("load {}", path.display()))?;
+            .with_context(|| format!("load {}", path.display()))?
+            .with_source_path(path.clone());
         frames.push(frame);
     }
     Ok(frames)
@@ -364,11 +406,13 @@ fn parse_or_infer_utc(args: &ReplayArgs) -> anyhow::Result<DateTime<Utc>> {
 fn single_frame_fallback(
     frames: &[Frame],
     horizon_method: HorizonMethod,
+    seg_model_path: Option<&Path>,
 ) -> anyhow::Result<Uncertain<f64>> {
     // Try each frame individually. The first one that yields both a
     // horizon and a centroid wins.
     for (i, frame) in frames.iter().enumerate() {
-        let Ok(horizon) = horizon_method.detect(frame, HorizonConfig::default()) else {
+        let Ok(horizon) = horizon_method.detect(frame, HorizonConfig::default(), seg_model_path)
+        else {
             continue;
         };
         let Ok(centroid) = centroid_brightest_body(frame, CentroidConfig::default()) else {

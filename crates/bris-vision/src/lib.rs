@@ -13,6 +13,8 @@ pub mod lens;
 pub mod measure;
 pub mod panorama;
 pub mod peak;
+#[cfg(feature = "segmentation")]
+pub mod segment;
 pub mod track;
 
 pub use centroid::{centroid_brightest_body, Centroid, CentroidConfig, CentroidError};
@@ -26,6 +28,10 @@ pub use lens::{distort_normalized, pixel_ray_direction, project_pinhole, undisto
 pub use measure::{measure_altitude, MeasurementError};
 pub use panorama::{panorama_altitude, panorama_altitude_with_detector, FrameRoles, PanoramaError};
 pub use peak::{detect_peaks, Peak, PeakConfig};
+#[cfg(feature = "segmentation")]
+pub use segment::{
+    detect_horizon_via_segmentation, load_model, segment, SegmentError, SegmentationMask,
+};
 pub use track::{
     detect_corners, track, track_peaks, Corner, RigidTransform, TrackConfig, TrackError,
 };

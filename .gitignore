@@ -49,4 +49,11 @@ ios/*.xcodeproj/xcuserdata/
 # for the build; the raw upstream files in scripts/data/ are working
 # copies of the importer.
 scripts/data/
+
+# Pretrained segmentation model. Regenerate with
+# `python3 scripts/export_segformer_ade.py crates/bris-vision/data/segmentation.onnx \
+#  crates/bris-vision/data/segmentation_labels.json`.
+# Eventually this will ship via the bris-data OTA channel.
+crates/bris-vision/data/segmentation.onnx
+crates/bris-vision/data/segmentation_labels.json
 test_video/

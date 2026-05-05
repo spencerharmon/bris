@@ -17,6 +17,12 @@ chrono.workspace = true
 image.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
+ort = { workspace = true, optional = true }
+ndarray = { workspace = true, optional = true }
+
+[features]
+default = ["segmentation"]
+segmentation = ["dep:ort", "dep:ndarray"]
 
 [dev-dependencies]
 proptest.workspace = true

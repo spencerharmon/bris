@@ -55,6 +55,14 @@ vsop87 = "3"
 # Image I/O
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "pnm"] }
 
+# ML inference (segmentation-based horizon detection).
+# We use ort (ONNX Runtime bindings) rather than tract because tract
+# 0.22 doesn't support the dynamic-shape Reshape operations in
+# SegFormer's attention path. ort is a heavier dep (links Microsoft's
+# ONNX Runtime, ~50MB native lib) but supports the full ONNX op set.
+ort = { version = "=2.0.0-rc.12", default-features = false, features = ["download-binaries", "ndarray", "std", "tls-rustls"] }
+ndarray = "0.17"
+
 # Testing
 proptest = "1"
 approx = "0.5"

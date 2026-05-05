@@ -118,7 +118,17 @@ pub fn panorama_altitude(
 /// detection function. Use this to swap in
 /// [`crate::horizon::detect_horizon_via_sky_region`] or any future
 /// detector without changing this module.
-pub fn panorama_altitude_with_detector<F>(
+/// Same as [`panorama_altitude`] but with a caller-supplied horizon
+/// detection function. Use this to swap in
+/// [`crate::horizon::detect_horizon_via_sky_region`] or any future
+/// detector without changing this module.
+///
+/// The detector's error type is left generic so callers can return
+/// their own composite error (e.g. CLI-level errors that wrap
+/// segmentation-model load failures alongside [`HorizonError`]).
+/// Failed-frame errors are logged and the frame is treated as having
+/// no horizon, so the error type only matters for log formatting.
+pub fn panorama_altitude_with_detector<F, E>(
     frames: &[Frame],
     horizon_cfg: HorizonConfig,
     centroid_cfg: CentroidConfig,
@@ -126,10 +136,8 @@ pub fn panorama_altitude_with_detector<F>(
     horizon_fn: F,
 ) -> Result<Uncertain<f64>, PanoramaError>
 where
-    F: Fn(
-        &Frame,
-        HorizonConfig,
-    ) -> Result<crate::horizon::HorizonLine, crate::horizon::HorizonError>,
+    F: Fn(&Frame, HorizonConfig) -> Result<crate::horizon::HorizonLine, E>,
+    E: std::fmt::Display,
 {
     if frames.is_empty() {
         return Err(PanoramaError::NoHorizonFrame);

@@ -172,7 +172,11 @@ pub fn detect_horizon_via_sky_region(
 /// Shared post-extraction pipeline: RANSAC, refit, and uncertainty
 /// computation. Both detectors call this with a slice of working-
 /// resolution candidate points (in (x, y) pixel coordinates).
-fn finalize_horizon(
+///
+/// `pub(crate)` so the segmentation module can reuse the same
+/// pipeline; the candidates it supplies are already in *frame*
+/// coordinates, so it passes `scale = 1.0`.
+pub(crate) fn finalize_horizon(
     frame: &Frame,
     candidates: &[(f64, f64)],
     scale: f64,

@@ -184,10 +184,46 @@ stable. Each task is sized to a meaningful unit of work, not a single commit.
      ≈ standing height + ½ × dominant wave height + cockpit-above-water
      height. Document but do not compute — too many unknowns.
 ** DONE Horizon detection
-   Classical pipeline: downsample → gradient → RANSAC line fit on the
-   sea/sky boundary. Return line in image coords + uncertainty. Report
-   low-confidence results explicitly so the operator can reject the
-   sight rather than silently producing a bad fix.
+   Three detection strategies, complementary across scene types:
+
+   1. ~detect_horizon~ (classical: downsample → vertical gradient
+      → RANSAC). Best for open-ocean scenes where the sea-sky
+      boundary is the dominant horizontal edge. Fooled by deck/sail
+      edges in cluttered shipboard scenes.
+
+   2. ~detect_horizon_via_sky_region~ (classical: threshold + largest
+      sky-touching connected component → take its lower boundary →
+      RANSAC). Slightly better in cluttered scenes than the gradient
+      detector but still fails when the sky region is bounded by a
+      sail edge rather than the sea.
+
+   3. ~detect_horizon_via_segmentation~ (ML: SegFormer-B0 finetuned
+      on ADE20K, 14.5 MB ONNX, ~100 ms/frame inference via ort).
+      Per-pixel sky / sea / boat / ship classification → take per-
+      column sky→sea transitions, skip vessel-occluded columns →
+      RANSAC. Robust against the deck-occluded sailing-camera case.
+      Requires the ~segmentation~ feature flag (on by default;
+      adds ~50 MB ONNX Runtime native lib to the binary).
+
+   Return low-confidence fits explicitly via [`HorizonError`] so the
+   operator can reject the sight rather than silently producing a
+   bad fix.
+** TODO Train a Bris-specific segmentation model
+   The current pretrained model (SegFormer-B0 / ADE20K) was not
+   trained on marine imagery and carries 150 classes (148 of which
+   we ignore). A Bris-specific model would:
+   - Have only 4 classes: sky, sea, vessel-structure, other.
+   - Be much smaller (~1-5 MB vs 14.5 MB), reducing binary size and
+     inference time. Could plausibly fit in tract's static-shape
+     constraints, removing the ort + 50 MB ONNX Runtime native dep.
+   - Be more accurate on Bris's actual operating conditions (deck-
+     mounted cameras, varying sea conditions, low-contrast horizons,
+     glare).
+
+   Training pipeline (Python + PyTorch + a marine-segmentation
+   dataset like MaSTr1325) would live in ~scripts/~. Trained weights
+   would ship via the ~bris-data~ OTA channel alongside the leap
+   second table and star catalog.
 ** DONE Sun/Moon centroiding
    Threshold + connected components + ellipse fit, sub-pixel refinement.
    Account for partial occlusion by horizon (limb correction).

@@ -97,6 +97,16 @@ pub struct Frame {
     pub exposure_us: u32,
     /// Camera intrinsics under which the frame was captured.
     pub intrinsics: Intrinsics,
+    /// Optional path to the source image file. Only used by the
+    /// segmentation horizon detector, which needs to re-load the
+    /// original color image from disk (the pretrained model expects
+    /// RGB; replicating Bris's grayscale into three channels gives
+    /// dramatically wrong predictions). `None` for frames not
+    /// originating from a file (synthetic, future live-camera
+    /// capture). When `None`, the segmentation detector falls back
+    /// to grayscale-replicated input with the documented quality
+    /// hit, or returns an error — caller's choice.
+    pub source_path: Option<std::path::PathBuf>,
 }
 
 impl Frame {
@@ -135,7 +145,17 @@ impl Frame {
             capture_tt,
             exposure_us,
             intrinsics,
+            source_path: None,
         })
+    }
+
+    /// Attach a source-file path to a frame. Consumed by the
+    /// segmentation horizon detector to re-load the color image.
+    /// Other consumers ignore the field.
+    #[must_use]
+    pub fn with_source_path(mut self, path: std::path::PathBuf) -> Self {
+        self.source_path = Some(path);
+        self
     }
 
     /// Width in pixels.
