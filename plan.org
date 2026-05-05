@@ -197,10 +197,18 @@ stable. Each task is sized to a meaningful unit of work, not a single commit.
    timestamps; do *not* average pixel data across time for moving bodies
    — instead, compute per-frame angles and combine with proper time
    correction.
+   *Status:* angle-fusion path implemented in ~bris-vision::fusion~
+   (inverse-variance weighted mean of per-frame altitude measurements
+   within a bounded time window). 5 tests cover σ shrinkage, weighting,
+   window enforcement. ORB-feature panorama stitching deferred — the
+   streaming pipeline can use angle fusion alone for now; full
+   panorama work returns if validation shows we need it.
 ** DONE Angle measurement pipeline
    Given a stitched scene + horizon line + body centroid + camera
    intrinsics, output measured altitude with uncertainty.
 ** TODO Stitching/accuracy tradeoff knob
+   User-facing "quality" setting controlling number of frames, RANSAC
+   iterations, refinement passes. Document expected runtime per tier.
    User-facing "quality" setting controlling number of frames, RANSAC
    iterations, refinement passes. Document expected runtime per tier.
 
