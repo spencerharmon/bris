@@ -328,7 +328,7 @@ stable. Each task is sized to a meaningful unit of work, not a single commit.
    Advance earlier LOPs by DR (course/speed) before intersection.
    Course/speed input is optional; if absent, only simultaneous fixes
    are produced. Inflate covariance by DR uncertainty when used.
-** TODO Sanity checks
+** DONE Sanity checks
    Reject obvious blunders (intercept > N nm, azimuth disagreement,
    per-sight residual > Kσ from the consensus, etc.) with clear
    diagnostics naming the rejected sight and reason.
