@@ -47,13 +47,16 @@ subcommands are stubs.
 
 All other phases not started.
 
-**Workspace metrics:** 21 commits, 156 tests passing (29 in
-`bris-core`, 53 in `bris-almanac`, 36 in `bris-vision`, 18 in
-`bris-nav`, 20 in `bris-nmea`), zero clippy warnings under
-`-D warnings`, zero `cargo fmt` diffs. The almanac now ships with
-the full 9,096-star Yale BSC catalog.
+**Workspace metrics:** 23 commits, 169 tests passing (29 in
+`bris-core`, 53 in `bris-almanac`, 48 in `bris-vision`, 18 in
+`bris-nav`, 20 in `bris-nmea`, 1 integration test in `bris-cli`),
+zero clippy warnings under `-D warnings`. The almanac ships with
+the full 9,096-star Yale BSC catalog. `bris-vision` now exposes
+both Harris-corner (`detect_corners`/`track`) and DoG-style peak
+(`detect_peaks`/`track_peaks`) detectors for textured vs star-field
+inputs.
 
-**Last commit:** `3458fa9` — Phase 0 vendoring complete.
+**Last commit:** `db7a527` — `bris replay` subcommand.
 
 ---
 
@@ -211,19 +214,17 @@ the full 9,096-star Yale BSC catalog.
 - ⏳ **Lunar topocentric parallax** (~1°! — required before Moon
   sights are accurate).
 
-### Phase 6: CLI / embedded Linux (essentially not started)
+### Phase 6: CLI / embedded Linux (partially started)
 
-The synthetic `bris demo` subcommand was removed in commit `3458fa9`
-because it didn't match the user's intent (the real demo should
-drive a webcam). The webcam-fed `bris fix` is the obvious next
-piece: capture a frame, run the vision pipeline, reduce the sight
-against an `--assumed-position`, and emit the fix and NMEA stream.
-Capture wiring needs `v4l` (Linux) and platform-native equivalents
-on macOS/Windows; for the Pi Zero appliance target, `v4l` is the
-right answer.
-
-All CLI subcommands (capture, calibrate, fix, serve, replay, log,
-update) are still stubs.
+- ✅ **`bris replay`** processes a directory of saved PNG/JPEG/PPM
+  frames through the full vision → almanac → nav → NMEA pipeline,
+  given an `--assumed-position` and `--body`. Single-LOP advisory
+  fix only (true 2D fixes need ≥ 2 bodies; plate solving in Phase 3
+  will lift this). Honest WARN log fires before the advisory fix.
+  Acts as the validation harness for the vision pipeline before
+  live capture wiring lands.
+- ⏳ Other CLI subcommands (capture, calibrate, fix, serve, log,
+  update) are still stubs.
 
 ### Phase 2 remainder
 
@@ -379,41 +380,51 @@ related Phase 5 transport layer remain.
 
 ## Next concrete step
 
-**`bris fix` subcommand backed by webcam capture** is the primary
-next step. The user explicitly asked for "point my webcam at the
-sky and have bris tell me my lat/long." Pieces needed:
+**Capture a real sweep and run `bris replay` against it.** This is
+the validation step the previous infrastructure work was building
+toward. We need to know whether the algorithm actually works on
+real imagery before claiming it does.
 
-1. **Camera capture (V4L2 on Linux)** via the `v4l` crate: open
-   device, configure format, capture one frame, decode (MJPEG or
-   YUYV depending on the device), convert luminance → `bris_vision::Frame`.
-2. **Wire the vision → almanac → nav → NMEA pipeline** in a
-   `bris fix` subcommand, parameterized by:
-   - `--device /dev/video0`
-   - `--assumed-position LAT,LON` (required; one LOP doesn't
-     constrain a fix without plate solving — be explicit about this)
-   - `--eye-height-m N` (default 2.0)
-   - `--body sun|moon|...` (manual selection until plate solving lands)
-3. **Honest output**: print the fix with σ, and the NMEA stream at
-   debug level (matching what the synthetic demo did, but with real
-   data).
+Suggested test conditions:
+- Daytime, clear sky, Sun above horizon. Use a phone camera; export
+  3-10 frames spanning a few seconds of slow pan from horizon to
+  Sun (or pick wide-enough FOV that both fit in one frame).
+- Daytime, partly cloudy. Same Sun setup.
+- Night, clear sky, no Moon. Several frames sweeping a known
+  bright star (Sirius, Vega, etc.).
 
-Limitations to call out in the subcommand's help text:
-- Single-LOP fix needs `--assumed-position` and produces a fix
-  *along* the LOP, not a true 2D fix. For a true fix you need
-  multiple sights of different bodies (which the streaming engine
-  in Phase 3.5 will accumulate automatically).
-- Manual body selection is a stopgap until plate solving (Phase 3)
-  lands.
-- Lunar parallax is not yet applied (Phase 1 follow-up); Moon
-  sights will be off by up to ~1°.
+For each, run:
+```
+bris replay --frames /path/to/frames \
+            --assumed-lat YOUR_LAT --assumed-lon YOUR_LON \
+            --body sun
+```
 
-After `bris fix` lands, the next milestones are:
+Expected outcomes:
+- Daytime clear: panorama should succeed, observed altitude should
+  match the Sun's actual altitude within ~1°. Intercept should be
+  small (< 60 nm) — proves the chain matches reality.
+- Daytime cloudy: depending on cloud structure, panorama may fail
+  due to moving clouds. The fallback to single-frame measurement
+  should still work if any frame has body + horizon together.
+- Night: peak detection (`track_peaks`) is needed; the current
+  panorama path uses `detect_corners` only. **This will likely fail
+  on real night frames** — the panorama module needs an extension
+  to dispatch to `track_peaks` for night-mode frames. Concrete
+  evidence in hand will tell us how to dispatch.
 
-- **Phase 3: plate solving** so night-sky pointing produces a fix
-  without `--body` selection.
-- **Phase 5 transport layer** so the NMEA stream goes out a real
+After real-data validation:
+- Wire up V4L2 capture for `bris fix` (live equivalent of replay).
+- Implement plate solving (Phase 3) so night fixes don't need
+  manual `--body` selection.
+- Add Phase 5 transport layer so the NMEA stream goes out a real
   TCP/UDP/serial port.
-- **Phase 1.5 time integrity** as a cleanup pass.
+
+If `bris replay` reveals fundamental problems (the algorithm
+doesn't work on real sky in a way that can't be patched), the
+honest answer is to revisit the algorithm design before going
+further. The whole point of building `bris replay` was to surface
+those problems early.
 
 ---
 

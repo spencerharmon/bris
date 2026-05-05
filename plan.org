@@ -480,6 +480,11 @@ stable. Each task is sized to a meaningful unit of work, not a single commit.
    fixes are excluded from exports and re-computations but retained
    for the configured retention period. ~bris-cli log restore <id>~
    undoes a deletion within the retention window.
+   *Status:* the *replay* half is implemented as ~bris replay~
+   (consumes a directory of PNG/JPEG/PPM frames, runs the full
+   vision → almanac → nav → NMEA pipeline, debug-logs every emitted
+   sentence). The persistent field log + soft-delete model is still
+   pending and will land alongside the streaming engine.
 
 * Phase 7: Mobile frontends
   Mobile frontends wrap the continuous core in a *session-based* UI. The
