@@ -192,17 +192,33 @@ stable. Each task is sized to a meaningful unit of work, not a single commit.
    Threshold + connected components + ellipse fit, sub-pixel refinement.
    Account for partial occlusion by horizon (limb correction).
 ** TODO Multi-frame stitching
-   Feature-based (ORB) alignment of overlapping frames into a panorama
-   in a gnomonic or equirectangular projection. Track per-frame
-   timestamps; do *not* average pixel data across time for moving bodies
-   — instead, compute per-frame angles and combine with proper time
-   correction.
+   *Required for any high-altitude or telephoto sight,* not optional.
+   With a telephoto lens (which we need for sub-arcmin accuracy at
+   the 0.5 nm target), the body and the horizon cannot fit in a single
+   frame for any altitude above the lens's vertical FOV. The pose chain
+   between frames is what relates the body's pixel position to the
+   horizon's pixel position across the gap.
+
+   Required pieces:
+   - Feature-based (ORB) alignment of overlapping frames in the regions
+     where features exist (overlap between adjacent frames; the body
+     itself; stars in night frames).
+   - Sea/sky frames have few ORB features in the lower half — the
+     pose chain there must lean on auxiliary sources: IMU/gyro on phones,
+     rate-table data on mechanical mounts, or the body's predicted
+     sidereal motion as a soft constraint between adjacent timestamps.
+   - Project frames into a common gnomonic or equirectangular projection
+     to compute the body-to-horizon angle across the panorama.
+   - Track per-frame timestamps; correct for the body's sidereal motion
+     between frames so we don't smear a moving target.
+
    *Status:* angle-fusion path implemented in ~bris-vision::fusion~
-   (inverse-variance weighted mean of per-frame altitude measurements
-   within a bounded time window). 5 tests cover σ shrinkage, weighting,
-   window enforcement. ORB-feature panorama stitching deferred — the
-   streaming pipeline can use angle fusion alone for now; full
-   panorama work returns if validation shows we need it.
+   covers the within-FOV case (wide-angle lens, low-to-medium-altitude
+   body). The full panorama-stitching path is *not yet implemented* and
+   is required before the 0.5 nm accuracy target is reachable. With
+   wide-angle-only operation the achievable accuracy is capped at the
+   wide-angle pixel scale (~1 arcmin/px → ~5 nm fix), so MVP can ship
+   without it but cannot reach the design target without it.
 ** DONE Angle measurement pipeline
    Given a stitched scene + horizon line + body centroid + camera
    intrinsics, output measured altitude with uncertainty.

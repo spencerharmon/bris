@@ -12,12 +12,12 @@ For the project overview, see `readme.org`.
 **Phase 0 (scaffolding):** complete except two follow-ups.
 **Phase 1 (almanac):** **8 of 9 tasks complete.** Only Pi Zero 2W
 benchmarking remains.
-**Phase 2 (vision):** **6 of 8 tasks complete + 2 partial.** End-to-end
-synthetic pipeline works: feed in a frame with a horizon and a body,
-get back an altitude with attached uncertainty. Calibration *workflow*
-(checkerboard capture etc.) remains, as does the streaming-engine
-quality tradeoff knob; ORB-panorama stitching is deferred in favor of
-the implemented angle-fusion path.
+**Phase 2 (vision):** **5 of 8 tasks complete + 2 partial + 1 not
+started.** Within-FOV altitude measurement works end-to-end:
+synthetic frame → horizon → body → fused altitude with σ. Calibration
+*workflow* and the streaming-engine quality knob are pending; full
+panorama stitching is required for the 0.5 nm target and not yet
+implemented (wide-angle MVP capped at ~5 nm without it).
 
 All other phases not started.
 
@@ -91,11 +91,15 @@ warnings under `-D warnings`, zero `cargo fmt` diffs.
   geometry on lens-undistorted ray directions. End-to-end test:
   body 200 px above horizon at fy=1000 → 11.31° altitude (matches
   atan(200/1000)).
-- ⚠️ **Multi-frame stitching** (`bris-vision::fusion`). Angle-fusion
-  path implemented (inverse-variance weighted mean with a bounded
-  time window). ORB-feature panorama stitching deferred — angle
-  fusion alone is sufficient for the streaming pipeline; we'll
-  revisit if validation shows we need the panorama.
+- ⚠️ **Multi-frame stitching** (`bris-vision::fusion`). *Only the
+  within-FOV angle-fusion path is implemented* (inverse-variance
+  weighted mean of per-frame altitude measurements within a bounded
+  time window). The full ORB-feature panorama stitching path is
+  *not yet implemented* and is genuinely required for high-altitude
+  or telephoto sights — with a telephoto lens, body and horizon
+  cannot fit in a single frame above the lens's vertical FOV.
+  Wide-angle-only operation caps accuracy at ~5 nm. The 0.5 nm design
+  target is unreachable without panorama stitching.
 - ⏳ **Stitching/accuracy tradeoff knob.** A streaming-engine setting,
   not a vision-module change. Pending the streaming engine in Phase
   3.5.
@@ -127,6 +131,11 @@ warnings under `-D warnings`, zero `cargo fmt` diffs.
 - ⏳ **Lens calibration workflow** (checkerboard capture, corner
   detection, parameter solve, persistence). Math is in place; needs
   the CLI hook.
+- ⏳ **Multi-frame panorama stitching** (ORB feature alignment +
+  pose chain across frames + IMU/sidereal soft constraints +
+  projection into a common surface). Required for telephoto / high-
+  altitude sights and therefore for the 0.5 nm accuracy target.
+  Within-FOV angle fusion is in place but is not a substitute.
 - ⏳ **Stitching/accuracy tradeoff knob** (streaming-engine setting).
 
 ### All later phases (1.5, 3, 3.5, 4, 5, 5.5, 6, 7, 8, 9)
@@ -217,7 +226,10 @@ Not started. See `plan.org` for the full task list.
    spanning longer must be split into multiple fused groups. The
    alternative — advancing each frame to a common reference time
    via the apparent-place pipeline — is the upgrade once the
-   streaming engine is in place.
+   streaming engine is in place. Note that `fuse_altitudes` only
+   handles the case where each frame *individually* contains both
+   the body and the horizon; the cross-frame case requires panorama
+   stitching (see Phase 2 remainder).
 
 8. **Centroiding picks the *largest* bright component**, not the
    *brightest single pixel*. This rejects hot pixels and small lens
@@ -245,30 +257,34 @@ Not started. See `plan.org` for the full task list.
 
 ## Next concrete step
 
-**Phase 1.5 (time integrity)** is an obvious self-contained piece
-of work that pays off immediately for offshore use: dual-clock
-timestamping, clock-step detection, NTP sync tracking, the per-fix
-time-confidence value that propagates to the longitude uncertainty
-contribution. Everything in this phase is well-scoped and unblocks
-nothing else, so it can be done as a single focused work session.
+Three reasonable paths, with explicit tradeoffs:
 
-**Or** start **Phase 3 (plate solving)** — but this is blocked on
-the full BSC import (the geometric-hash matcher needs hundreds to
-thousands of stars to be unambiguous). With network access we can
-fetch BSC and proceed; without it we're constrained to the 11 stars
-in the starter catalog, which won't be enough.
+**A. Phase 4 (sight reduction & fix) in `bris-nav`.** Assemble the
+observed altitude (from `bris-vision::measure`) and the computed
+altitude (from `bris-almanac::apparent`) into a line of position.
+The sight-reduction math is well-defined and produces an end-to-end
+synthetic-data fix. **Caveat:** the synthetic fix only validates the
+within-FOV path; it does not exercise panorama stitching, which is
+where most of the real-world accuracy work happens.
 
-**Or** start **Phase 4 (sight reduction & fix)** in `bris-nav`,
-which assembles the observed altitude (from `bris-vision::measure`)
-and the computed altitude (from `bris-almanac::apparent`) into a
-line of position. The sight-reduction math is well-defined and
-doesn't need plate solving. This is a strong candidate for "next
-work that produces an end-to-end fix from synthetic inputs."
+**B. Multi-frame panorama stitching in `bris-vision`.** Build the
+ORB-feature alignment + pose chain + projection pipeline. This
+unblocks the 0.5 nm accuracy target and is the largest single piece
+of remaining vision work. **Caveat:** it's a substantial commit
+(probably 2-3 work sessions, includes ORB or a similar feature
+detector; without `imageproc` or `opencv` we either implement ORB
+ourselves or pick a permissive pure-Rust crate).
 
-I'd lean **start Phase 4** so we can demonstrate an end-to-end
-single-sight LOP from synthetic data, validating the whole stack.
-Phase 1.5 and Phase 3 (after BSC import) are then independent
-follow-ups.
+**C. Phase 1.5 (time integrity) in `bris-core` and `bris-almanac`.**
+Dual-clock timestamping, clock-step detection, NTP sync tracking,
+per-fix time-confidence value. Self-contained, unblocks nothing else,
+pays off for offshore use. Smaller than B, larger than getting one
+synthetic LOP working.
+
+I'd lean **start with A** so we have an end-to-end synthetic fix as
+a regression baseline, then tackle **B** so we can demonstrate real-
+world capable accuracy, then **C** as a cleanup pass before any
+field use.
 
 ---
 
