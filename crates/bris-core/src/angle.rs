@@ -332,6 +332,113 @@ mod tests {
         assert_eq!(format!("{lon}"), "122.30000°W");
     }
 
+    #[test]
+    fn angle_zero_and_full_turn_constants() {
+        assert_eq!(Angle::ZERO.radians(), 0.0);
+        assert_relative_eq!(Angle::FULL_TURN.radians(), TWO_PI);
+        assert_relative_eq!(Angle::FULL_TURN.degrees(), 360.0);
+    }
+
+    #[test]
+    fn arcminutes_round_trip() {
+        let a = Angle::from_arcminutes(1234.5).unwrap();
+        assert_relative_eq!(a.arcminutes(), 1234.5, epsilon = 1e-9);
+    }
+
+    #[test]
+    fn arcseconds_round_trip() {
+        let a = Angle::from_arcseconds(36_000.0).unwrap();
+        // 36000 arcsec = 10 degrees.
+        assert_relative_eq!(a.degrees(), 10.0, epsilon = 1e-9);
+        assert_relative_eq!(a.arcseconds(), 36_000.0, epsilon = 1e-6);
+    }
+
+    #[test]
+    fn arcminutes_and_arcseconds_reject_non_finite() {
+        assert_eq!(
+            Angle::from_arcminutes(f64::NAN),
+            Err(AngleError::NotFinite)
+        );
+        assert_eq!(
+            Angle::from_arcseconds(f64::INFINITY),
+            Err(AngleError::NotFinite)
+        );
+    }
+
+    #[test]
+    fn angle_display_uses_degrees_with_five_places() {
+        let a = Angle::from_degrees(12.345_678_9).unwrap();
+        assert_eq!(format!("{a}"), "12.34568°");
+        let neg = Angle::from_degrees(-0.5).unwrap();
+        assert_eq!(format!("{neg}"), "-0.50000°");
+    }
+
+    #[test]
+    fn latitude_equator_constant_is_zero() {
+        assert_eq!(Latitude::EQUATOR.radians(), 0.0);
+        assert_eq!(Latitude::EQUATOR.degrees(), 0.0);
+    }
+
+    #[test]
+    fn longitude_prime_meridian_constant_is_zero() {
+        assert_eq!(Longitude::PRIME_MERIDIAN.radians(), 0.0);
+        assert_eq!(Longitude::PRIME_MERIDIAN.degrees(), 0.0);
+    }
+
+    #[test]
+    fn latitude_rejects_non_finite() {
+        assert_eq!(
+            Latitude::from_radians(f64::NAN),
+            Err(AngleError::NotFinite)
+        );
+        assert_eq!(
+            Latitude::from_radians(f64::INFINITY),
+            Err(AngleError::NotFinite)
+        );
+        assert_eq!(
+            Latitude::from_degrees(f64::NEG_INFINITY),
+            Err(AngleError::NotFinite)
+        );
+    }
+
+    #[test]
+    fn longitude_rejects_non_finite() {
+        assert_eq!(
+            Longitude::from_radians(f64::NAN),
+            Err(AngleError::NotFinite)
+        );
+        assert_eq!(
+            Longitude::from_degrees(f64::INFINITY),
+            Err(AngleError::NotFinite)
+        );
+    }
+
+    #[test]
+    fn latitude_as_angle_preserves_radians() {
+        let lat = Latitude::from_degrees(42.0).unwrap();
+        let a = lat.as_angle();
+        assert_relative_eq!(a.radians(), lat.radians());
+        assert_relative_eq!(a.degrees(), 42.0);
+    }
+
+    #[test]
+    fn longitude_as_angle_preserves_radians() {
+        // Pick a longitude that is normalized so the round-trip is exact.
+        let lon = Longitude::from_degrees(-45.0).unwrap();
+        let a = lon.as_angle();
+        assert_relative_eq!(a.radians(), lon.radians());
+        assert_relative_eq!(a.degrees(), -45.0);
+    }
+
+    #[test]
+    fn longitude_zero_and_positive_one_eighty_normalize_consistently() {
+        // +180° is in range and stays +180°; -180° normalizes to +180°
+        // (the half-open convention `(-π, π]`).
+        assert_relative_eq!(Longitude::from_degrees(180.0).unwrap().degrees(), 180.0);
+        assert_relative_eq!(Longitude::from_degrees(-180.0).unwrap().degrees(), 180.0);
+        assert_relative_eq!(Longitude::from_degrees(0.0).unwrap().degrees(), 0.0);
+    }
+
     proptest! {
         #[test]
         fn radians_degrees_round_trip(deg in -1e6_f64..1e6_f64) {

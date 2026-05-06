@@ -119,4 +119,49 @@ mod tests {
         assert!(obs.horizon_dip_rad().abs() < 1e-15);
         assert!(obs.horizon_dip_sigma().value().is_finite());
     }
+
+    #[test]
+    fn negative_eye_height_clamps_dip_to_zero() {
+        // Defensive: a misconfigured negative height must not blow up
+        // the sqrt() — it should clamp to zero, yielding zero dip and
+        // a finite sigma (using the same low-h floor).
+        let mut obs = Observer::default_dev();
+        obs.eye_height_m = -3.0;
+        assert!(obs.horizon_dip_rad().abs() < 1e-15);
+        assert!(obs.horizon_dip_sigma().value().is_finite());
+    }
+
+    #[test]
+    fn dip_sigma_matches_analytic_formula() {
+        // ∂dip/∂h = 0.88′/√h, so σ_dip = (0.88 / √h) × σ_h arcminutes.
+        // At h=4 m, σ_h=0.5 m → σ_dip = 0.88/2 × 0.5 = 0.22′.
+        let mut obs = Observer::default_dev();
+        obs.eye_height_m = 4.0;
+        obs.eye_height_sigma_m = 0.5;
+        let sigma_arcmin = rad_to_arcmin(obs.horizon_dip_sigma().value());
+        assert_relative_eq!(sigma_arcmin, 0.22, epsilon = 1e-3);
+    }
+
+    #[test]
+    fn zero_eye_height_sigma_yields_zero_dip_sigma() {
+        // No eye-height uncertainty → no dip uncertainty.
+        let mut obs = Observer::default_dev();
+        obs.eye_height_sigma_m = 0.0;
+        assert_eq!(obs.horizon_dip_sigma().value(), 0.0);
+    }
+
+    #[test]
+    fn default_dev_has_documented_constants() {
+        // Lock in the documented defaults so that future edits to the
+        // helper produce a visible test failure rather than silently
+        // shifting baselines used across the test suite.
+        let obs = Observer::default_dev();
+        assert_eq!(obs.latitude, Latitude::EQUATOR);
+        assert_eq!(obs.longitude, Longitude::PRIME_MERIDIAN);
+        assert_relative_eq!(obs.eye_height_m, 2.0);
+        assert_relative_eq!(obs.eye_height_sigma_m, 0.5);
+        // Atmosphere::STANDARD has finite, non-zero pressure & temperature.
+        assert!(obs.atmosphere.pressure_mbar.is_finite());
+        assert!(obs.atmosphere.temperature_k.is_finite());
+    }
 }

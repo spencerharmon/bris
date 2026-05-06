@@ -376,4 +376,65 @@ mod tests {
         let jd = utc_to_julian_date(utc);
         assert_relative_eq!(jd, 2_436_116.31, epsilon = 1e-5);
     }
+
+    #[test]
+    fn tt_from_julian_date_round_trips() {
+        let jd = 2_460_000.5;
+        let tt = Tt::from_julian_date(jd);
+        assert_relative_eq!(tt.julian_date(), jd);
+    }
+
+    #[test]
+    fn tai_to_tt_offset_is_constant() {
+        // Build a TAI instant directly via utc_to_tai and verify the
+        // TT − TAI offset matches the defined 32.184 s constant.
+        let now = utc(2024, 1, 1, 0, 0, 0);
+        let tai = utc_to_tai(now).unwrap();
+        let tt = tai.to_tt();
+        let delta_days = tt.julian_date() - tai.julian_date();
+        assert_relative_eq!(delta_days, 32.184 / SECS_PER_DAY, epsilon = 1e-8);
+    }
+
+    #[test]
+    fn ut1_julian_date_accessor_returns_stored_jd() {
+        let now = utc(2024, 6, 15, 12, 0, 0);
+        let ut1 = utc_to_ut1(now, 0.0);
+        assert_relative_eq!(ut1.julian_date(), utc_to_julian_date(now));
+    }
+
+    #[test]
+    fn julian_centuries_grows_linearly() {
+        // One Julian century after J2000 → exactly T = 1.0.
+        let tt = Tt::from_julian_date(JD_J2000 + 36_525.0);
+        assert_relative_eq!(tt.julian_centuries_j2000(), 1.0, epsilon = 1e-12);
+        // One Julian year after J2000 → T ≈ 0.01.
+        let tt = Tt::from_julian_date(JD_J2000 + 365.25);
+        assert_relative_eq!(tt.julian_centuries_j2000(), 0.01, epsilon = 1e-12);
+    }
+
+    #[test]
+    fn leap_table_metadata_consistent() {
+        // The "expires at" timestamp must be at or after the "updated at"
+        // timestamp; both must be plausible Unix timestamps (post-2000).
+        let updated = LEAP_TABLE_UPDATED_AT_UNIX;
+        let expires = LEAP_TABLE_EXPIRES_UNIX;
+        assert!(updated >= 946_684_800, "updated unix {updated} pre-2000");
+        assert!(expires >= updated, "expires {expires} < updated {updated}");
+    }
+
+    #[test]
+    fn leap_table_valid_for_past_instant() {
+        // Any sensible past instant (after 1972, before vendored expiry)
+        // should be considered valid.
+        let past = utc(2000, 1, 1, 0, 0, 0);
+        assert!(leap_table_valid_for(past));
+    }
+
+    #[test]
+    fn utc_to_tai_rejects_pre_table_instants() {
+        let before = utc(1971, 6, 1, 0, 0, 0);
+        assert_eq!(utc_to_tai(before), Err(TimeError::BeforeLeapTable));
+        // utc_to_tt should propagate the same error.
+        assert_eq!(utc_to_tt(before), Err(TimeError::BeforeLeapTable));
+    }
 }

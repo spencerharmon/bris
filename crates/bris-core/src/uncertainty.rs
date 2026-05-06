@@ -178,6 +178,86 @@ mod tests {
         );
     }
 
+    #[test]
+    fn sigma_zero_constant_is_zero() {
+        assert_eq!(Sigma::ZERO.value(), 0.0);
+    }
+
+    #[test]
+    fn sigma_scale_by_zero_yields_zero() {
+        let s = Sigma::new(7.5).unwrap().scale(0.0).unwrap();
+        assert_eq!(s.value(), 0.0);
+    }
+
+    #[test]
+    fn sigma_scale_rejects_non_finite_factor() {
+        assert_eq!(
+            Sigma::new(1.0).unwrap().scale(f64::NAN),
+            Err(UncertaintyError::NotFinite)
+        );
+        assert_eq!(
+            Sigma::new(1.0).unwrap().scale(f64::INFINITY),
+            Err(UncertaintyError::NotFinite)
+        );
+    }
+
+    #[test]
+    fn sigma_add_operator_matches_combine() {
+        let a = Sigma::new(3.0).unwrap();
+        let b = Sigma::new(4.0).unwrap();
+        assert_relative_eq!((a + b).value(), a.combine(b).value());
+        assert_relative_eq!((a + b).value(), 5.0);
+    }
+
+    #[test]
+    fn sigma_mul_operator_matches_scale() {
+        let s = Sigma::new(2.0).unwrap();
+        assert_relative_eq!((s * 1.5).value(), 3.0);
+        // Multiplication by zero is allowed.
+        assert_eq!((s * 0.0).value(), 0.0);
+    }
+
+    #[test]
+    #[should_panic(expected = "Sigma * factor")]
+    fn sigma_mul_by_negative_panics() {
+        let _ = Sigma::new(1.0).unwrap() * -1.0;
+    }
+
+    #[test]
+    #[should_panic(expected = "Sigma * factor")]
+    fn sigma_mul_by_nan_panics() {
+        let _ = Sigma::new(1.0).unwrap() * f64::NAN;
+    }
+
+    #[test]
+    fn sigma_display_format() {
+        let s = Sigma::new(0.123_456_789).unwrap();
+        assert_eq!(format!("{s}"), "σ=0.1235");
+    }
+
+    #[test]
+    fn uncertain_new_pairs_value_and_sigma() {
+        let s = Sigma::new(0.25).unwrap();
+        let u: Uncertain<f64> = Uncertain::new(1.5, s);
+        assert_eq!(u.value, 1.5);
+        assert_eq!(u.sigma, s);
+    }
+
+    #[test]
+    fn uncertain_exact_has_zero_sigma() {
+        let u: Uncertain<f64> = Uncertain::exact(42.0);
+        assert_eq!(u.value, 42.0);
+        assert_eq!(u.sigma, Sigma::ZERO);
+        assert_eq!(u.sigma.value(), 0.0);
+    }
+
+    #[test]
+    fn uncertain_display_includes_value_and_sigma() {
+        // T must implement Display; use f64 (formats as "1").
+        let u: Uncertain<f64> = Uncertain::new(1.0, Sigma::new(0.5).unwrap());
+        assert_eq!(format!("{u}"), "1 ± 0.5000");
+    }
+
     proptest! {
         #[test]
         fn combine_commutative(a in 0.0_f64..1e9, b in 0.0_f64..1e9) {
