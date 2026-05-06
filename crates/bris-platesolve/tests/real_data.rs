@@ -79,6 +79,7 @@ fn night_test_highres_real_pipeline() {
             max_peaks_to_match: 12,
             min_verifications: 3,
             verify_match_radius_rad: 1.5_f64.to_radians(),
+            max_rms_residual_rad: (60.0 / 3600.0_f64).to_radians(), // 1 arcmin
             max_tuple_diameter_rad: 60.0_f64.to_radians(),
         },
     );
@@ -136,6 +137,7 @@ fn container_ship_night_real_pipeline() {
             max_peaks_to_match: 16,
             min_verifications: 3,
             verify_match_radius_rad: 1.5_f64.to_radians(),
+            max_rms_residual_rad: (60.0 / 3600.0_f64).to_radians(), // 1 arcmin
             max_tuple_diameter_rad: 60.0_f64.to_radians(),
         },
     );

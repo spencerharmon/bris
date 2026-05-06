@@ -26,8 +26,17 @@ pub struct PlateSolveConfig {
     pub min_verifications: usize,
     /// Maximum angular separation between a verifying star's
     /// projected position and the nearest detected peak, radians.
-    /// Default 1°.
+    /// Loose pre-refinement filter. Default 1°.
     pub verify_match_radius_rad: f64,
+    /// Maximum RMS angular residual (radians) of the *refined*
+    /// match (after re-fitting Kabsch on all matched pairs).
+    /// Tightens the post-verification accept criterion: a loose
+    /// 1° verify radius can be satisfied by accidental matches in
+    /// other sky regions, but those matches won't fit within sub-
+    /// pixel residuals when re-fit. Default 30 arcseconds (≈ 1.5
+    /// × 10⁻⁴ rad), well above per-pixel detection sigma but well
+    /// below the per-pattern false-match scale.
+    pub max_rms_residual_rad: f64,
     /// Maximum allowed angular distance between any pair of stars
     /// in a candidate 4-tuple, radians. Should match the database
     /// configuration's `max_pattern_diameter_rad`. Default 60°.
@@ -40,6 +49,7 @@ impl Default for PlateSolveConfig {
             max_peaks_to_match: 12,
             min_verifications: 3,
             verify_match_radius_rad: 1.0_f64.to_radians(),
+            max_rms_residual_rad: (30.0 / 3600.0_f64).to_radians(), // 30 arcsec
             max_tuple_diameter_rad: 60.0_f64.to_radians(),
         }
     }
@@ -247,7 +257,10 @@ fn try_verify(
         let Ok(rot) = kabsch_rotation(&permuted_catalog, &camera) else {
             continue;
         };
-        let attitude = Attitude { matrix: rot };
+        // The initial rotation; we refine it below after collecting
+        // all matched pairs (initial 4 + verified). Verification
+        // uses the initial rotation to project candidate stars and
+        // count matches.
 
         // Verify: project additional catalog stars and count matches.
         // For efficiency we limit to stars within max_tuple_diameter
@@ -335,8 +348,62 @@ fn try_verify(
             }
         }
 
+        // Refine: re-run Kabsch on all matched pairs (initial 4 +
+        // verified). The refined rotation minimizes residuals
+        // across the full set; then check that the RMS residual
+        // is small enough to call it a real match. This filters
+        // out false-positive matches that satisfy the loose 1°
+        // verify radius but don't fit sub-pixel under refinement.
+        let mut all_catalog: Vec<[f64; 3]> = Vec::with_capacity(identified.len());
+        let mut all_camera: Vec<[f64; 3]> = Vec::with_capacity(identified.len());
+        for (i, &peak_idx) in tuple.iter().enumerate() {
+            all_catalog.push(catalog_vecs[perm[i]]);
+            all_camera.push(peak_vecs[i]);
+            // i indexes the tuple position (0..4); peak_idx is
+            // unused here but useful for diagnostics.
+            let _ = peak_idx;
+        }
+        // Append verified pairs. Identified contains both initial
+        // 4 (first 4 entries) and verified stars after that. We
+        // already pushed the initial 4 above; append the rest.
+        for ident in &identified[4..] {
+            let cv = ra_dec_to_unit_vec(ident.ra_rad, ident.dec_rad);
+            // Find the peak ray by matching pixel coords to the
+            // candidate_peaks slice.
+            let pix_idx = peaks
+                .iter()
+                .position(|p| p.x == ident.pixel_x && p.y == ident.pixel_y);
+            if let Some(idx) = pix_idx {
+                all_catalog.push(cv);
+                all_camera.push(peak_rays[idx]);
+            }
+        }
+
+        let refined_rot = match kabsch_rotation(&all_catalog, &all_camera) {
+            Ok(r) => r,
+            Err(_) => continue,
+        };
+        // Compute RMS angular residual under the refined rotation.
+        let mut sum_sq: f64 = 0.0;
+        for (cv, pr) in all_catalog.iter().zip(all_camera.iter()) {
+            let projected = rotate_vec(&refined_rot, *cv);
+            // Angular distance between projected and pr.
+            let dot = (projected[0] * pr[0] + projected[1] * pr[1] + projected[2] * pr[2])
+                .clamp(-1.0, 1.0);
+            let angle = dot.acos();
+            sum_sq += angle * angle;
+        }
+        let rms = (sum_sq / all_catalog.len() as f64).sqrt();
+        if rms > cfg.max_rms_residual_rad {
+            // Residual too large → false-positive match. Skip.
+            continue;
+        }
+        let refined_attitude = Attitude {
+            matrix: refined_rot,
+        };
+
         if best.as_ref().is_none_or(|b| n_verified > b.2) {
-            best = Some((attitude, identified, n_verified));
+            best = Some((refined_attitude, identified, n_verified));
         }
     }
 
@@ -470,6 +537,59 @@ mod tests {
         let intr = Intrinsics::placeholder(640, 480);
         let result = plate_solve(&peaks, &intr, &db, PlateSolveConfig::default());
         assert!(matches!(result, Err(PlateSolveError::InsufficientPeaks(3))));
+    }
+
+    /// Refinement: with a strict residual threshold and noisy
+    /// peak inputs (random shuffle of pixel positions, breaking
+    /// the geometric pattern), the solver must reject rather than
+    /// fabricate a match.
+    ///
+    /// This is the load-bearing test for the
+    /// `max_rms_residual_rad` knob: without it, the solver
+    /// returns the best self-consistent rotation it can find
+    /// regardless of how poorly that rotation actually fits.
+    /// With strict refinement, random inputs produce no match.
+    #[test]
+    fn refinement_rejects_random_peak_positions() {
+        use crate::hash::StarHashDbConfig;
+        let cfg = StarHashDbConfig {
+            mag_cutoff: 1.5,
+            ..StarHashDbConfig::default()
+        };
+        let db = StarHashDb::build(cfg);
+
+        // Sprinkle 12 peaks at fixed positions across a 640x480
+        // frame. With no underlying star pattern, the chance of a
+        // match-and-refine surviving sub-arcmin RMS is negligible.
+        let peaks: Vec<Peak> = (0..12)
+            .map(|i| Peak {
+                x: 50.0 + 50.0 * f64::from(i),
+                y: 100.0 + 30.0 * f64::from(i % 5),
+                intensity: 50_000.0 - 1000.0 * f64::from(i),
+            })
+            .collect();
+        let intr = Intrinsics::placeholder(640, 480);
+
+        let result = plate_solve(
+            &peaks,
+            &intr,
+            &db,
+            PlateSolveConfig {
+                max_peaks_to_match: 12,
+                min_verifications: 3,
+                verify_match_radius_rad: 1.0_f64.to_radians(),
+                max_rms_residual_rad: (30.0 / 3600.0_f64).to_radians(),
+                max_tuple_diameter_rad: 60.0_f64.to_radians(),
+            },
+        );
+        // Either NoMatch or InsufficientPeaks; both are correct
+        // refusals. The bug we're guarding against is a Some(_)
+        // result with fabricated identifications.
+        assert!(
+            result.is_err(),
+            "expected refusal, got Ok with {:?} stars",
+            result.as_ref().ok().map(|r| r.identified.len()),
+        );
     }
 
     /// End-to-end synthetic test: build a hash database from the
