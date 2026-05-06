@@ -1261,3 +1261,56 @@ fn container_ship_night_multi_pass_finds_horizon_below_deck() {
         "top candidate should have more inliers than secondary",
     );
 }
+
+/// `container_ship_night_lights_on_water` second frame
+/// (`frame_horizon_visible.png`, originally frame 0024 of the
+/// timelapse). The ship is approaching Port of Colombo, Sri Lanka;
+/// city lights are visible along the actual sea horizon, and the
+/// atmospheric glow has cleared. The multi-pass night-horizon
+/// detector finds the actual horizon at y ≈ 241 (the city-lights
+/// row) with ~120 inliers, *outvoting* the deck top at y ≈ 325
+/// with ~115 inliers.
+///
+/// Load-bearing assertion: this is the success case for the
+/// multi-pass algorithm. When a scene has both a strong
+/// non-horizon transition (the deck top) and a competing horizon
+/// transition with comparable inlier strength, multi-pass surfaces
+/// the horizon by sorting candidates by inlier count after
+/// enumerating all of them.
+#[test]
+fn container_ship_night_lights_on_water_horizon_visible_via_multi_pass() {
+    use bris_core::time::{Tt, JD_J2000};
+    use bris_vision::{
+        detect_horizon_night_multi_pass, load_frame_from_path, Intrinsics, NightHorizonConfig,
+    };
+    use std::path::Path;
+
+    let path = Path::new(harness::REGRESSION_DIR)
+        .join("container_ship_night_lights_on_water")
+        .join("frame_horizon_visible.png");
+    let dims = image::image_dimensions(&path).expect("dims");
+    let intrinsics = Intrinsics::placeholder(dims.0, dims.1);
+    let frame = load_frame_from_path(&path, Tt::from_julian_date(JD_J2000), 0, intrinsics)
+        .expect("load frame");
+
+    let candidates = detect_horizon_night_multi_pass(&frame, NightHorizonConfig::default(), None);
+    assert!(
+        candidates.len() >= 2,
+        "multi-pass should find at least 2 candidates on this scene; got {}",
+        candidates.len(),
+    );
+    let top = &candidates[0];
+    // The actual sea horizon (city lights row) is around y=241.
+    assert!(
+        (top.intercept - 241.0).abs() < 15.0,
+        "top candidate should be near y=241 (city-lights horizon); got {:.1}",
+        top.intercept,
+    );
+    // Inlier count should be competitive with the secondary
+    // (which is the deck top).
+    assert!(
+        top.inlier_count > 100,
+        "expected at least 100 inliers on the top candidate; got {}",
+        top.inlier_count,
+    );
+}

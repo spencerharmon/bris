@@ -7,14 +7,72 @@
 #
 # Frames are 9:16 portrait (1080×1920). The portrait orientation is
 # the *intended* viewing orientation — phones encode in viewing
-# order — so no rotation is applied. The pipeline processes the
-# frame at 1080×1920 directly.
+# order — so no rotation is applied.
 #
 # Frame is JPEG q85 (81 KB) — re-encoded from a 235 KB PNG to fit
 # the corpus size constraint. Verified that compression doesn't
 # change pipeline outputs (centroid shifted ~0.05 px).
 #
-# Empirical:
+# # Why every horizon detector currently fails on this frame
+#
+# The visible structure of the scene, top-to-bottom in image
+# coordinates:
+#
+#   y=0..600   moon halo (luma peaks at y~350; moon disk
+#              saturated; halo extends to ~y=600)
+#   y=600..1300  dim featureless sky (per-row mean luma ~1000-1500;
+#                per-row std-dev ~400-500; very uniform)
+#   y=1300..1500 SEA HORIZON: transition from dim uniform sky to
+#                textured moonlit sea
+#   y=1500..1920 moonlit sea, brightest near horizon, dimming
+#                toward bottom (per-row std-dev ~700-2200,
+#                consistently 2-4× the sky std-dev)
+#
+# The existing night detector looks for the row of maximum mean-
+# luma gradient. It finds the moon halo's edge (around y=257)
+# instead of the actual horizon (around y=1310-1330) because the
+# halo gradient is ~10× steeper than the sky-to-sea gradient.
+# Body-exclusion via column mask doesn't help because the moon's
+# halo extends radially well beyond the moon's column range.
+# Multi-pass with row-exclusion doesn't help because the halo
+# generates strong transitions at multiple y values (the inner
+# halo edge AND the outer halo edge) before the sky-to-sea
+# transition gets its turn.
+#
+# # The promising signal: per-row std-dev with the moon masked
+#
+# When a 2D box around the moon (e.g. ±250 px around moon
+# centroid) is excluded, the per-row std-dev profile shows a
+# sharp transition exactly at the horizon:
+#
+#   y=863..1247 (sky):  std-dev 363-474, ratio std/mean ~0.30-0.35
+#   y=1343..1535 (sea): std-dev 1056-2222, ratio std/mean ~0.95-1.05
+#
+# The std-dev jumps by roughly 4× at the horizon row. This is
+# because the dim sky is uniform (low texture variance) while the
+# moonlit sea is textured (high variance from individual moon-
+# glint reflections on water).
+#
+# Equivalently: contrast-stretch the lower half of the frame
+# (rescaling the 5th to 95th percentile of the lower-half pixel
+# values to span 0..u16::MAX) and look at the per-row mean.
+# Stretched mean jumps from ~13600 at y=1296 to ~21300 at y=1320 —
+# a 60% increase in 24 pixels, by far the sharpest transition in
+# the lower half.
+#
+# Either signal is detectable. The right algorithm is something
+# like: detect the moon, build a 2D mask around it, then run a
+# per-row std-dev (or contrast-stretched per-row mean) gradient
+# search restricted to rows below the masked region. The
+# motivating use case for this case file is to drive that
+# algorithm's design and acceptance criteria.
+#
+# Until that algorithm lands, the existing detectors all fail and
+# this case stays kind = "working" only because the centroid +
+# classifier behavior is correct; the horizon is documented as a
+# known failure that has a clear path forward.
+#
+# # Empirical
 #   - Classifier correctly says Night (mean luma 0.024). Confidence
 #     is moderate (0.52) because mean luma sits firmly in the night
 #     band but lacks the astronomical prior that would push
@@ -22,17 +80,23 @@
 #   - Centroid finds the moon at (454, 350) on an 812-pixel bright
 #     component. **This is the user's stated success criterion:
 #     "moon centroiding *should* work."** It does.
-#   - All three horizon detectors fail: too few candidates at this
-#     low overall brightness. This is exactly the case that
-#     motivates the night-horizon-detection design problem.
+#   - All three default horizon detectors fail. The night detector
+#     finds the moon halo's edge, not the actual horizon at
+#     y≈1310-1330.
 #
-# Once a night-horizon detector lands, the horizon expectations
-# here flip from err to ok. The centroid + classifier behavior is
-# already correct.
+# # Path forward (drives a new algorithm in plan.org)
+#
+# 1. Detect the moon (saturated centroid, already works).
+# 2. Build a 2D box mask around the moon centroid, padded
+#    generously to cover the halo (~3-5× moon radius).
+# 3. Restrict horizon search to rows below the masked region.
+# 4. Use *per-row std-dev* (or contrast-stretched per-row mean)
+#    as the transition signal, not raw per-row mean luma.
+# 5. The horizon is the row where std-dev jumps sharply upward.
 
 [case]
 name         = "night_test_lowres"
-description  = "Cellphone night shot; bright moon; faint horizon; portrait 1080x1920 (no rotation)"
+description  = "Cellphone night shot; bright moon; faint horizon at y≈1310-1330 detectable via per-row std-dev or contrast-stretched per-row mean once moon is masked as 2D box"
 kind         = "working"
 frame_count  = 1
 frame_width  = 1080
@@ -55,22 +119,25 @@ x_px         = 454.54
 y_px         = 349.92
 tolerance_px = 5.0
 
-# All three horizon detectors fail. This is the motivating case
-# for the night-horizon detection work tracked in plan.org.
+# All three default horizon detectors fail. See the docstring at
+# the top of this file for the per-row std-dev signal that *will*
+# locate the horizon (around y=1310-1330) once the proposed
+# moon-mask + std-dev algorithm lands.
+
 [horizon.gradient]
 outcome       = "err"
 error_variant = "only 29 inliers"
 correctness   = "wrong"
-notes         = "Gradient threshold tuned for daylight luma; needs a night variant or a luma-adaptive threshold."
+notes         = "Gradient threshold tuned for daylight luma. At night, only the moon halo produces above-threshold gradients."
 
 [horizon.sky_region]
 outcome       = "err"
 error_variant = "only 40 inliers"
 correctness   = "wrong"
-notes         = "Sky-region detector requires a brightness percentile that can identify 'sky'; in a uniformly-dark frame this is meaningless."
+notes         = "Sky-region detector requires a brightness percentile to identify 'sky'. In a uniformly-dark frame this percentile catches the moon halo (the only bright region) and finds its lower boundary, not the sea horizon."
 
 [horizon.segmentation]
 outcome       = "err"
 error_variant = "only 90 inliers"
 correctness   = "wrong"
-notes         = "ADE20K-trained model finds some sky/sea structure but RANSAC rejects most as outliers. A night-domain segmentation model (or a non-segmentation night detector) should resolve this."
+notes         = "ADE20K-trained model finds some sky/sea structure but RANSAC rejects most as outliers. A night-domain segmentation model would help, but the per-row std-dev signal described above is a simpler classical-CV path that doesn't require any new model."

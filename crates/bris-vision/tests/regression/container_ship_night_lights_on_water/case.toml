@@ -1,35 +1,62 @@
 # Regression metadata for container_ship_night_lights_on_water.
 #
 # Container ship deck at night with deck lights illuminating the
-# water. The user flagged: "adversarial case for night horizon.
-# Aurora-like glow on horizon will fool simple 'find dark/bright
-# transition' approaches; deck lights on water create false
-# features."
+# water. Two frames captured at different points in the timelapse:
 #
-# Empirical: every detector currently fails. Centroid refuses (no
-# extended body). Sky-region and segmentation find zero candidate
-# columns. Gradient finds 65, below threshold. Classifier reports
-# Twilight at 0.69 confidence (mean luma 0.235, just past the 0.05
-# night threshold — deck-light glow contributes).
+#   frame.png (orig 0001): early in the timelapse, deck lights on,
+#     dark sea, aurora-like glow on horizon. Adversarial: every
+#     detector currently fails. Worth keeping as a regression
+#     floor — if any future detector starts producing a "horizon"
+#     on this scene, it's probably wrong.
 #
-# This is a particularly hostile expected_failure case: even when a
-# future night-horizon detector lands, the deck-light glow on water
-# may fool it. Worth keeping as a regression-floor: if any future
-# detector starts producing a "horizon" on this scene, it's
-# probably wrong. Ideally the future detector also fails cleanly
-# rather than fabricating output.
+#   frame_horizon_visible.png (orig 0024): later in the timelapse,
+#     ship is approaching Port of Colombo, Sri Lanka. City lights
+#     are visible along the actual sea horizon, and the
+#     atmospheric glow has cleared. The multi-pass night-horizon
+#     detector finds the actual horizon at y=241 (the city-lights
+#     row) with 122 inliers, *outvoting* the deck top at y=325 with
+#     114 inliers. This is the success case for the multi-pass
+#     algorithm: when the scene gives you a clean horizontal
+#     transition, multi-pass surfaces it even when a brighter
+#     deck-edge transition exists in the same frame.
+#
+# Empirical comparison across the timelapse: the deck-top edge
+# remains the strongest single-pass match in every frame
+# (intercept ~330, ~135 inliers), but only in frames 24+ does a
+# competing horizon-row transition appear with comparable inlier
+# strength to overtake it under the multi-pass sort. Earlier
+# frames have only the deck and noise.
+#
+# An interesting follow-up: stitching frames 18-25 might amplify
+# the faint horizon signal in the early frames (the deck moves
+# subtly with ship motion; the horizon is fixed). The Phase 2
+# panorama machinery is in place; whether the SNR gain is
+# meaningful is a question only experiment can answer.
+#
+# Classifier reports Twilight on both frames; with the astronomical
+# prior (sun ~ -15° at this time of night) it would resolve to
+# Night. Image-only luma is lifted by the deck-light glow into the
+# Twilight band.
 
 [case]
 name         = "container_ship_night_lights_on_water"
-description  = "Container ship at night; deck lights illuminate the water; aurora-like glow on horizon"
+description  = "Container ship at night; deck lights illuminate the water; two frames showing adversarial early state and approachable later state"
 kind         = "expected_failure"
-frame_count  = 1
+frame_count  = 2
 frame_width  = 640
 frame_height = 360
+frames       = ["frame.png", "frame_horizon_visible.png"]
 
 [expected_classifier]
 condition = "twilight"
-notes     = "Image-only path. Astronomical prior would say Night; the deck-light glow lifts mean luma above the night threshold."
+notes     = "Image-only path on frame 0. Astronomical prior would say Night; deck-light glow lifts mean luma above the night threshold."
+
+# All three default detectors fail on frame.png. The multi-pass
+# night-horizon detector finds *something* horizontal on every
+# frame in this scene, but only on frame_horizon_visible.png does
+# the actual sea horizon win the inlier competition; on frame.png
+# the deck top wins and there is no actual horizon transition for
+# the detector to find as a runner-up.
 
 [horizon.gradient]
 outcome       = "err"
