@@ -20,10 +20,10 @@ use bris_core::time::{Tt, JD_J2000};
 use bris_vision::{
     body_column_mask, centroid_brightest_body, centroid_saturated_body_in_mask, classify,
     detect_horizon, detect_horizon_night, detect_horizon_night_excluding_body,
-    detect_horizon_via_sky_region, detect_horizon_via_sky_region_with_column_mask,
-    detect_horizon_with_column_mask, detect_peaks, load_frame_from_path_with_rotation,
-    CentroidConfig, ConditionConfig, HorizonConfig, Intrinsics, NightHorizonConfig, PeakConfig,
-    Rotation, SaturatedBodyConfig,
+    detect_horizon_night_multi_pass, detect_horizon_via_sky_region,
+    detect_horizon_via_sky_region_with_column_mask, detect_horizon_with_column_mask, detect_peaks,
+    load_frame_from_path_with_rotation, CentroidConfig, ConditionConfig, HorizonConfig, Intrinsics,
+    NightHorizonConfig, PeakConfig, Rotation, SaturatedBodyConfig,
 };
 
 #[cfg(feature = "segmentation")]
@@ -292,6 +292,26 @@ fn main() {
             line.residual_rms_px
         ),
         Err(e) => println!("  Err: {e}"),
+    }
+    // Multi-pass: enumerate all horizon candidates.
+    {
+        println!("  multi-pass candidates (best first):");
+        let candidates =
+            detect_horizon_night_multi_pass(&frame, NightHorizonConfig::default(), None);
+        if candidates.is_empty() {
+            println!("    (none)");
+        } else {
+            for (i, line) in candidates.iter().enumerate() {
+                println!(
+                    "    #{i}: slope = {:.4}, intercept = {:.2}, inliers = {} / {}, RMS = {:.2} px",
+                    line.slope,
+                    line.intercept,
+                    line.inlier_count,
+                    line.candidate_count,
+                    line.residual_rms_px,
+                );
+            }
+        }
     }
     if std::env::var("PROBE_ROWS").is_ok() {
         // Print smoothed per-row mean profile at 5% intervals so we

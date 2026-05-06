@@ -1173,3 +1173,91 @@ fn marina_with_body_peak_detector_sees_moon_dim_when_rigging_obscures() {
          below visible intensity ({visible:.0}); rigging should dim it",
     );
 }
+
+/// Multi-pass night-horizon detector on `night_test_highres`:
+/// finds the actual sea-sky horizon at y ≈ 77 even though the
+/// single-pass detector lands on the wake region (y ≈ 180). The
+/// load-bearing assertion: with multi-pass, the
+/// most-inliers candidate is the real horizon.
+///
+/// This is a real-data demonstration of why multi-pass matters:
+/// the strongest horizontal luma transition isn't always the
+/// horizon. Multi-pass enumerates the top-N transitions; the
+/// caller picks by additional context (inlier count, position
+/// in the frame, segmentation prior).
+#[test]
+fn night_test_highres_multi_pass_finds_actual_horizon() {
+    use bris_core::time::{Tt, JD_J2000};
+    use bris_vision::{
+        detect_horizon_night_multi_pass, load_frame_from_path, Intrinsics, NightHorizonConfig,
+    };
+    use std::path::Path;
+
+    let path = Path::new(harness::REGRESSION_DIR)
+        .join("night_test_highres")
+        .join("frame.png");
+    let dims = image::image_dimensions(&path).expect("dims");
+    let intrinsics = Intrinsics::placeholder(dims.0, dims.1);
+    let frame = load_frame_from_path(&path, Tt::from_julian_date(JD_J2000), 0, intrinsics)
+        .expect("load frame");
+
+    let candidates = detect_horizon_night_multi_pass(&frame, NightHorizonConfig::default(), None);
+    assert!(
+        !candidates.is_empty(),
+        "multi-pass should find at least one horizon"
+    );
+    // The actual sea-sky horizon is around y=85 (visible in the
+    // frame as the dark-sky / dark-sea boundary). Multi-pass
+    // sorted by inlier count puts it first.
+    let top = &candidates[0];
+    assert!(
+        (top.intercept - 77.0).abs() < 15.0,
+        "top candidate should be near y=77 (actual horizon); got intercept {:.1}",
+        top.intercept,
+    );
+    assert!(
+        top.inlier_count > 150,
+        "top candidate should have strong inlier consensus; got {}",
+        top.inlier_count,
+    );
+}
+
+/// Multi-pass on `container_ship_night`: the deck-top is the
+/// strongest single-pass match (y ≈ 329), but multi-pass finds a
+/// stronger consensus near the actual sea horizon at y ≈ 247.
+#[test]
+fn container_ship_night_multi_pass_finds_horizon_below_deck() {
+    use bris_core::time::{Tt, JD_J2000};
+    use bris_vision::{
+        detect_horizon_night_multi_pass, load_frame_from_path, Intrinsics, NightHorizonConfig,
+    };
+    use std::path::Path;
+
+    let path = Path::new(harness::REGRESSION_DIR)
+        .join("container_ship_night")
+        .join("frame.png");
+    let dims = image::image_dimensions(&path).expect("dims");
+    let intrinsics = Intrinsics::placeholder(dims.0, dims.1);
+    let frame = load_frame_from_path(&path, Tt::from_julian_date(JD_J2000), 0, intrinsics)
+        .expect("load frame");
+
+    let candidates = detect_horizon_night_multi_pass(&frame, NightHorizonConfig::default(), None);
+    assert!(
+        candidates.len() >= 2,
+        "multi-pass should find at least 2 candidates on this scene; got {}",
+        candidates.len(),
+    );
+    // The top candidate (sorted by inlier count) is the actual
+    // sea-sky horizon near y=247 (164 inliers); the deck top
+    // appears as a secondary candidate near y=329 (105 inliers).
+    let top = &candidates[0];
+    assert!(
+        (top.intercept - 247.0).abs() < 15.0,
+        "top candidate should be near y=247 (sea horizon); got {:.1}",
+        top.intercept,
+    );
+    assert!(
+        top.inlier_count > candidates[1].inlier_count,
+        "top candidate should have more inliers than secondary",
+    );
+}

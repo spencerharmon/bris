@@ -112,6 +112,17 @@ pub struct NightHorizonConfig {
     /// the lower half of the frame, which is where the horizon
     /// usually lives in night photography.
     pub search_row_range: (f64, f64),
+    /// Maximum number of candidate horizons to return from
+    /// [`detect_horizon_night_multi_pass`]. After finding the
+    /// strongest, mask its row neighborhood and search again, up
+    /// to this many passes. Default 3.
+    pub max_passes: usize,
+    /// Half-height of the row range to mask out after each found
+    /// horizon, in working-image pixels. Should be large enough to
+    /// cover the smoothed luma transition's vertical extent.
+    /// Default = `2 * search_half_height` (so the mask covers the
+    /// full search window plus a margin).
+    pub multi_pass_mask_half_height: u32,
     /// Number of RANSAC iterations.
     pub ransac_iterations: u32,
     /// RANSAC inlier distance threshold (pixels at working
@@ -133,6 +144,8 @@ impl Default for NightHorizonConfig {
             gradient_threshold: 80,
             center_band_fraction: 0.6,
             search_row_range: (0.0, 1.0),
+            max_passes: 3,
+            multi_pass_mask_half_height: 16,
             ransac_iterations: 200,
             ransac_inlier_px: 2.0,
             min_inlier_fraction: 0.3,
@@ -179,6 +192,70 @@ pub fn detect_horizon_night_with_column_mask(
     cfg: NightHorizonConfig,
     column_mask: Option<&[bool]>,
 ) -> Result<HorizonLine, HorizonError> {
+    let mut row_exclusions: Vec<(u32, u32)> = Vec::new();
+    detect_horizon_night_inner(frame, cfg, column_mask, &mut row_exclusions)
+}
+
+/// Multi-pass variant: run the detector multiple times, each time
+/// masking out a row range around the previous pass's horizon row.
+/// Returns up to `cfg.max_passes` candidate horizons sorted by
+/// inlier count (best first).
+///
+/// Useful when the strongest luma transition isn't the sea-sky
+/// horizon — e.g. on `container_ship_night*` scenes where the
+/// deck-to-sky boundary outvotes the actual horizon, or
+/// `night_test_lowres` where the moon halo's edge dominates. The
+/// caller picks the best candidate based on additional context
+/// (expected horizon row from IMU, segmentation prior, or by
+/// taking the candidate with the most inliers in the lower half
+/// of the frame).
+///
+/// Returns an empty Vec if no pass produces a fit.
+#[must_use]
+pub fn detect_horizon_night_multi_pass(
+    frame: &Frame,
+    cfg: NightHorizonConfig,
+    column_mask: Option<&[bool]>,
+) -> Vec<HorizonLine> {
+    let mut row_exclusions: Vec<(u32, u32)> = Vec::new();
+    let mut results: Vec<HorizonLine> = Vec::new();
+
+    let scale = f64::from(frame.width()) / f64::from(cfg.working_width);
+    let working_height = (f64::from(frame.height()) / scale).round() as u32;
+
+    for _ in 0..cfg.max_passes.max(1) {
+        match detect_horizon_night_inner(frame, cfg, column_mask, &mut row_exclusions) {
+            Ok(line) => {
+                // Convert the found line's full-resolution
+                // intercept back to a working-image row, then mask
+                // a window around it for the next pass.
+                let working_row = (line.intercept / scale) as u32;
+                let half = cfg.multi_pass_mask_half_height;
+                let lo = working_row.saturating_sub(half);
+                let hi = (working_row + half).min(working_height.saturating_sub(1));
+                row_exclusions.push((lo, hi));
+                results.push(line);
+            }
+            Err(_) => break,
+        }
+    }
+
+    // Sort best (most inliers) first.
+    results.sort_by_key(|h| std::cmp::Reverse(h.inlier_count));
+    results
+}
+
+/// Internal: shared single-pass logic. The `row_exclusions`
+/// parameter holds working-row ranges that should be masked from
+/// the global gradient-row search; pass an empty vec for the
+/// single-pass entry, or a non-empty one to suppress already-
+/// found horizons in the multi-pass entry.
+fn detect_horizon_night_inner(
+    frame: &Frame,
+    cfg: NightHorizonConfig,
+    column_mask: Option<&[bool]>,
+    row_exclusions: &[(u32, u32)],
+) -> Result<HorizonLine, HorizonError> {
     if let Some(m) = column_mask {
         if m.len() != frame.width() as usize {
             return Err(HorizonError::InsufficientCandidates(0));
@@ -210,19 +287,14 @@ pub fn detect_horizon_night_with_column_mask(
     let row_means = per_row_mean_masked(&work, band_lo, band_hi, work_mask.as_deref());
 
     // Smooth and find the row with maximum vertical gradient,
-    // restricted to the configured search row range. Restricting
-    // the search is essential when a saturated body (Moon) is in
-    // the upper part of the frame: its halo's luma transition is
-    // far steeper than the sea-sky horizon's, so without
-    // restriction the global gradient peak lands on the body's
-    // halo. The default range is the whole frame; callers who
-    // know the body is above the horizon should restrict to e.g.
-    // (body.y/h + 0.05, 1.0).
+    // restricted to the configured search row range and excluding
+    // any row ranges from previous passes.
     let smoothed = smooth_1d(&row_means, smoothing_kernel_size(work.height));
     let row_lo = (cfg.search_row_range.0.clamp(0.0, 1.0) * f64::from(work.height)) as u32;
     let row_hi = (cfg.search_row_range.1.clamp(0.0, 1.0) * f64::from(work.height)) as u32;
-    let horizon_row = max_gradient_row_in_range(&smoothed, row_lo, row_hi)
-        .ok_or(HorizonError::InsufficientCandidates(0))?;
+    let horizon_row =
+        max_gradient_row_in_range_excluding(&smoothed, row_lo, row_hi, row_exclusions)
+            .ok_or(HorizonError::InsufficientCandidates(0))?;
 
     // Per-column candidates in a window around horizon_row.
     let candidates = column_candidates_in_window(
@@ -414,16 +486,20 @@ fn smoothing_kernel_size(working_height: u32) -> usize {
     ((f64::from(working_height) * 0.03) as usize).max(2)
 }
 
-/// Find the row index in `[lo, hi)` with the largest
-/// `|profile[y+1] - profile[y-1]|`. Returns None if the profile is
-/// too short or the range is empty.
-fn max_gradient_row_in_range(profile: &[f64], lo: u32, hi: u32) -> Option<u32> {
+/// Same as [`max_gradient_row_in_range`] but additionally skips
+/// row indices that fall within any `(lo, hi)` exclusion range
+/// (inclusive on both ends). Used by the multi-pass detector to
+/// suppress already-found horizon rows.
+fn max_gradient_row_in_range_excluding(
+    profile: &[f64],
+    lo: u32,
+    hi: u32,
+    exclusions: &[(u32, u32)],
+) -> Option<u32> {
     let n = profile.len();
     if n < 3 {
         return None;
     }
-    // Honor the inclusive bounds against profile size, leaving 1
-    // pixel margin on each end for the gradient computation.
     let lo = lo.max(1) as usize;
     let hi = (hi as usize).min(n.saturating_sub(1));
     if lo >= hi {
@@ -432,10 +508,17 @@ fn max_gradient_row_in_range(profile: &[f64], lo: u32, hi: u32) -> Option<u32> {
     let mut best: f64 = 0.0;
     let mut best_y: u32 = 0;
     for y in lo..hi {
+        let y_u32 = y as u32;
+        if exclusions
+            .iter()
+            .any(|&(elo, ehi)| y_u32 >= elo && y_u32 <= ehi)
+        {
+            continue;
+        }
         let g = (profile[y + 1] - profile[y - 1]).abs();
         if g > best {
             best = g;
-            best_y = y as u32;
+            best_y = y_u32;
         }
     }
     if best > 0.0 {
@@ -443,6 +526,13 @@ fn max_gradient_row_in_range(profile: &[f64], lo: u32, hi: u32) -> Option<u32> {
     } else {
         None
     }
+}
+
+/// Find the row index in `[lo, hi)` with the largest
+/// `|profile[y+1] - profile[y-1]|`. Returns None if the profile is
+/// too short or the range is empty.
+fn max_gradient_row_in_range(profile: &[f64], lo: u32, hi: u32) -> Option<u32> {
+    max_gradient_row_in_range_excluding(profile, lo, hi, &[])
 }
 
 /// For each column, find the row in `[horizon_row - half,
@@ -624,5 +714,95 @@ mod tests {
             result,
             Err(HorizonError::InsufficientCandidates(0))
         ));
+    }
+
+    /// Multi-pass detection on a synthetic three-region scene:
+    /// dark sea (bottom) → dim sky (middle) → bright deck-glow
+    /// (top). The single-pass detector finds the strongest
+    /// transition (deck→sky); the multi-pass detector finds *both*
+    /// the deck-edge and the sea-sky horizon, ranked by inlier
+    /// count.
+    ///
+    /// This is the synthetic analog of `container_ship_night*`:
+    /// the scene has multiple horizontal luma transitions, and
+    /// only the lower one is the actual sea-sky horizon.
+    #[test]
+    fn multi_pass_finds_secondary_horizon() {
+        let w: u32 = 640;
+        let h: u32 = 360;
+        let mut pixels = vec![0u16; (w * h) as usize];
+        // Region 1: bright deck glow at top, y in [0, 100), luma 4000.
+        // Region 2: dim sky in y in [100, 250), luma 600.
+        // Region 3: dark sea in y in [250, 360), luma 200.
+        for y in 0..h {
+            let v = if y < 100 {
+                4000
+            } else if y < 250 {
+                600
+            } else {
+                200
+            };
+            for x in 0..w {
+                pixels[(y as usize) * (w as usize) + (x as usize)] = v;
+            }
+        }
+        let frame = Frame::new(
+            w,
+            h,
+            pixels,
+            Tt::from_julian_date(JD_J2000),
+            0,
+            Intrinsics::placeholder(w, h),
+        )
+        .unwrap();
+
+        // Single-pass: should find the deck→sky transition at y ≈ 100
+        // (much stronger than the sea-sky transition at y ≈ 250).
+        let single = detect_horizon_night(&frame, NightHorizonConfig::default()).unwrap();
+        assert!(
+            (single.intercept - 100.0).abs() < 10.0,
+            "single-pass should find the deck transition near y=100, got {}",
+            single.intercept,
+        );
+
+        // Multi-pass with 2+ passes should find both transitions.
+        let cfg = NightHorizonConfig {
+            max_passes: 3,
+            ..NightHorizonConfig::default()
+        };
+        let candidates = detect_horizon_night_multi_pass(&frame, cfg, None);
+        assert!(
+            candidates.len() >= 2,
+            "multi-pass should find at least 2 candidates; got {}",
+            candidates.len()
+        );
+        // One candidate should be near y=100 (deck), another near y=250 (sea horizon).
+        let near_deck = candidates
+            .iter()
+            .any(|h| (h.intercept - 100.0).abs() < 10.0);
+        let near_horizon = candidates
+            .iter()
+            .any(|h| (h.intercept - 250.0).abs() < 15.0);
+        assert!(
+            near_deck && near_horizon,
+            "multi-pass should find both deck (y~100) and sea horizon (y~250); \
+             got intercepts {:?}",
+            candidates.iter().map(|h| h.intercept).collect::<Vec<_>>(),
+        );
+    }
+
+    /// Multi-pass on a simple two-band scene returns only one
+    /// candidate (the second-pass row exclusion eats the only
+    /// real transition).
+    #[test]
+    fn multi_pass_on_simple_scene_returns_one_candidate() {
+        let frame = synth_night_scene(640, 360, 200, 800, 1500);
+        let candidates =
+            detect_horizon_night_multi_pass(&frame, NightHorizonConfig::default(), None);
+        assert!(!candidates.is_empty(), "should find at least one horizon");
+        assert!(
+            (candidates[0].intercept - 200.0).abs() < 5.0,
+            "primary candidate should be near true horizon"
+        );
     }
 }
