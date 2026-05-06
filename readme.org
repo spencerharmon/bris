@@ -8,15 +8,15 @@ and embedded Linux (Raspberry Pi Zero 2W class) which leverages only a camera
 to perform celestial navigation. The Rust core operates *continuously*: a
 device sweeps the sky (manually, by boat motion, or by a mechanical mount),
 and Bris automatically detects the horizon, identifies celestial bodies in
-view, selects the best ones for a fix, and publishes updated positions on
-its NMEA stream. The operator does not select bodies, trigger sights, or
-switch between day and night modes.
+view, picks the best sights for a fix, switches between day, twilight, and
+night detection methods as conditions change, and publishes updated
+positions on its NMEA stream.
 
 Two deployment patterns sit on top of the same core:
 - *Embedded / fixed install:* Pi Zero 2W on deck, running continuously,
   emitting NMEA to the boat's chartplotter. No local UI in the steady state.
 - *Mobile:* phone app with a session-based UX. The user taps "Take sight,"
-  is guided through a short sweep, and receives a single fix when uncertainty
+  is guided through a short sweep, and receives a fix when uncertainty
   drops below an acceptable threshold. The position is displayed on a map
   with multiple sharable coordinate formats. Native Android (Kotlin) and
   iOS (Swift) frontends call the Rust core via UniFFI.
@@ -45,28 +45,30 @@ richer observability formats (Prometheus, OTLP, dashboards) is the job
 of a separate downstream tool that consumes the NMEA stream, not Bris.
 
 * Design Decisions
-- *No Arduino target.* The full pipeline (stitching, segmentation, plate
-  solving) cannot fit on a microcontroller. The Pi Zero 2W is the minimum
-  embedded target, running a stripped Linux image with Bris as a systemd
-  service (embedded-Linux appliance model).
+- *Pi Zero 2W is the minimum embedded target.* The full pipeline
+  (stitching, segmentation, plate solving) needs a real OS and
+  several hundred MB of RAM; microcontrollers can't host it. Bris
+  ships as a systemd service on a stripped Linux image
+  (embedded-Linux appliance model).
 - *Single Rust core, native frontends.* The core crate is platform-agnostic.
   Mobile shells (Kotlin/Swift) and desktop/embedded shells call into it.
 - *Runtime almanac, not compile-time LUT.* Truncated VSOP87 (Sun, planets) and
-  ELP2000-82B (Moon) plus the Hipparcos/FK5 catalog with precession, nutation,
+  ELP2000-82B (Moon) plus the Yale BSC catalog with precession, nutation,
   proper motion, aberration, and refraction applied at runtime. Sub-arcsecond
   accuracy in well under 1 ms on a Pi Zero 2W. Optional Chebyshev caches if
   profiling demands them later.
-- *Classical computer vision throughout,* no ML:
-  - Horizon detection: edge + RANSAC line fit. Open-ocean horizons are
-    high-contrast linear features, which is exactly the case classical
-    methods handle well. Conditions that defeat classical CV (heavy fog,
-    severe glare, shore clutter) are also conditions in which a sight
-    should not be taken.
-  - Sun/Moon centroiding: thresholded ellipse fit with sub-pixel refinement.
-  - Star identification: geometric hash plate solving (Tetra3-style).
-  Result: deterministic, small binary, no inference runtime, easy to debug.
-- *Lens calibration* is a built-in user-facing workflow. Stitching more frames
-  trades compute time for accuracy; multi-minute fixes are acceptable.
+- *Classical computer vision where it works, ML where it doesn't.* Most
+  pipeline stages are classical: gradient/RANSAC horizon detection,
+  thresholded centroiding for the Sun/Moon, peak detection plus geometric-
+  hash plate solving (Tetra3-style) for stars. The exception is
+  cluttered-shipboard horizon detection, where deck and rigging defeat
+  classical edge methods; for those scenes Bris uses a SegFormer
+  segmentation model (sky/sea/vessel/obstruction classification) shipped
+  as a vendored ONNX file. Both classical and ML paths are exposed; the
+  pipeline picks per scene based on a luma-and-saturation classifier.
+- *Lens calibration* is a built-in user-facing workflow. Calibrated
+  intrinsics are the single biggest factor in absolute altitude
+  accuracy; see the accuracy section below.
 - *Time source* is the system monotonic + wall clock, NTP-disciplined when
   a network is available. Offshore operation (no NTP for weeks) is a primary
   use case: the application tracks last-sync age, detects clock steps,
@@ -75,6 +77,124 @@ of a separate downstream tool that consumes the NMEA stream, not Bris.
   uncertainty. Optional opt-in drift correction uses a persisted rate
   learned during prior NTP-synced periods.
 - *Output protocol:* NMEA 0183 first. NMEA 2000 deferred (license + hardware).
+
+* Accuracy and how to improve it
+
+Bris reports the 1σ uncertainty of every fix as a position covariance
+(via ~$GPGST~) and surfaces which error source currently dominates
+(via ~$PBRIS~). The numbers below describe how each source maps to a
+position uncertainty in nautical miles, so operators can read the
+diagnostics and act on them.
+
+** How angular error becomes position error
+
+Celestial navigation translates altitude measurements (the angle from
+the horizon up to a body) into lines of position. The geometry is
+direct: *one arcminute of altitude error is one nautical mile of
+position error along the line from the observer to the body's
+geographic position.* So:
+
+- 60 arcseconds (1') altitude error → 1 nm position error
+- 6 arcseconds altitude error → 0.1 nm
+- 0.6 arcseconds altitude error → 0.01 nm (≈ 18 m)
+
+A two-body fix combines two such lines; the resulting position
+uncertainty is approximately the per-sight error divided by sin(angle
+between azimuths) — best when the bodies are 90° apart, worst when
+they're nearly co-azimuthal.
+
+** Per-source error budget
+
+Each contribution below adds in quadrature into the per-sight altitude
+σ. Bris attributes the dominant source to ~$PBRIS,UNC,...~.
+
+- *Camera intrinsics calibration* — the largest source on an
+  uncalibrated camera. With factory defaults (~placeholder
+  intrinsics~) absolute altitudes can be off by 2-3× the true value.
+  After a 10-minute calibration workflow with a printed checkerboard,
+  the residual contribution drops to ~10-30 arcsec. *Calibrate before
+  any sight you want to trust.*
+- *Body centroiding* — for a saturated Sun/Moon disk in a sharp frame,
+  sub-pixel refinement gives ~0.1 px σ, which translates to
+  approximately ~3-10 arcsec depending on focal length. Hazy or
+  partially-occluded bodies are worse.
+- *Horizon fit residual* — clean open-ocean horizons fit to ~1-2 px
+  RMS (5-15 arcsec). Cluttered shipboard scenes with the segmentation
+  detector hold similar values. Night scenes with the luma-boundary
+  detector are noisier (3-6 px RMS).
+- *Refraction model* — altitude-dependent. At 45° altitude the
+  Bennett model residual is ~0.1' (6 arcsec). Below 5° it grows
+  rapidly to several arcminutes. *Prefer sights between 20° and 70°
+  altitude.*
+- *Horizon dip from eye height* — about 1.76' × √(eye height in
+  meters), with σ proportional to the eye-height uncertainty Bris
+  records (default ±0.5 m, contributing ≤ 1 arcsec at typical
+  heights). Higher seas raise the effective uncertainty; the user can
+  widen it manually.
+- *Stitching alignment* — only contributes when the body and horizon
+  are not in the same frame (typical for telephoto captures at
+  moderate-to-high altitudes). Per-pair residuals are ~0.5-2 px;
+  sweeping slowly keeps these small.
+- *Time-since-sync* — affects longitude only, at *15 arcmin × cos(lat)
+  per second of clock error*. NTP-synced systems contribute < 1 ms
+  (negligible). Offshore for a week with a 1 ppm oscillator drift
+  accumulates ~0.6 s of error, which at 45° latitude is ~6 nm of
+  longitude uncertainty until the next sync. *Sync NTP before going
+  offshore; resync on return.*
+- *Almanac model* — VSOP87 + ELP2000-82B truncations contribute well
+  under 1 arcsec at all times. Negligible.
+
+** What the operator can do
+
+In rough order of impact:
+
+1. *Calibrate the camera.* Without this, every other improvement is
+   marginal. Bris's calibration workflow uses a printed checkerboard
+   and takes a few minutes per camera. Recalibrate after any lens
+   change or significant temperature shift.
+2. *Use a long focal length.* Each pixel covers fewer arcseconds, so
+   the same per-pixel centroiding error translates to less altitude
+   error. The trade-off is field of view: longer lenses need
+   stitching to cover the body-to-horizon span. Bris does the
+   stitching automatically; the operator's only job is to sweep
+   smoothly.
+3. *Take sights between 20° and 70° altitude.* Below 20°, refraction
+   model error dominates and grows nonlinearly toward the horizon.
+   Above 70°, the geometry of the line of position degrades (the
+   altitude circle's tangent line at the observer becomes nearly
+   parallel to itself). The 20°-70° band is the navigator's
+   traditional sweet spot for the same reason.
+4. *Use multiple azimuth-diverse bodies.* A two-body fix with 90°
+   between azimuths cuts position uncertainty in half compared to a
+   running fix on one body. At twilight Bris can plate-solve several
+   stars in a single frame, which is why navigators have always
+   prized morning and evening star fixes.
+5. *Keep eye height accurate.* The default ±0.5 m uncertainty
+   contributes only a few arcseconds of dip uncertainty at typical
+   heights, but in significant seas the *effective* eye height
+   varies by half the wave height; widen the uncertainty manually
+   to reflect this.
+6. *Sync the clock when you can.* Each second of clock error is
+   ~15 arcmin × cos(lat) of longitude error. NTP-disciplined when
+   the network exists; otherwise the drift-rate learning can hold
+   the line for days when enabled.
+7. *Sweep slowly.* When the body and horizon are in different
+   frames, stitching alignment quality depends on overlap. Slow
+   sweeps give better feature matches and tighter pose chains.
+
+** Per-platform considerations
+
+- *Phone (mobile session UX):* the hand-held use case faces shake
+  and limited focal length, but benefits from sub-arcsecond camera
+  calibration done at the factory and refined per-device. Practical
+  accuracy with the built-in camera and a calibrated lens: ~1-3 nm
+  for daytime Sun sights, comparable to handheld sextant practice.
+- *Embedded mount (Pi appliance):* a fixed long-focal-length camera
+  on a stable mount can do substantially better. The error budget
+  is bounded by calibration quality and the integration time of the
+  rolling sight window. Sub-nautical-mile fixes are achievable in
+  good conditions; rough seas and twilight scenes degrade
+  proportionally.
 
 * Architecture and pipeline
 For an end-to-end view of how the camera-frame stream becomes a
