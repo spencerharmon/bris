@@ -21,3 +21,6 @@ tracing.workspace = true
 [dev-dependencies]
 proptest.workspace = true
 approx.workspace = true
+bris-core.workspace = true
+bris-almanac.workspace = true
+image.workspace = true

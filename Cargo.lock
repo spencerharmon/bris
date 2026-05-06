@@ -201,6 +201,7 @@ dependencies = [
  "bris-almanac",
  "bris-core",
  "bris-vision",
+ "image",
  "proptest",
  "thiserror",
  "tracing",

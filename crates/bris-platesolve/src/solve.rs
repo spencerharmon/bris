@@ -185,7 +185,6 @@ pub fn plate_solve(
                             candidate_peaks,
                             catalog_pattern,
                             db,
-                            intrinsics,
                             &cfg,
                         ) {
                             if n_verified > best_verifications {
@@ -224,7 +223,6 @@ fn try_verify(
     peaks: &[Peak],
     catalog_pattern: &CatalogPattern,
     db: &StarHashDb,
-    intrinsics: &Intrinsics,
     cfg: &PlateSolveConfig,
 ) -> Option<(Attitude, Vec<IdentifiedStar>, usize)> {
     let catalog_vecs: [[f64; 3]; 4] = [
@@ -275,6 +273,19 @@ fn try_verify(
         }
 
         let mut n_verified = 0_usize;
+        // Track which peaks have already been claimed by an
+        // identified star, to enforce one-to-one matching. Without
+        // this, the verification loop accepts multiple catalog
+        // stars matching the same peak, producing a self-consistent
+        // but wrong rotation that "verifies" against the same
+        // peaks repeatedly. (Observed empirically on the
+        // night_test_highres scene where 4+ catalog stars at the
+        // same RA/Dec all matched the same pixel.)
+        let mut claimed_peaks = vec![false; peaks.len()];
+        // Mark the initial 4-tuple's peaks as claimed.
+        for &peak_idx in &tuple {
+            claimed_peaks[peak_idx] = true;
+        }
         for catalog_star in all_stars()
             .iter()
             .filter(|s| s.vmag <= db.config().mag_cutoff)
@@ -291,39 +302,36 @@ fn try_verify(
             }
             // Project to camera frame.
             let projected = rotate_vec(&rot, cv);
-            // Convert to pixel coords (only valid if z > 0; behind
-            // camera otherwise).
             if projected[2] <= 0.0 {
                 continue;
             }
-            let px = intrinsics.fx * projected[0] / projected[2] + intrinsics.cx;
-            let py = intrinsics.fy * projected[1] / projected[2] + intrinsics.cy;
+            let pp = normalize([projected[0], projected[1], projected[2]]);
 
-            // Find any detected peak within verify_match_radius.
+            // Find the *closest* unclaimed peak within
+            // verify_match_radius. One star ↔ at most one peak.
             let cos_match = cfg.verify_match_radius_rad.cos();
-            for (peak_idx, peak) in peaks.iter().enumerate() {
-                if tuple.contains(&peak_idx) {
+            let mut best_peak: Option<(usize, f64)> = None;
+            for (peak_idx, _) in peaks.iter().enumerate() {
+                if claimed_peaks[peak_idx] {
                     continue;
                 }
                 let pr = peak_rays[peak_idx];
-                let pp = normalize([projected[0], projected[1], projected[2]]);
                 let dot = pr[0] * pp[0] + pr[1] * pp[1] + pr[2] * pp[2];
-                if dot >= cos_match {
-                    n_verified += 1;
-                    identified.push(IdentifiedStar {
-                        pixel_x: peak.x,
-                        pixel_y: peak.y,
-                        hr: catalog_star.hr,
-                        ra_rad: catalog_star.ra_rad,
-                        dec_rad: catalog_star.dec_rad,
-                        vmag: catalog_star.vmag,
-                    });
-                    // Suppress unused-var warning for px/py — keep
-                    // them computed because future per-pixel
-                    // tolerance branches will use them.
-                    let _ = (px, py);
-                    break;
+                if dot >= cos_match && best_peak.is_none_or(|(_, best_dot)| dot > best_dot) {
+                    best_peak = Some((peak_idx, dot));
                 }
+            }
+            if let Some((peak_idx, _)) = best_peak {
+                n_verified += 1;
+                claimed_peaks[peak_idx] = true;
+                identified.push(IdentifiedStar {
+                    pixel_x: peaks[peak_idx].x,
+                    pixel_y: peaks[peak_idx].y,
+                    hr: catalog_star.hr,
+                    ra_rad: catalog_star.ra_rad,
+                    dec_rad: catalog_star.dec_rad,
+                    vmag: catalog_star.vmag,
+                });
             }
         }
 
