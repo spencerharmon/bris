@@ -38,7 +38,7 @@ pub use io::{
     load_frame_from_path, load_frame_from_path_with_rotation, save_frame_as_png, LoadError,
 };
 pub use lens::{distort_normalized, pixel_ray_direction, project_pinhole, undistort_pixel};
-pub use measure::{measure_altitude, MeasurementError};
+pub use measure::{measure_altitude, measure_altitude_from_ray, MeasurementError};
 pub use night_horizon::{
     detect_horizon_night, detect_horizon_night_excluding_body, detect_horizon_night_multi_pass,
     detect_horizon_night_with_column_mask, NightHorizonConfig,

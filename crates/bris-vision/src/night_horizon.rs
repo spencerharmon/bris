@@ -192,8 +192,8 @@ pub fn detect_horizon_night_with_column_mask(
     cfg: NightHorizonConfig,
     column_mask: Option<&[bool]>,
 ) -> Result<HorizonLine, HorizonError> {
-    let mut row_exclusions: Vec<(u32, u32)> = Vec::new();
-    detect_horizon_night_inner(frame, cfg, column_mask, &mut row_exclusions)
+    let row_exclusions: Vec<(u32, u32)> = Vec::new();
+    detect_horizon_night_inner(frame, cfg, column_mask, &row_exclusions)
 }
 
 /// Multi-pass variant: run the detector multiple times, each time
@@ -224,7 +224,7 @@ pub fn detect_horizon_night_multi_pass(
     let working_height = (f64::from(frame.height()) / scale).round() as u32;
 
     for _ in 0..cfg.max_passes.max(1) {
-        match detect_horizon_night_inner(frame, cfg, column_mask, &mut row_exclusions) {
+        match detect_horizon_night_inner(frame, cfg, column_mask, &row_exclusions) {
             Ok(line) => {
                 // Convert the found line's full-resolution
                 // intercept back to a working-image row, then mask
@@ -486,8 +486,9 @@ fn smoothing_kernel_size(working_height: u32) -> usize {
     ((f64::from(working_height) * 0.03) as usize).max(2)
 }
 
-/// Same as [`max_gradient_row_in_range`] but additionally skips
-/// row indices that fall within any `(lo, hi)` exclusion range
+/// Find the row index in `[lo, hi)` with the largest
+/// `|profile[y+1] - profile[y-1]|`, additionally skipping any
+/// row indices that fall within any `(elo, ehi)` exclusion range
 /// (inclusive on both ends). Used by the multi-pass detector to
 /// suppress already-found horizon rows.
 fn max_gradient_row_in_range_excluding(
@@ -528,9 +529,11 @@ fn max_gradient_row_in_range_excluding(
     }
 }
 
-/// Find the row index in `[lo, hi)` with the largest
-/// `|profile[y+1] - profile[y-1]|`. Returns None if the profile is
-/// too short or the range is empty.
+/// Same as [`max_gradient_row_in_range_excluding`] with an empty
+/// exclusion list. Currently unused outside tests; kept for the
+/// documented API shape and for consumers who want a single-row
+/// search without the exclusion-list overhead.
+#[cfg(test)]
 fn max_gradient_row_in_range(profile: &[f64], lo: u32, hi: u32) -> Option<u32> {
     max_gradient_row_in_range_excluding(profile, lo, hi, &[])
 }

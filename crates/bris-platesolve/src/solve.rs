@@ -227,6 +227,7 @@ pub fn plate_solve(
 ///      into the camera frame; count how many land near a detected
 ///      peak.
 ///   4. Return the permutation with the highest verification count.
+#[allow(clippy::too_many_lines)] // single-purpose verification routine; splitting hurts readability
 fn try_verify(
     tuple: [usize; 4],
     peak_rays: &[[f64; 3]],
@@ -369,7 +370,10 @@ fn try_verify(
         for ident in &identified[4..] {
             let cv = ra_dec_to_unit_vec(ident.ra_rad, ident.dec_rad);
             // Find the peak ray by matching pixel coords to the
-            // candidate_peaks slice.
+            // candidate_peaks slice. Exact float equality is
+            // intentional: pixel_x/pixel_y were copied directly
+            // from the same Peak struct, no arithmetic in between.
+            #[allow(clippy::float_cmp)]
             let pix_idx = peaks
                 .iter()
                 .position(|p| p.x == ident.pixel_x && p.y == ident.pixel_y);
@@ -379,9 +383,8 @@ fn try_verify(
             }
         }
 
-        let refined_rot = match kabsch_rotation(&all_catalog, &all_camera) {
-            Ok(r) => r,
-            Err(_) => continue,
+        let Ok(refined_rot) = kabsch_rotation(&all_catalog, &all_camera) else {
+            continue;
         };
         // Compute RMS angular residual under the refined rotation.
         let mut sum_sq: f64 = 0.0;

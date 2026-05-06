@@ -66,8 +66,35 @@ pub fn measure_altitude(
     horizon: HorizonLine,
     body: Centroid,
 ) -> Result<Uncertain<f64>, MeasurementError> {
-    // Convert body pixel to camera-frame ray.
     let body_ray = pixel_ray_direction(intr, body.x, body.y);
+    let centroid_sigma_rad = body.position_sigma_px.value() / intr.fy;
+    let body_sigma = Sigma::new(centroid_sigma_rad).unwrap_or(Sigma::ZERO);
+    measure_altitude_from_ray(intr, horizon, body_ray, body_sigma)
+}
+
+/// Compute the apparent altitude of a body given its camera-frame
+/// unit ray directly (skipping the pixel→ray conversion).
+///
+/// This is the entry point for plate-solving altitude extraction:
+/// after identifying a star, its camera-frame ray comes from the
+/// recovered attitude × J2000 unit vector — there's no pixel
+/// centroid to convert. The horizon plane and altitude math is
+/// identical to [`measure_altitude`].
+///
+/// `body_ray_sigma` is the 1σ angular uncertainty of the body
+/// ray itself, in radians. For a centroid-derived ray it's
+/// `position_sigma_px / fy`; for a plate-solved star ray it's the
+/// per-star pose residual from the Kabsch refinement.
+///
+/// # Errors
+///
+/// See [`MeasurementError`].
+pub fn measure_altitude_from_ray(
+    intr: Intrinsics,
+    horizon: HorizonLine,
+    body_ray: (f64, f64, f64),
+    body_ray_sigma: Sigma,
+) -> Result<Uncertain<f64>, MeasurementError> {
     let body_vec = (body_ray.0, body_ray.1, body_ray.2);
 
     // Pick two well-separated points on the horizon line.
@@ -85,10 +112,6 @@ pub fn measure_altitude(
     let p1_vec = (p1_ray.0, p1_ray.1, p1_ray.2);
     let p2_vec = (p2_ray.0, p2_ray.1, p2_ray.2);
 
-    // Normal to the horizon plane: cross product. The sign convention
-    // is chosen so the normal points toward image-y < horizon (i.e.
-    // upward in the image, which corresponds to "up" in the world for
-    // a roughly level camera).
     let normal = cross(p1_vec, p2_vec);
     let normal_norm = norm(normal);
     if !normal_norm.is_finite() || normal_norm < 1e-12 {
@@ -100,16 +123,8 @@ pub fn measure_altitude(
         normal.2 / normal_norm,
     );
 
-    // The cross product's sign depends on point order. We need the
-    // normal pointing "up" (away from where the body should be when
-    // above the horizon). For the camera convention (image +y down),
-    // p1.x < p2.x, the cross product points in +y if both rays are
-    // near +z. Flip if the resulting normal has negative y in image
-    // space — equivalently, ensure the normal's "up" direction points
-    // away from the body when the body is above horizon.
-    //
-    // Heuristic: sample a point well above the horizon line in image
-    // coords (smaller y) and verify dot(normal, sample_ray) > 0.
+    // Sign convention: the normal should point "up" away from
+    // image-space where the body sits when above the horizon.
     let sample_y = horizon.intercept - 100.0;
     let sample_ray = pixel_ray_direction(intr, 500.0, sample_y);
     let sample_vec = (sample_ray.0, sample_ray.1, sample_ray.2);
@@ -117,8 +132,6 @@ pub fn measure_altitude(
         normal = (-normal.0, -normal.1, -normal.2);
     }
 
-    // Altitude = π/2 − angle(body, normal) when normal is the "up"
-    // direction. Equivalently, altitude = arcsin(dot(body, normal)).
     let cos_complement = dot(body_vec, normal).clamp(-1.0, 1.0);
     let altitude = cos_complement.asin();
 
@@ -129,11 +142,7 @@ pub fn measure_altitude(
         return Err(MeasurementError::BelowHorizon);
     }
 
-    // Uncertainty: horizon altitude σ + centroid σ converted to angular σ.
-    let centroid_sigma_rad = body.position_sigma_px.value() / intr.fy;
-    let centroid_sigma = Sigma::new(centroid_sigma_rad).unwrap_or(Sigma::ZERO);
-    let total_sigma = horizon.altitude_sigma.combine(centroid_sigma);
-
+    let total_sigma = horizon.altitude_sigma.combine(body_ray_sigma);
     Ok(Uncertain::new(altitude, total_sigma))
 }
 

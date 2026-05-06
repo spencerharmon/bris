@@ -73,10 +73,12 @@
     clippy::needless_range_loop
 )]
 
+mod altitude;
 mod hash;
 mod kabsch;
 mod solve;
 
+pub use altitude::{star_altitude, star_altitudes, StarAltitude};
 pub use hash::{
     pattern_hash, ra_dec_to_unit_vec, CatalogPattern, PatternHash, StarHashDb, StarHashDbConfig,
 };
