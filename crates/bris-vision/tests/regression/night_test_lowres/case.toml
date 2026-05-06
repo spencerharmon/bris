@@ -60,17 +60,22 @@
 # a 60% increase in 24 pixels, by far the sharpest transition in
 # the lower half.
 #
-# Either signal is detectable. The right algorithm is something
-# like: detect the moon, build a 2D mask around it, then run a
-# per-row std-dev (or contrast-stretched per-row mean) gradient
-# search restricted to rows below the masked region. The
-# motivating use case for this case file is to drive that
-# algorithm's design and acceptance criteria.
+# # Detector implemented: detect_horizon_night_textured
 #
-# Until that algorithm lands, the existing detectors all fail and
-# this case stays kind = "working" only because the centroid +
-# classifier behavior is correct; the horizon is documented as a
-# known failure that has a clear path forward.
+# bris-vision::night_horizon::detect_horizon_night_textured uses
+# the per-row std-dev signal directly. On this scene it lands at
+# y ≈ 1329 — within ~20 px of the visible horizon. It works *even
+# without the moon mask*, because the moon's bright halo doesn't
+# generate texture (only mean-luma signal), so the std-dev
+# detector is naturally blind to it.
+#
+# Validated by the
+# night_test_lowres_textured_detector_finds_horizon static
+# regression test in regression_test.rs. The body-excluding
+# variant (detect_horizon_night_textured_excluding_body) gives
+# the same result on this scene; it's exercised in the same test
+# defensively against future regressions in the masking
+# machinery.
 #
 # # Empirical
 #   - Classifier correctly says Night (mean luma 0.024). Confidence
@@ -80,23 +85,30 @@
 #   - Centroid finds the moon at (454, 350) on an 812-pixel bright
 #     component. **This is the user's stated success criterion:
 #     "moon centroiding *should* work."** It does.
-#   - All three default horizon detectors fail. The night detector
-#     finds the moon halo's edge, not the actual horizon at
-#     y≈1310-1330.
+#   - The textured-water detector finds the horizon at y ≈ 1329.
+#     **This is the second success criterion**: with the right
+#     detector, the horizon is now extractable.
+#   - The three default horizon detectors (gradient, sky-region,
+#     segmentation) still fail. The original night detector
+#     (mean-gradient based) finds the moon halo's edge instead of
+#     the horizon. None of these are wrong assertions — the
+#     textured detector is the right tool for this scene, and the
+#     case.toml below documents both the failures (for regression
+#     detection) and the working path (in the docstring above and
+#     the dedicated regression test).
 #
-# # Path forward (drives a new algorithm in plan.org)
+# # Future work
 #
-# 1. Detect the moon (saturated centroid, already works).
-# 2. Build a 2D box mask around the moon centroid, padded
-#    generously to cover the halo (~3-5× moon radius).
-# 3. Restrict horizon search to rows below the masked region.
-# 4. Use *per-row std-dev* (or contrast-stretched per-row mean)
-#    as the transition signal, not raw per-row mean luma.
-# 5. The horizon is the row where std-dev jumps sharply upward.
+# The streaming engine should pick the right detector per scene.
+# Likely heuristic: when the classifier says Night and a
+# saturated body is present, run both the mean-gradient and
+# textured detectors; pick the one with the higher inlier
+# fraction (or run both and keep both candidates for downstream
+# disambiguation). Tracked in plan.org as Phase 3.5 work.
 
 [case]
 name         = "night_test_lowres"
-description  = "Cellphone night shot; bright moon; faint horizon at y≈1310-1330 detectable via per-row std-dev or contrast-stretched per-row mean once moon is masked as 2D box"
+description  = "Cellphone night shot; bright moon; horizon at y≈1329 found by detect_horizon_night_textured (per-row std-dev). Default mean-gradient detectors find moon halo's edge instead."
 kind         = "working"
 frame_count  = 1
 frame_width  = 1080
@@ -140,4 +152,4 @@ notes         = "Sky-region detector requires a brightness percentile to identif
 outcome       = "err"
 error_variant = "only 90 inliers"
 correctness   = "wrong"
-notes         = "ADE20K-trained model finds some sky/sea structure but RANSAC rejects most as outliers. A night-domain segmentation model would help, but the per-row std-dev signal described above is a simpler classical-CV path that doesn't require any new model."
+notes         = "ADE20K-trained model finds some sky/sea structure but RANSAC rejects most as outliers. The textured detector (above) is the working path; the segmentation detector would still be useful as a per-frame quality vote in the future streaming engine."

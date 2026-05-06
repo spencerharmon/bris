@@ -40,8 +40,10 @@ pub use io::{
 pub use lens::{distort_normalized, pixel_ray_direction, project_pinhole, undistort_pixel};
 pub use measure::{measure_altitude, measure_altitude_from_ray, MeasurementError};
 pub use night_horizon::{
-    detect_horizon_night, detect_horizon_night_excluding_body, detect_horizon_night_multi_pass,
-    detect_horizon_night_with_column_mask, NightHorizonConfig,
+    body_box_mask, detect_horizon_night, detect_horizon_night_excluding_body,
+    detect_horizon_night_multi_pass, detect_horizon_night_textured,
+    detect_horizon_night_textured_excluding_body, detect_horizon_night_textured_with_pixel_mask,
+    detect_horizon_night_with_column_mask, NightHorizonConfig, TexturedHorizonConfig,
 };
 pub use panorama::{panorama_altitude, panorama_altitude_with_detector, FrameRoles, PanoramaError};
 pub use peak::{detect_peaks, Peak, PeakConfig};

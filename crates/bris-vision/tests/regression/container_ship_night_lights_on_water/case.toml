@@ -57,6 +57,18 @@ notes     = "Image-only path on frame 0. Astronomical prior would say Night; dec
 # the actual sea horizon win the inlier competition; on frame.png
 # the deck top wins and there is no actual horizon transition for
 # the detector to find as a runner-up.
+#
+# # Per-frame assertion split
+#
+# The harness's [horizon.*] tables below apply only to frame 0
+# (frame.png — the adversarial state). Per-frame assertions for
+# frame_horizon_visible.png live in the dedicated static test
+# `container_ship_night_lights_on_water_horizon_visible_via_multi_pass`
+# in regression_test.rs, which uses the multi-pass detector and
+# asserts the city-lights horizon at y ≈ 241. Promoting the
+# case.toml schema to per-frame [horizon.{method}.{frame_name}]
+# tables is queued; for now the split between TOML (frame 0) and
+# static test (frame 1) is the documented convention.
 
 [horizon.gradient]
 outcome       = "err"

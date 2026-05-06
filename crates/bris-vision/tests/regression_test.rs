@@ -1314,3 +1314,79 @@ fn container_ship_night_lights_on_water_horizon_visible_via_multi_pass() {
         top.inlier_count,
     );
 }
+
+/// `night_test_lowres` revisited with the textured-water detector.
+/// The case.toml docstring describes the per-row std-dev signal
+/// that should locate the horizon at y ≈ 1310-1330 once the moon
+/// is masked out as a 2D box. This test asserts that
+/// [`detect_horizon_night_textured`] finds it.
+///
+/// Empirically the detector finds y ≈ 1329 *even without the
+/// moon mask*, because the moon's bright halo doesn't generate a
+/// texture-step signal — only mean-luma signal — so the
+/// std-dev-based detector is naturally blind to it. The body-
+/// excluding variant is exercised separately to confirm it
+/// produces the same result (defensive against regressions in
+/// the masking machinery).
+#[test]
+fn night_test_lowres_textured_detector_finds_horizon() {
+    use bris_core::time::{Tt, JD_J2000};
+    use bris_vision::{
+        centroid_saturated_body_in_mask, detect_horizon_night_textured,
+        detect_horizon_night_textured_excluding_body, load_frame_from_path, Intrinsics,
+        SaturatedBodyConfig, TexturedHorizonConfig,
+    };
+    use std::path::Path;
+
+    let path = Path::new(harness::REGRESSION_DIR)
+        .join("night_test_lowres")
+        .join("frame.jpg");
+    let dims = image::image_dimensions(&path).expect("dims");
+    let intrinsics = Intrinsics::placeholder(dims.0, dims.1);
+    let frame = load_frame_from_path(&path, Tt::from_julian_date(JD_J2000), 0, intrinsics)
+        .expect("load frame");
+
+    // Unmasked path: the texture-step signal is so dominant on
+    // this scene that the moon's mean-luma halo doesn't interfere.
+    let line_unmasked = detect_horizon_night_textured(&frame, TexturedHorizonConfig::default())
+        .expect("textured detector should find the horizon on night_test_lowres");
+
+    // The actual sea horizon is at y ≈ 1310-1330 (recorded value
+    // ~1329; characterized in the case.toml docstring).
+    const HORIZON_Y: f64 = 1329.0;
+    const TOL_PX: f64 = 30.0;
+    assert!(
+        (line_unmasked.intercept - HORIZON_Y).abs() < TOL_PX,
+        "unmasked: expected intercept near {HORIZON_Y}, got {:.1}",
+        line_unmasked.intercept,
+    );
+
+    // Body-excluding variant: build the moon mask and re-run.
+    // Result should agree with the unmasked path within a small
+    // tolerance (the mask doesn't change much because the moon
+    // doesn't contaminate the texture signal anyway).
+    let moon = centroid_saturated_body_in_mask(&frame, SaturatedBodyConfig::default(), None)
+        .expect("moon present");
+    let radius = (f64::from(moon.area_px) / std::f64::consts::PI).sqrt();
+    let line_masked = detect_horizon_night_textured_excluding_body(
+        &frame,
+        TexturedHorizonConfig::default(),
+        moon.x,
+        moon.y,
+        radius,
+        100.0,
+    )
+    .expect("body-excluding textured detector should find the horizon");
+    assert!(
+        (line_masked.intercept - HORIZON_Y).abs() < TOL_PX,
+        "masked: expected intercept near {HORIZON_Y}, got {:.1}",
+        line_masked.intercept,
+    );
+    // The two should agree within a few pixels.
+    assert!(
+        (line_unmasked.intercept - line_masked.intercept).abs() < 10.0,
+        "unmasked ({:.1}) and masked ({:.1}) results should agree closely",
+        line_unmasked.intercept,
+        line_masked.intercept,
+    );
+}
