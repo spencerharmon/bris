@@ -23,12 +23,12 @@ For the end-to-end pipeline architecture and data flow, see
   infrastructure, day/night/twilight classifier, **column-mask
   surface for body-excluding horizon detection**. Calibration
   *workflow* and a streaming-engine quality knob remain.
-- **Phase 3 (plate solving) — v1 complete.** Tetra3-style geometric
-  hash database + Kabsch-based pose solver. End-to-end synthetic
-  round-trip works; real-data probe tests against night corpus
-  scenes run end-to-end. Per-star altitude extraction and
-  verification refinement (tighter RANSAC residual, magnitude
-  consistency, observer-location prior) remain.
+- **Phase 3 (plate solving) — complete.** Tetra3-style geometric
+  hash database + Kabsch-based pose solver + sub-arcmin residual
+  refinement + per-star altitude extraction. End-to-end synthetic
+  round-trip works; the night plate-solving pipeline now reaches
+  from peak detection through identified-stars to altitude
+  observations consumable by `bris-nav::sight`.
 - Phase 4 (sight reduction & fix) — 3 of 4 tasks; running fix
   remains.
 - Phase 5 (NMEA output) — 4 of 6 tasks; transport layer and OpenCPN
@@ -49,22 +49,91 @@ specific, named failure modes from the corpus.
 **Not started:** Phase 1.5 (time integrity), Phase 3.5
 (continuous-operation engine + day/night classifier integration),
 Phase 7 (mobile frontends), Phase 8 (validation), Phase 9
-(stretch). Phase 3 plate-solving v1 is complete; verification
-refinement and per-star altitude extraction remain as Phase 3
-follow-ups.
+(stretch). Phase 3 is complete except for two minor follow-ups
+(magnitude-consistency verification check, observer-location
+external prior) that are queued.
 
-**Workspace metrics:** 327 tests passing + 3 ignored
+**Workspace metrics:** 335 tests passing + 3 ignored
 (slow/release-only), 7 crates with active code, zero clippy
-warnings, zero `cargo fmt` diffs. Last commit: `a33ddea` —
-plate-solver verification enforces one-to-one peak↔star matching.
+warnings, zero `cargo fmt` diffs. Last commit: `0c68910` —
+per-star altitude extraction closes Phase 3.
 
 ---
 
 ## What we proved this session
 
-This session pushed forward five algorithm pieces, all motivated
+This session pushed forward eight algorithm pieces, all motivated
 by specific corpus failure modes from the previous session's
 data-collection pass.
+
+### Plate-solver refinement: sub-arcmin residual gate
+
+After the initial 4+verified-N match, the solver now re-runs
+Kabsch on all matched pairs and computes the RMS angular residual
+under the refined rotation. If the RMS exceeds
+`max_rms_residual_rad` (default 30 arcsec), the match is
+rejected as a false positive. This catches the v1 failure mode
+where loose 1° verify radius accepted geometrically-self-consistent
+but wrong sky regions: on `night_test_highres` the v1 returned a
+12-star "match" in the southern hemisphere; refinement correctly
+rejects it.
+
+A new unit test `refinement_rejects_random_peak_positions`
+asserts the solver returns Err on synthetic random peak
+positions. Without refinement it would have returned a self-
+consistent fabricated match.
+
+Real-data behavior post-refinement: with placeholder intrinsics
+the *correct* sky region also fails refinement (residuals can't
+be sub-arcmin when the pixel→ray mapping is wrong by 2-3×), so
+the post-refinement behavior on real footage is "no match
+returned" until calibration arrives. This is the *right* answer.
+
+### Multi-pass night-horizon detection
+
+`detect_horizon_night_multi_pass` enumerates the top-N
+horizontal luma transitions by repeatedly: find strongest, mask
+its row neighborhood, find next-strongest. Returns candidates
+sorted by RANSAC inlier count (best first).
+
+Empirical:
+- `night_test_highres`: single-pass found the wake region (66
+  inliers); multi-pass surfaces the actual sea-sky horizon (195
+  inliers) as the top candidate.
+- `container_ship_night`: single-pass found the deck top (105
+  inliers); multi-pass surfaces the sea horizon (164 inliers)
+  first.
+- `night_test_lowres`: still hard. The moon halo's transitions
+  dominate even after multi-pass exclusion; the explicit
+  `search_row_range` path remains the only working approach.
+- `container_ship_night_lights_on_water`: deck-light glow on
+  water produces multiple candidates in the deck/water region;
+  none is the actual horizon. Remains expected_failure.
+
+Two new corpus regression tests assert the multi-pass top
+candidate matches the actual horizon on the two scenes where
+it works.
+
+### Per-star altitude extraction
+
+`bris-platesolve::altitude::star_altitudes` converts each
+identified star from a `PlateSolveResult` into an altitude
+observation against an independently-measured horizon line.
+
+Math: catalog J2000 unit vector × attitude → camera-frame ray
+→ altitude via the existing horizon-plane geometry. A new sister
+function `bris-vision::measure_altitude_from_ray` takes a
+precomputed ray instead of a centroid pixel; the centroid-driven
+`measure_altitude` is a thin wrapper for backward compatibility.
+
+Below-horizon stars are silently skipped (they don't contribute
+observations but aren't an error condition for the batch). 3
+unit tests cover the synthetic cases; real-data validation
+requires calibrated intrinsics.
+
+This **closes Phase 3** structurally. The night plate-solving
+pipeline now reaches from peak detection through identified-stars
+to altitude observations that `bris-nav::sight` can consume.
 
 ### Plate solving (Phase 3 v1)
 
@@ -334,60 +403,41 @@ case.
 
 ## Next concrete steps (recommended ordering)
 
-### Plate-solving refinements (Phase 3 follow-up)
+### Plate-solver minor follow-ups (Phase 3 polish)
 
-The v1 solver works end-to-end on synthetic + real-data probes
-but produces self-consistent matches that may not be the *right*
-sky region (loose 1° verification radius, no external priors).
-Three follow-ups, in order of independence:
+Phase 3 is structurally complete; two low-priority refinements
+remain:
 
-1. **Sub-pixel residual RANSAC** in verification: after the
-   initial 4+verified-N match, re-fit the rotation with only
-   inliers under a pixel-level residual threshold. Reject if
-   the residual exceeds a per-fix σ floor. Most impactful
-   single fix; tightens false-positive rate dramatically.
+1. **Magnitude consistency check** in verification: catalog
+   magnitudes for matched stars should correlate with peak
+   intensities. A bright peak matched to a dim catalog star (or
+   vice versa) is a flag.
 
-2. **Magnitude consistency check**: catalog magnitudes for
-   matched stars should correlate with peak intensities. A
-   bright peak matched to a dim catalog star (or vice versa)
-   is a flag.
-
-3. **External prior** (Phase 7-relevant): when an observer
+2. **External prior** (Phase 7-relevant): when an observer
    location and capture time are available, only consider
    candidate matches whose sky region is above the horizon at
    that observer/time.
 
-### Per-star altitude extraction
-
-With attitude + identified star RA/Dec + an observed horizon
-line, compute each star's altitude in the frame and the
-corresponding sight observation. Requires:
-- Calibrated camera intrinsics (placeholder makes the per-star
-  altitude wrong by the same calibration factor as everywhere
-  else).
-- A horizon line. The night-horizon detector finds *something*
-  horizontal but isn't always right; combining with plate
-  solving could be a virtuous loop — plate-solved stars with
-  known altitudes constrain where the horizon "should" be.
+Both are quality-of-output improvements rather than
+correctness fixes; the refinement-residual gate already filters
+the most egregious false matches.
 
 ### Algorithm refinements motivated by the corpus
 
-1. **Multi-pass night horizon detector** — find strongest
-   gradient, mask its neighborhood, find next-strongest. The
-   horizon is often the second-strongest when a deck or saturated
-   body is in frame.
-
-2. **Deck-excluding row-range for night detector** — analogous to
+1. **Deck-excluding row-range for night detector** — analogous to
    `body_column_mask` but for excluding a row range below a
-   detected deck top. Resolves `container_ship_night*`.
+   detected deck top. The multi-pass detector handles
+   `container_ship_night` already (the deck top is found in
+   pass 1, the actual horizon in pass 2 with stronger
+   consensus); deck-exclusion would be cleaner still.
 
-3. **Combine night detector with segmentation prior** — when the
+2. **Combine night detector with segmentation prior** — when the
    segmentation model produces a sky/sea boundary on a night scene
    (it sometimes does, e.g. `night_test_highres`), use that
    directly; fall back to the luma-boundary detector when
    segmentation fails.
 
-4. **Auto-relax inlier-fraction for low-altitude scenes** — when
+3. **Auto-relax inlier-fraction for low-altitude scenes** — when
    a body is detected near the horizon (within a configurable
    altitude threshold), relax the horizon detector's
    `min_inlier_fraction` automatically. Resolves `sunrise` under

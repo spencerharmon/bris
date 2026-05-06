@@ -529,15 +529,6 @@ fn max_gradient_row_in_range_excluding(
     }
 }
 
-/// Same as [`max_gradient_row_in_range_excluding`] with an empty
-/// exclusion list. Currently unused outside tests; kept for the
-/// documented API shape and for consumers who want a single-row
-/// search without the exclusion-list overhead.
-#[cfg(test)]
-fn max_gradient_row_in_range(profile: &[f64], lo: u32, hi: u32) -> Option<u32> {
-    max_gradient_row_in_range_excluding(profile, lo, hi, &[])
-}
-
 /// For each column, find the row in `[horizon_row - half,
 /// horizon_row + half]` where the absolute vertical gradient is
 /// largest. Emit as a candidate if it exceeds `threshold`.

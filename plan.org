@@ -672,13 +672,42 @@ references to the regression tests that pin the behavior. See
    sometimes a deck/wake/halo edge. The follow-up tasks below
    address the disambiguation problem.
 
-** TODO Multi-pass night-horizon detection
-   Find strongest gradient, mask its neighborhood, find next-
-   strongest. The horizon is often the second- or third-strongest
-   gradient when a deck or saturated body is in frame. Resolves
-   ~container_ship_night~, ~night_test_highres~, and reduces the
-   need for manual ~search_row_range~ tuning on
-   ~night_test_lowres~.
+** DONE Multi-pass night-horizon detection
+   Implemented as
+   ~bris-vision::night_horizon::detect_horizon_night_multi_pass~.
+   Repeatedly: find strongest gradient row in the search range
+   excluding rows already claimed by previous passes, run the
+   per-column candidate extraction + RANSAC fit, mask a window
+   around the found row for the next pass. Returns up to
+   ~max_passes~ candidates sorted by RANSAC inlier count
+   (best first).
+
+   *Empirical results on the night corpus:*
+   - ~night_test_highres~: single-pass finds the wake region at
+     y=180 (66 inliers); multi-pass finds the actual sea-sky
+     horizon at y=77 (195 inliers) on its second pass and
+     surfaces it as the top candidate.
+   - ~container_ship_night~: single-pass finds the deck top at
+     y=329 (105 inliers); multi-pass finds the actual sea
+     horizon at y=247 (164 inliers) on its second pass.
+   - ~night_test_lowres~: still hard. Multi-pass finds three
+     candidates including the moon halo's edge but not the
+     actual sea horizon (around y=1300 in the portrait frame);
+     the search_row_range default of (0.0, 1.0) means the moon
+     halo's transitions still dominate even after exclusion.
+     The
+     ~night_test_lowres_horizon_findable_with_tuned_search_range~
+     test remains the working path for this scene — explicit
+     ~search_row_range~ is needed when the moon halo extends well
+     beyond a simple exclusion radius.
+   - ~container_ship_night_lights_on_water~: deck-light glow on
+     water produces multiple candidates in the deck/water region.
+     None is the actual horizon (~y=235); this remains an
+     expected-failure scene as previously documented.
+
+   The single-pass entry shares an internal implementation with
+   multi-pass; multi-pass is not strictly more expensive when
+   ~max_passes = 1~.
 
 ** TODO Deck-excluding row-range for night detector
    Analogous to ~body_column_mask~ but for excluding a row range
@@ -823,26 +852,57 @@ references to the regression tests that pin the behavior. See
      - External priors (observer location + capture time + IMU)
        to constrain candidate sky regions geometrically.
 
-** TODO Verification refinement to reduce false matches
-   The v1 verification uses a 1° match radius, which is loose
-   enough that multiple sky regions can produce self-consistent
-   matches against a given star pattern. Tighten via:
+** DONE Verification refinement to reduce false matches
+   Implemented as a refinement step in ~try_verify~: after the
+   loose-radius (1°) verification loop produces a candidate
+   (initial 4 + verified-N) match, re-run Kabsch on all matched
+   pairs and compute the RMS angular residual under the refined
+   rotation. Reject the match if the RMS exceeds
+   ~max_rms_residual_rad~ (default 30 arcsec).
 
-   - Sub-pixel residual RANSAC: after the initial 4+verified-N
-     match, re-fit the rotation with only inliers under a
-     pixel-level residual threshold; reject if the residual
-     exceeds a per-fix σ floor.
-   - Magnitude consistency check: catalog magnitudes for matched
-     stars should correlate with peak intensities. A bright peak
-     matched to a dim catalog star (or vice versa) is a flag.
-   - External prior: when an observer location and capture time
-     are available (mobile case, future Phase 7), only consider
-     candidate matches whose sky region is above the horizon at
-     that observer/time.
+   *Empirical impact:* on ~night_test_highres~ the v1 returned a
+   12-star "match" in the southern hemisphere; refinement
+   correctly rejects it as a false-positive. With placeholder
+   intrinsics the *correct* sky region also fails refinement
+   (residuals can't be sub-arcmin when the pixel→ray mapping is
+   wrong by 2-3×), so the post-refinement behavior on real
+   footage is "no match returned" until calibration arrives.
 
-** TODO Per-star altitude extraction
-   For each identified star above horizon, compute measured altitude
-   using the same pipeline as day mode.
+   Also enforced one-to-one peak↔star matching in the
+   verification loop (separate fix in commit a33ddea): without
+   it, the loose-radius verifier accepted multiple catalog stars
+   matching the same peak, inflating verification counts.
+
+   Two follow-ups remain (less critical now that refinement is
+   in place):
+   - Magnitude consistency check.
+   - External prior (observer location + time) to constrain
+     candidate sky regions geometrically.
+
+** DONE Per-star altitude extraction
+   Implemented in ~bris-platesolve::altitude::star_altitudes~:
+   convert each identified star from a ~PlateSolveResult~ into an
+   altitude observation against an independently-measured horizon
+   line.
+
+   Math: catalog J2000 unit vector × attitude → camera-frame ray
+   → altitude via ~bris-vision::measure_altitude_from_ray~ (a new
+   sister function to ~measure_altitude~ that takes a precomputed
+   ray instead of a centroid pixel).
+
+   Per-star σ comes from the caller (typically the plate-solve
+   refinement RMS) and is combined in quadrature with the horizon
+   fit's altitude σ.
+
+   Below-horizon stars are silently skipped — they don't
+   contribute observations but aren't an error condition for the
+   batch.
+
+   This closes Phase 3: the night plate-solving pipeline now
+   reaches from peak detection through identified-stars to
+   altitude observations that ~bris-nav::sight~ can consume.
+   Same calibration story as elsewhere: placeholder intrinsics
+   make absolute altitudes wrong by the calibration factor.
 
    *Status:* unimplemented. Requires:
      - Calibrated camera intrinsics (placeholder makes the per-
