@@ -731,7 +731,7 @@ references to the regression tests that pin the behavior. See
    footage.
 
 * Phase 3: Plate solving (night)
-** TODO Star detection in frame
+** DONE Star detection in frame
    *Status:* peak detection primitive exists in ~bris-vision::peak~
    (~detect_peaks~). Hot-pixel rejection via min-area + non-max
    suppression. PSF/magnitude estimation not yet implemented but
@@ -744,6 +744,10 @@ references to the regression tests that pin the behavior. See
    reduced intensity (29000 in ~frame_obscured.png~), confirming
    the detector is sensitive enough for non-saturated bodies.
 
+   On ~night_test_highres~ the detector finds 200 peaks against
+   the dark night sky; on ~container_ship_night~ a smaller set of
+   star peaks plus deck-light reflections.
+
    *Caveat from corpus probing:* on daylight scenes the peak
    detector subtracts a local background (33×33 box mean), which
    means the saturated Sun against bright haze produces a low
@@ -752,15 +756,104 @@ references to the regression tests that pin the behavior. See
    dark sky and stars stand out by absolute brightness), but means
    the peak detector is *not* a substitute for the saturated-body
    centroider on daylight Sun/Moon scenes.
-** TODO Geometric hash database
-   Build at compile time from the embedded star catalog. Tetra3-style
-   4-star pattern hashing. Tunable FOV range.
-** TODO Matcher
-   Query hash → candidate matches → geometric verification → camera
-   pose (RA/Dec of optical axis + roll). Confidence score.
+
+** DONE Geometric hash database
+   Implemented in ~bris-platesolve::hash::StarHashDb~. For each
+   catalog star (anchor), enumerates 4-tuples consisting of the
+   anchor + 3 of its M nearest neighbors within
+   ~max_pattern_diameter_rad~. Computes a quantized hash from the
+   6 pairwise distances of the 4-tuple (sort, normalize by
+   largest, quantize the 4 smaller ratios into ~bin_count~ bins
+   each). Inserts into ~HashMap<hash, Vec<CatalogPattern>>~.
+
+   The neighborhood approach (~O(N · M^3)~) is essential: naïve
+   ~O(N^4)~ enumeration is intractable at the catalog densities
+   Bris targets — mag 4.0 = ~500 stars = 2.6×10^10 4-tuples.
+   With ~neighbor_limit M = 20~ and mag cutoff 4.0, the database
+   has ~1M patterns and builds in well under a minute in release
+   mode.
+
+   Lookup probes the exact bin plus its 8 ±1-in-one-dimension
+   neighbors to handle quantization-edge cases.
+
+   Build is lazy at first call; not yet serialized via build.rs.
+   For the ~10s-30s release-mode build cost on full mag-5.5
+   catalog, consider a build.rs path later if startup latency
+   matters.
+
+** DONE Matcher
+   Implemented in ~bris-platesolve::solve::plate_solve~. Pipeline:
+
+   1. Map each detected peak to a unit ray in camera frame using
+      the camera's intrinsics.
+   2. Enumerate 4-tuples of the brightest N peaks (default 12),
+      compute the hash from the 6 pairwise angular distances, look
+      up matching catalog patterns.
+   3. For each candidate (peak 4-tuple, catalog 4-tuple) pair,
+      try all 24 permutations of star ↔ peak assignment. Run
+      Kabsch (closed-form least-squares rotation) to get an
+      attitude.
+   4. Verify by projecting *additional* catalog stars within the
+      candidate FOV into the camera frame and counting how many
+      land near a detected peak. Enforces one-to-one peak ↔ star
+      matching to avoid the false-positive trap where multiple
+      catalog stars collapse onto the same peak.
+   5. Return the highest-verification-count match if it exceeds
+      a confidence threshold.
+
+   Kabsch implemented via Jacobi-rotation SVD on a 3×3 matrix —
+   no external linear-algebra dependency. Handles the reflection
+   case correctly. ~50 lines of straightforward numerical code.
+
+   *Validated end-to-end* via the synthetic round-trip test
+   (~round_trip_recovers_known_attitude~, ~#[ignore]~ for slow
+   debug runs): builds a mag-4.0 db, picks a known sky region,
+   constructs a known attitude, projects all in-cone stars
+   through it to synthesize peaks, runs the solver, verifies the
+   recovered attitude maps the aim point near +Z. Passes in
+   release mode in ~30s.
+
+   *Real-data probes* (~tests/real_data.rs~,
+   ~#[ignore]~) demonstrate the solver runs end-to-end on
+   ~night_test_highres~ and ~container_ship_night~. Whether the
+   matched sky region is the *correct* one is a separate question
+   that requires either:
+     - Tighter verification (sub-pixel residual RANSAC instead of
+       a 1° verify radius).
+     - External priors (observer location + capture time + IMU)
+       to constrain candidate sky regions geometrically.
+
+** TODO Verification refinement to reduce false matches
+   The v1 verification uses a 1° match radius, which is loose
+   enough that multiple sky regions can produce self-consistent
+   matches against a given star pattern. Tighten via:
+
+   - Sub-pixel residual RANSAC: after the initial 4+verified-N
+     match, re-fit the rotation with only inliers under a
+     pixel-level residual threshold; reject if the residual
+     exceeds a per-fix σ floor.
+   - Magnitude consistency check: catalog magnitudes for matched
+     stars should correlate with peak intensities. A bright peak
+     matched to a dim catalog star (or vice versa) is a flag.
+   - External prior: when an observer location and capture time
+     are available (mobile case, future Phase 7), only consider
+     candidate matches whose sky region is above the horizon at
+     that observer/time.
+
 ** TODO Per-star altitude extraction
    For each identified star above horizon, compute measured altitude
    using the same pipeline as day mode.
+
+   *Status:* unimplemented. Requires:
+     - Calibrated camera intrinsics (placeholder makes the per-
+       star altitude wrong by the same calibration factor as any
+       other altitude).
+     - A horizon line (from the segmentation detector, the night
+       horizon detector, or — for headless deployment without a
+       visible horizon — a future IMU-prior path).
+     - Per-star σ propagation from the plate-solve residuals
+       through the lens model into the resulting altitude
+       observation.
 
 * Phase 3.5: Continuous operation & automatic body selection
   Bris is not a "press the button to take a sight" app. The intended model

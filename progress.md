@@ -23,6 +23,12 @@ For the end-to-end pipeline architecture and data flow, see
   infrastructure, day/night/twilight classifier, **column-mask
   surface for body-excluding horizon detection**. Calibration
   *workflow* and a streaming-engine quality knob remain.
+- **Phase 3 (plate solving) — v1 complete.** Tetra3-style geometric
+  hash database + Kabsch-based pose solver. End-to-end synthetic
+  round-trip works; real-data probe tests against night corpus
+  scenes run end-to-end. Per-star altitude extraction and
+  verification refinement (tighter RANSAC residual, magnitude
+  consistency, observer-location prior) remain.
 - Phase 4 (sight reduction & fix) — 3 of 4 tasks; running fix
   remains.
 - Phase 5 (NMEA output) — 4 of 6 tasks; transport layer and OpenCPN
@@ -40,23 +46,69 @@ assertions, ambiguous sun glow). The user's full `test_video/`
 corpus is exercised end-to-end. Algorithm work is now driven by
 specific, named failure modes from the corpus.
 
-**Not started:** Phase 1.5 (time integrity), Phase 3 (plate solving
-— next up), Phase 3.5 (continuous-operation engine + day/night
-classifier integration), Phase 7 (mobile frontends), Phase 8
-(validation), Phase 9 (stretch).
+**Not started:** Phase 1.5 (time integrity), Phase 3.5
+(continuous-operation engine + day/night classifier integration),
+Phase 7 (mobile frontends), Phase 8 (validation), Phase 9
+(stretch). Phase 3 plate-solving v1 is complete; verification
+refinement and per-star altitude extraction remain as Phase 3
+follow-ups.
 
-**Workspace metrics:** 312 tests passing, 7 crates with active
-code, zero clippy warnings, zero `cargo fmt` diffs. Last commit:
-`e8bed24` — `marina_with_body` case demonstrating peak-detection
-of the dusk Moon behind swinging rigging.
+**Workspace metrics:** 327 tests passing + 3 ignored
+(slow/release-only), 7 crates with active code, zero clippy
+warnings, zero `cargo fmt` diffs. Last commit: `a33ddea` —
+plate-solver verification enforces one-to-one peak↔star matching.
 
 ---
 
 ## What we proved this session
 
-This session pushed forward four algorithm pieces, all motivated
+This session pushed forward five algorithm pieces, all motivated
 by specific corpus failure modes from the previous session's
 data-collection pass.
+
+### Plate solving (Phase 3 v1)
+
+`bris-platesolve` is no longer a stub. End-to-end pipeline:
+
+- `StarHashDb::build` enumerates 4-star patterns from the
+  embedded BSC catalog using a neighborhood approach
+  (`O(N · M^3)` per anchor, where M = `neighbor_limit`),
+  computes a quantized hash from the 4 normalized pairwise
+  distance ratios, and stores in a `HashMap<hash,
+  Vec<CatalogPattern>>`. The neighborhood approach is essential
+  — naïve `O(N^4)` enumeration is intractable at the catalog
+  densities Bris targets.
+
+- `plate_solve` maps detected peaks to camera-frame unit rays,
+  enumerates 4-tuples of the brightest peaks, hashes each,
+  looks up matching catalog patterns, and verifies via
+  Kabsch-based pose recovery (closed-form least-squares
+  rotation; SVD via Jacobi rotation, no external linear-
+  algebra dep) plus projection of additional catalog stars
+  with one-to-one peak↔star matching.
+
+- The synthetic round-trip test (`#[ignore]` for slow debug;
+  passes in release in ~30s) builds a mag-4.0 db, picks a known
+  sky region, constructs a known attitude, projects in-cone
+  stars through it, and verifies the solver recovers an
+  attitude that maps the aim point near +Z.
+
+- Real-data probes (`tests/real_data.rs`, also `#[ignore]`)
+  load `night_test_highres` and `container_ship_night` from the
+  bris-vision corpus, run the full pipeline, and report the
+  best match. The solver runs end-to-end and produces 12+
+  identified stars on `night_test_highres`. Whether the matched
+  sky region is the *correct* one is a separate question that
+  requires tighter verification (sub-pixel residual RANSAC),
+  stricter match radius, or external priors — tracked as the
+  Phase 3 verification-refinement follow-up.
+
+- An empirical finding caught during real-data probing: the
+  initial verification accepted multiple catalog stars matching
+  the same peak (4+ at one pixel on `night_test_highres`),
+  inflating verification counts and producing self-consistent
+  but meaningless matches. Fix: enforce one-to-one peak↔star
+  matching in the verification loop (`a33ddea`).
 
 ### `centroid_saturated_body_in_mask` for Sun/Moon localization
 
@@ -282,25 +334,41 @@ case.
 
 ## Next concrete steps (recommended ordering)
 
-### Plate solving (Phase 3) — the next major piece
+### Plate-solving refinements (Phase 3 follow-up)
 
-Tetra3-style 4-star geometric hash matcher against the embedded
-Yale BSC catalog. Unlocks night fixes from peak detections on
-`night_test_highres` and `container_ship_night`. Requires:
+The v1 solver works end-to-end on synthetic + real-data probes
+but produces self-consistent matches that may not be the *right*
+sky region (loose 1° verification radius, no external priors).
+Three follow-ups, in order of independence:
 
-- Build-time hash database generation (one entry per 4-star
-  pattern within a configurable FOV; hashed on the 4 pairwise
-  distances or distance ratios).
-- Runtime matcher (for each 4-tuple of bright peaks, compute hash,
-  look up matches, verify by additional star geometry, output
-  camera RA/Dec/roll if confident).
-- Per-star altitude extraction (using camera pose + identified
-  star RA/Dec, compute the star's altitude in the frame; combine
-  with the measured horizon for an altitude observation).
+1. **Sub-pixel residual RANSAC** in verification: after the
+   initial 4+verified-N match, re-fit the rotation with only
+   inliers under a pixel-level residual threshold. Reject if
+   the residual exceeds a per-fix σ floor. Most impactful
+   single fix; tightens false-positive rate dramatically.
 
-This is a substantial implementation (~few hundred LOC + a
-build.rs database generator). Probably 4-6 commits if done in
-focused chunks.
+2. **Magnitude consistency check**: catalog magnitudes for
+   matched stars should correlate with peak intensities. A
+   bright peak matched to a dim catalog star (or vice versa)
+   is a flag.
+
+3. **External prior** (Phase 7-relevant): when an observer
+   location and capture time are available, only consider
+   candidate matches whose sky region is above the horizon at
+   that observer/time.
+
+### Per-star altitude extraction
+
+With attitude + identified star RA/Dec + an observed horizon
+line, compute each star's altitude in the frame and the
+corresponding sight observation. Requires:
+- Calibrated camera intrinsics (placeholder makes the per-star
+  altitude wrong by the same calibration factor as everywhere
+  else).
+- A horizon line. The night-horizon detector finds *something*
+  horizontal but isn't always right; combining with plate
+  solving could be a virtuous loop — plate-solved stars with
+  known altitudes constrain where the horizon "should" be.
 
 ### Algorithm refinements motivated by the corpus
 
