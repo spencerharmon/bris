@@ -79,7 +79,7 @@ references to the regression tests that pin the behavior. See
    SkyToSea in RANSAC), the latter source's σ contribution will be
    inflated to reflect lower confidence.
 
-** Sky-mask centroiding has a brightness-bias failure mode
+** Sky-mask centroiding has a brightness-bias failure mode (resolved)
    Restricting the centroid search to a sky mask correctly excludes
    non-sky distractors (sun glare on water, sail glare). However,
    when the bright sky region near a saturated body has its own
@@ -92,10 +92,21 @@ references to the regression tests that pin the behavior. See
    "by accident" because the saturated Sun is the strongest signal
    anywhere in the frame; sky-masked centroid lands at (122, 64).
 
-   The fix (tracked as a Phase 2 TODO): use the existing
-   ~detect_peaks~ primitive inside the sky mask. Peak detection finds
-   the brightest local maximum (the Sun's saturated core) and
-   sub-pixel-refines, which is what we want.
+   *Resolution:* ~centroid_saturated_body_in_mask~ thresholds at an
+   absolute saturation level (default 95% of u16::MAX) instead of
+   a fraction of the frame's brightest pixel, isolating the body's
+   saturated disk. Lands at (99, 45) on this scene — sub-pixel
+   close to the visual sun. The function takes an *optional* mask
+   for explicit exclusion of competing saturated regions, but the
+   typical correct use is unmasked: saturation thresholding alone
+   excludes most non-body pixels.
+
+   *Surprise:* the ADE20K segmentation model classifies the
+   saturated Sun as *not sky*, so constraining the saturated
+   centroider to the sky mask actively excludes the body. The
+   unmasked path is the recommended default; a Bris-trained
+   segmentation model with a "sky-or-bright-body" class would
+   resolve this if/when needed.
 
 ** Camera calibration is currently the dominant absolute-altitude error
    Every test uses ~Intrinsics::placeholder(w, h)~ which sets
@@ -454,29 +465,36 @@ references to the regression tests that pin the behavior. See
 
    Items 1-3 are now done. Items 4-10 remain as future work.
 
-** TODO Switch Sun/Moon centroiding to peak detection inside sky mask
-   The current ~centroid_brightest_body_in_mask~ uses connected-
-   components and intensity-weighted moments. On synthetic disks
-   against a dark background this works perfectly. On real frames
-   where the saturated Sun is surrounded by a bright halo of sky and
-   the sky region near the Sun has its own brightness gradient
-   (toward the cloudy side, toward the deck, etc.), the area-weighted
-   centroid is biased toward whichever side of the bright sky region
-   has more mass. The regression case ~sailing_sun_upper_left~
-   demonstrates this: visually-correct Sun position is ~(99, 48),
-   unmasked centroid is also (99, 48), but sky-masked centroid lands
-   at (122, 64).
+** DONE Sun/Moon centroiding via saturated-body thresholding
+   Original framing: switch to peak detection inside the sky mask.
+   What landed: ~centroid_saturated_body_in_mask~ thresholds at an
+   *absolute* saturation level (default 95% of u16::MAX) instead
+   of a fraction of the frame's brightest pixel, isolating the
+   body's saturated disk from the bright haze around it.
 
-   The fix: inside the sky mask, use the existing ~detect_peaks~
-   primitive to find the brightest local maximum (the Sun's saturated
-   core), then take that peak's location as the body centroid.
-   ~detect_peaks~ already does sub-pixel refinement via Gaussian
-   centroid in a 3×3 neighborhood around the peak.
+   On ~sailing_sun_upper_left~: lands at ~(99, 45) — sub-pixel
+   close on x, ~3 px high in y because saturation extends slightly
+   into the brighter sky above the disk. Compared to the
+   documented (122, 64) drift of the masked extended-disk
+   centroider.
 
-   Estimated work: small, well-bounded. Reuses the existing peak
-   detector and mask machinery. Update the regression test
-   ~segmentation_sky_mask_centroids_to_sky_region~ to assert tighter
-   tolerance once this lands.
+   *Surprise discovered during the corpus pass:* the ADE20K-
+   trained segmentation model classifies the saturated Sun as
+   *not sky* (probably "light" or one of the indoor classes).
+   Constraining the saturated centroider to the sky mask
+   therefore *excludes* the actual Sun pixels. The unmasked
+   saturated centroider is the recommended path; saturation
+   thresholding alone is restrictive enough to exclude most non-
+   body pixels. The mask remains useful when there are multiple
+   saturated regions (sail glare, water glare) but is not the
+   default mode for Sun/Moon.
+
+   The original peak-detection-inside-sky-mask idea remains valid
+   for *non-saturated* bodies (the dusk Moon in
+   ~marina_with_body~, dim planets, etc.). The peak detector is
+   exercised against ~marina_with_body~'s rigging-occluded Moon;
+   the future streaming engine should pick the appropriate
+   detector based on body type and frame conditions.
 ** DONE Sun/Moon centroiding
    Threshold + connected components + ellipse fit, sub-pixel refinement.
    Account for partial occlusion by horizon (limb correction).
@@ -618,38 +636,99 @@ references to the regression tests that pin the behavior. See
    case failures point at the exact assertion. Replay is kept as
    a manual smoke-test tool but is no longer invested in.
 
-** TODO Design and implement night-horizon detection
-   Highest-priority new algorithm. The ~night_test_lowres~ and
-   ~night_test_highres~ scenes both have visually-discernible
-   horizons but the current detectors all rely on daytime contrast
-   and segmentation classes that don't apply to dark scenes.
+** DONE Night-horizon detection v1: sea-sky luma boundary
+   ~bris-vision::night_horizon~ implements the sea-sky luma
+   boundary approach. Works on the smoothed *per-row* mean luma
+   profile rather than per-column gradients:
+   1. Per-row mean luma over a horizontal center band, optionally
+      honoring a column mask (essential when a saturated body is
+      present — must also be excluded from row-mean computation,
+      not just from candidate generation).
+   2. Smooth with a small box filter.
+   3. Find the row of maximum vertical gradient in the configured
+      ~search_row_range~.
+   4. For each column, find the row in a window around the global
+      horizon row where per-column gradient is largest.
+   5. RANSAC-fit through the candidates.
 
-   Three candidate approaches discussed in
-   ~docs/design/pipeline.md~, ranked by independence from
-   not-yet-built infrastructure:
+   Convenience function ~detect_horizon_night_excluding_body~
+   builds both the column mask AND restricts ~search_row_range~
+   to "below the body."
 
-   1. *Sea-sky luma boundary at night* — find the darkest
-      horizontal band in the frame's lower portion. Works when the
-      moon or city lights illuminate either the sky (slightly
-      brighter than sea) or the sea (sea brighter than sky from
-      moonglint). Failure mode: when sky and sea have similar
-      brightness, no boundary exists.
+   *Empirical results on the night corpus:*
+   - ~night_test_lowres~ (moonlit; portrait 1080×1920): default
+     config catches the moon halo's edge at y ≈ 258. With
+     manually-tuned ~search_row_range = (0.55, 1.0)~ +
+     ~min_inlier_fraction = 0.2~, finds the actual sea-sky
+     horizon at y ≈ 1324 (~69% of frame height).
+   - ~night_test_highres~ (stars over wake): finds y=180
+     (wake-region transition), not the actual y=85 horizon.
+     Segmentation detector handles this scene better.
+   - ~container_ship_night~, ~container_ship_night_lights_on_water~:
+     finds the deck-to-sky boundary, not the sea-sky horizon.
 
-   2. *Low-altitude detected stars as a horizon proxy* — find the
-      star peaks closest to image-bottom and use their declination
-      band as the implied horizon. Requires plate solving (Phase 3)
-      to identify the stars. Higher accuracy than approach 1 when
-      both work, but predicated on a feature we haven't built.
+   The detector finds the **strongest horizontal luma transition**
+   in the search range, which is sometimes the horizon and
+   sometimes a deck/wake/halo edge. The follow-up tasks below
+   address the disambiguation problem.
 
-   3. *IMU prior* — gyro integration since the last reliable
-      sun-sight gives a horizon direction. Phone-only; not
-      available in the embedded headless deployment without
-      additional hardware. The right answer when available, but
-      not a primary mechanism.
+** TODO Multi-pass night-horizon detection
+   Find strongest gradient, mask its neighborhood, find next-
+   strongest. The horizon is often the second- or third-strongest
+   gradient when a deck or saturated body is in frame. Resolves
+   ~container_ship_night~, ~night_test_highres~, and reduces the
+   need for manual ~search_row_range~ tuning on
+   ~night_test_lowres~.
 
-   Likely path: implement approach 1 first (smallest change,
-   immediately useful for the user's footage); approach 2 lands
-   alongside plate solving; approach 3 is a Phase 7 concern.
+** TODO Deck-excluding row-range for night detector
+   Analogous to ~body_column_mask~ but for excluding a row range
+   below a detected deck top. The deck is a horizontal feature
+   itself (the existing night detector finds it); a second pass
+   with the deck row excluded could find the actual sea-sky
+   horizon below it.
+
+** TODO Combine night detector with segmentation prior
+   When the segmentation model produces a sky/sea boundary on a
+   night scene (it sometimes does, e.g. ~night_test_highres~ where
+   it found y=86), use that directly. Fall back to the
+   luma-boundary detector when segmentation fails. The combined
+   strategy should outperform either alone.
+
+** TODO Night-horizon: low-altitude detected stars as a horizon proxy
+   Approach 2 from the original three-approach plan. Find the star
+   peaks closest to image-bottom and use their declination band as
+   the implied horizon. Requires plate solving (Phase 3) to
+   identify the stars; higher accuracy than the luma-boundary
+   approach when both work.
+
+** TODO Night-horizon: IMU prior (Phase 7 concern)
+   Approach 3. Gyro integration since the last reliable sun-sight
+   gives a horizon direction. Phone-only; not available in the
+   embedded headless deployment without additional hardware.
+
+** TODO Body-excluding mask before horizon fitting
+   *Status: implemented* as ~body_column_mask~ +
+   ~detect_horizon_with_column_mask~ +
+   ~detect_horizon_via_sky_region_with_column_mask~ +
+   ~detect_horizon_via_segmentation_with_column_mask~ +
+   ~detect_horizon_night_with_column_mask~. All four detectors
+   honor an optional per-column boolean mask that skips specified
+   columns during candidate generation.
+
+   On ~sunrise~ with body-exclusion + relaxed ~min_inlier_fraction
+   = 0.3~, the gradient detector finds the horizon at y ≈ 241
+   with the sun centroid at y ≈ 226 (sun ~15 px above horizon —
+   correct sunrise geometry). Documented in the
+   ~sunrise_horizon_findable_with_body_exclusion_and_relaxed_ransac~
+   regression test.
+
+   *Open follow-up:* auto-relax ~min_inlier_fraction~ when the
+   body is detected near the horizon, so the default-config path
+   on ~sunrise~ produces a fix without scene-specific tuning. Or
+   add a per-method config-override mechanism to ~case.toml~ so
+   the harness can declaratively exercise non-default config
+   paths. Worth doing whichever has more demand from real
+   footage.
 
 * Phase 3: Plate solving (night)
 ** TODO Star detection in frame
@@ -657,6 +736,22 @@ references to the regression tests that pin the behavior. See
    (~detect_peaks~). Hot-pixel rejection via min-area + non-max
    suppression. PSF/magnitude estimation not yet implemented but
    adequate for plate-solving input as-is.
+
+   *Validated against real footage* (~marina_with_body~ case): the
+   peak detector cleanly finds the dusk Moon at (415.88, 111.77)
+   intensity ~43000 in ~marina_with_body/frame_visible.png~.
+   Across the rigging-sway cycle the same peak persists at
+   reduced intensity (29000 in ~frame_obscured.png~), confirming
+   the detector is sensitive enough for non-saturated bodies.
+
+   *Caveat from corpus probing:* on daylight scenes the peak
+   detector subtracts a local background (33×33 box mean), which
+   means the saturated Sun against bright haze produces a low
+   foreground signal and doesn't appear as a top peak. This is
+   the right behavior for star detection (where the background is
+   dark sky and stars stand out by absolute brightness), but means
+   the peak detector is *not* a substitute for the saturated-body
+   centroider on daylight Sun/Moon scenes.
 ** TODO Geometric hash database
    Build at compile time from the embedded star catalog. Tetra3-style
    4-star pattern hashing. Tunable FOV range.
