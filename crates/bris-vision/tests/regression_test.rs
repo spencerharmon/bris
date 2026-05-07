@@ -1262,10 +1262,11 @@ fn container_ship_night_multi_pass_finds_horizon_below_deck() {
     );
 }
 
-/// `container_ship_night_lights_on_water` second frame
-/// (`frame_horizon_visible.png`, originally frame 0024 of the
-/// timelapse). The ship is approaching Port of Colombo, Sri Lanka;
-/// city lights are visible along the actual sea horizon, and the
+/// `container_ship_night_lights_on_water_horizon_visible` —
+/// later frame from the same timelapse as
+/// `container_ship_night_lights_on_water` (originally frame 0024).
+/// The ship is approaching Port of Colombo, Sri Lanka; city
+/// lights are visible along the actual sea horizon, and the
 /// atmospheric glow has cleared. The multi-pass night-horizon
 /// detector finds the actual horizon at y ≈ 241 (the city-lights
 /// row) with ~120 inliers, *outvoting* the deck top at y ≈ 325
@@ -1286,8 +1287,8 @@ fn container_ship_night_lights_on_water_horizon_visible_via_multi_pass() {
     use std::path::Path;
 
     let path = Path::new(harness::REGRESSION_DIR)
-        .join("container_ship_night_lights_on_water")
-        .join("frame_horizon_visible.png");
+        .join("container_ship_night_lights_on_water_horizon_visible")
+        .join("frame.png");
     let dims = image::image_dimensions(&path).expect("dims");
     let intrinsics = Intrinsics::placeholder(dims.0, dims.1);
     let frame = load_frame_from_path(&path, Tt::from_julian_date(JD_J2000), 0, intrinsics)
@@ -1328,6 +1329,15 @@ fn container_ship_night_lights_on_water_horizon_visible_via_multi_pass() {
 /// excluding variant is exercised separately to confirm it
 /// produces the same result (defensive against regressions in
 /// the masking machinery).
+///
+/// The detected slope on this frame is non-trivial (~-0.2),
+/// reflecting genuine camera tilt at capture (handheld phone, no
+/// gimbal). Slope is not asserted: it's a real degree of freedom
+/// of the captured scene, not noise to reject. The downstream
+/// [`bris_vision::measure_altitude`] consumes the slope as part
+/// of the horizon plane, so a tilted line still produces a
+/// correct altitude as long as the body's pixel position is
+/// above the line.
 #[test]
 fn night_test_lowres_textured_detector_finds_horizon() {
     use bris_core::time::{Tt, JD_J2000};

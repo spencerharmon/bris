@@ -1,0 +1,78 @@
+# Regression metadata for container_ship_night_lights_on_water_horizon_visible.
+#
+# Companion to `container_ship_night_lights_on_water` — same
+# timelapse, but a later frame (originally frame 0024 of the
+# 21-frame capture). The ship is approaching Port of Colombo, Sri
+# Lanka; city lights are visible along the actual sea horizon,
+# and the atmospheric glow has cleared.
+#
+# # The story this case tells
+#
+# All four single-pass horizon detectors fail or return wrong
+# horizons:
+#
+#   - gradient: insufficient inliers (64 < 100).
+#   - sky_region: no candidate columns (no clear sky region).
+#   - segmentation: no candidate columns (ADE20K model can't
+#     parse the night scene).
+#   - night (single-pass mean-gradient): returns y=325 — the
+#     deck top, not the actual horizon. The deck-to-sky luma
+#     transition outvotes the city-lights row by inlier count
+#     in single-pass.
+#
+# **The multi-pass night-horizon detector finds the actual
+# horizon** at y≈241 (the city-lights row) with ~120 inliers,
+# outvoting the deck top at y≈325 with ~115 inliers. This is
+# the success case for multi-pass: when a scene has both a
+# strong non-horizon transition and a competing horizon
+# transition with comparable inlier strength, multi-pass
+# enumerates both and surfaces the horizon by sorting on inlier
+# count.
+#
+# The static test
+# `container_ship_night_lights_on_water_horizon_visible_via_multi_pass`
+# in regression_test.rs asserts the multi-pass top-candidate
+# behavior. The case.toml [horizon.*] assertions below are
+# default-config single-pass behavior, which is "fails or returns
+# wrong horizon."
+#
+# # Companion case (same timelapse, earlier frame)
+#
+# `container_ship_night_lights_on_water/frame.png` is frame 0001
+# of the same timelapse: deck lights on, dark sea, atmospheric
+# glow on horizon. Adversarial: every detector fails. The two
+# cases together demonstrate how scene conditions evolve over a
+# 21-frame window, and motivate the streaming engine's interest
+# in keeping multiple frames around for stitching and
+# re-evaluation.
+
+[case]
+name         = "container_ship_night_lights_on_water_horizon_visible"
+description  = "Container ship approaching Port of Colombo; city lights along the horizon; multi-pass night detector finds the actual sea horizon at y≈241 by outvoting the deck top at y≈325"
+kind         = "expected_failure"
+frame_count  = 1
+frame_width  = 640
+frame_height = 360
+
+[expected_classifier]
+condition = "twilight"
+notes     = "Image-only path. Astronomical prior would say Night; deck-light glow lifts mean luma above the night threshold."
+
+# All four default single-pass detectors fail or are wrong on
+# this frame. Recorded for regression detection. The multi-pass
+# success path is exercised by the dedicated static test.
+
+[horizon.gradient]
+outcome       = "err"
+error_variant = "only 64 inliers"
+correctness   = "wrong"
+
+[horizon.sky_region]
+outcome       = "err"
+error_variant = "not enough candidate columns"
+correctness   = "wrong"
+
+[horizon.segmentation]
+outcome       = "err"
+error_variant = "not enough candidate columns"
+correctness   = "wrong"

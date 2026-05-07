@@ -1,94 +1,135 @@
 # Frame scheduling and fix combination strategy
 
-This document captures the design questions raised during the
-pipeline-burst session about how the streaming engine (Phase 3.5)
-should choose which frames to process, when to drop frames, and
-how many sights to combine into a fix before diminishing returns
-make further accumulation pointless.
+This document captures the design questions raised about how the
+streaming engine (Phase 3.5) should choose which frames to
+process, when to drop frames, when to stitch, and how many
+sights to combine into a fix before diminishing returns make
+further accumulation pointless.
 
 ## Problem
 
 Bris is intended to operate continuously, processing camera
 frames at 30-60 fps. The full pipeline (segmentation, plate
 solving, multi-pass horizon detection, refinement) takes ~100 ms+
-per frame on the embedded target. **The processing throughput is
-dramatically lower than the capture rate.**
+per frame on the embedded target. **The processing throughput
+is dramatically lower than the capture rate.**
 
 The naive approach — "process every captured frame in order" —
 is wrong: while we're processing a low-quality frame, the camera
-has already captured several better ones. The right approach
-ranks frames by image properties before deciding which to spend
-cycles on, then combines results from the best frames into a
-fix.
+has already captured several better ones. **But "score frames
+up front, then run the full pipeline only on the best" is also
+wrong**: it misses the case where a frame is great for one task
+(say, body detection) but useless for another (horizon). And it
+discards frames that might be valuable as stitching
+intermediaries even though they have no body or horizon
+themselves.
 
-## What "image properties" means
+## What we actually want
 
-The key constraint the user raised: *image properties*, not
-calibration error. Every frame from the same camera shares the
-same lens-calibration uncertainty. Frame-to-frame quality
-variation comes from:
+The pipeline is a sequence of stages with monotonically
+increasing cost. After each stage we know more about the
+frame's σ contribution than we did before. **A frame can be
+rejected (or further work on it can be cancelled) after each
+stage, once its accumulated σ exceeds what we can already get
+from a fix in the queue.**
 
-- **Mean luma in the expected horizon band** (proxy for "is a
-  horizon visible?").
-- **Saturated-pixel count** (proxy for "is a body visible?" — for
-  Sun/Moon — though a textured-water moonlight scene has the body
-  saturated *and* a horizon-detection task that's easier on the
-  *sea* not the *body*).
-- **Per-row std-dev profile shape** (proxy for "does the scene
-  have texture our detectors can use?").
-- **Per-frame peak count + intensity distribution** (proxy for
-  "are there star-like points to plate-solve?").
-- **Frame-to-frame motion estimate** (proxy for "is the camera
-  steady or sweeping fast?" — fast sweeps mean motion blur in
-  long-exposure captures, and stitching alignment degradation).
-- **Body and horizon detected in same frame** (no stitching
-  required — single-frame fast path) vs. **body and horizon in
-  different frames** (stitching needed; alignment residual
-  contributes to σ).
+Body detection and horizon detection are independent of each
+other within a single frame. They produce *separate* records
+that can be paired with records from *other* frames via
+stitching to compute a sight observation. So the streaming
+engine should:
 
-These are all *cheap* to compute — single-pass over the pixel
-buffer plus a centroid/peak-detection call we already have.
+- Maintain two priority queues — one for high-quality body
+  records, one for high-quality horizon records — both keyed
+  on σ.
+- Stitch lazily, pairing the best body with the best nearby-
+  in-time horizon. The decision to stitch is driven by the
+  *combined* σ across the pair, not by either side alone.
+- Keep raw frames in a ring buffer covering the stitching
+  window (e.g. 2 seconds at 30 fps = 60 frames) so that even
+  body-less, horizon-less frames remain available as stitching
+  intermediaries. Frames are evicted from the ring buffer only
+  when they can no longer contribute to any improvement of any
+  sight in the active sight window.
 
-## Proposed: cheap quality scoring + priority queue + batched
-processing
+## The pipeline as a sequence of staged σ contributions
+
+Each stage has a cost and produces a partial σ. After each
+stage we know more about whether further work on this frame is
+worthwhile.
 
 ```
-loop {
-    // Capture: producer thread, ring buffer of raw frames.
-    capture_thread.push_frame(raw_frame);
+Stage A — Classifier (~1-5 ms, almost free).
+  Produces: day/night/twilight + confidence.
+  Reject criterion: condition = Unusable, OR mean luma fully
+    saturated, OR no useful structure detectable. Rare.
 
-    // Cheap classifier + quality scorer: very-fast pass over
-    // each frame to compute a quality score *without* running
-    // the full pipeline. ~5-10 ms per frame, manageable at
-    // 30-60 fps.
-    let score = cheap_quality_score(&frame);
-    quality_priority_queue.insert(frame, score);
+Stage B — Body detection (~5-20 ms).
+  - Day: centroid_saturated_body_in_mask.
+  - Night: detect_peaks (then plate solve in stage C).
+  - Twilight: try day path first; fall back to night.
+  Produces: zero or more body candidates with per-body σ.
+  Reject criterion: no bodies AND no peaks above threshold.
 
-    // Drop low-quality frames once the queue exceeds a window
-    // size: we only need the best N frames per fix-publication
-    // interval (default 1 second for a 1-Hz fix rate).
-    if quality_priority_queue.len() > N {
-        quality_priority_queue.pop_lowest();
-    }
+Stage C — Horizon detection (cheap variants first).
+  - detect_horizon (gradient): ~5 ms.
+  - detect_horizon_via_sky_region: ~10 ms.
+  - detect_horizon_night (mean-grad): ~10 ms.
+  - detect_horizon_night_textured: ~15 ms.
+  - detect_horizon_via_segmentation: ~100 ms (last resort).
+  Produces: zero or more horizon line candidates with per-line σ.
+  Reject criterion: all detectors failed AND we have a horizon
+    in the queue with σ better than what segmentation could
+    plausibly improve to. Skip segmentation in that case.
 
-    // Process top-K frames from the window. K depends on how
-    // much CPU budget we have; 1-3 in practice.
-    for frame in quality_priority_queue.top_k() {
-        let sights = full_pipeline(frame);
-        sight_window.add(sights);
-    }
+Stage D — Plate solve (night only, ~10-50 ms once db is built).
+  Only runs if Stage B produced peaks AND the classifier said
+  night/twilight. Produces: identified stars + camera attitude.
+  Reject criterion: insufficient peaks for a 4-tuple, or
+    refinement-residual gate trips.
 
-    // Publish a fix when sight_window has enough azimuth-
-    // diverse sights.
-    if sight_window.has_diverse_sights() {
-        publish_fix(sight_window.combine());
-    }
-}
+Stage E — Sight assembly (per body × per horizon × stitch).
+  For each body record, find the best-σ horizon record that
+  pairs with it (same frame is free; different frames need a
+  stitch which adds its alignment-residual σ). Compute the
+  combined per-sight altitude σ.
+  Reject criterion: combined σ exceeds the worst sight in the
+    active sight window.
 ```
 
-This is a "best-effort backpressure" model. Frames are scored
-cheaply on every capture; only the best of a recent window get
-the expensive pipeline; the worst get dropped without ceremony.
+A frame that fails Stage B (no body) can still contribute its
+horizon detection (Stage C) to the queue. A frame that fails
+Stage C (no horizon) can still contribute its body to be paired
+with a different frame's horizon at Stage E. **Both queues are
+populated independently; pairing happens at Stage E.**
+
+## Stitching is part of pair selection, not an early stage
+
+The previous draft of this document had stitching happen before
+σ assessment, which is backward. Stitching costs ~50-200 ms per
+frame pair and contributes its own alignment σ; we don't want
+to stitch speculatively.
+
+The right pattern: at Stage E, when pairing a body record with
+candidate horizon records, the engine considers:
+
+```
+combined_σ(body, horizon) =
+    sqrt(body.σ² + horizon.σ² + stitch.σ²)
+where stitch.σ = 0 if body.frame == horizon.frame
+              = predicted_alignment_σ otherwise
+```
+
+`predicted_alignment_σ` is cheap to estimate from the time gap
+and the frame-to-frame motion (estimated from horizon-line
+shift across recent frames). Frames closer in time stitch
+better; the engine only commits to actually running the
+expensive stitch on the *one* (body, horizon) pair it's chosen
+to produce a sight.
+
+This is essentially the standard pattern: **plan with cheap σ
+estimates, commit to the expensive operation only on the chosen
+pair.**
 
 ## Multi-body fix combination math
 
@@ -125,98 +166,123 @@ falls below 20% per additional sight. Beyond N=10 the gain is
 < 10% per sight unless those sights have substantially better σ
 than the existing ones.
 
-### "Multi-body in one frame" vs. "best-frame-of-window" trade-off
+### "Multi-body in one frame" vs. "best-frame-of-window"
 
-The user's concrete question: should the engine accept a
-higher-uncertainty horizon if the frame contains 3 bodies?
+The math: a single 30 arcsec sight gives σ_pos ≈ 0.5 nm (once
+you have a second LOP); three sights at 60 arcsec with 60°
+azimuth spread give σ_pos ≈ 0.67 nm. So a single best-frame
+sight beats three mediocre-frame sights by a small margin. But
+three 50 arcsec sights at 60° gives σ_pos ≈ 0.55 nm,
+comparable to one 30 arcsec sight from the best frame.
 
-The math says: **a single 30-arcsec sight gives σ_pos ≈ 0.5 nm
-(once you have a second LOP)**, while **three sights at 60
-arcsec with 60° azimuth spread give σ_pos ≈ 0.67 nm**. So a
-single best-frame sight beats three mediocre-frame sights by a
-small margin.
+**Practical rule:**
 
-But: **three 50-arcsec sights at 60° gives σ_pos ≈ 0.55 nm**,
-comparable to one 30-arcsec sight from the best frame. So
-there's a regime where multi-body wins — when the per-sight σ
-penalty is less than √N.
+> Prefer best-σ frames for single-body sights. Accept
+> multi-body frames only when their per-sight σ penalty is
+> ≤ √N over the best alternative — the regime where multi-body
+> actually wins.
 
-**Practical rule for the streaming engine:**
+This falls out naturally from the staged-pipeline approach: a
+multi-body frame produces N body records, each of which can
+pair with the best available horizon. If the resulting combined
+σ for any of them improves the active sight window, the sight
+is accepted; otherwise discarded.
 
-> Prefer the best-σ frame for single-body sights. For
-> multi-body frames, accept a per-sight σ penalty of up to √N
-> over the best single-body frame's σ; reject frames whose
-> per-sight σ is worse than √N × best.
+## Ring buffer and frame eviction
 
-This is essentially saying: don't take a multi-body sight
-unless its accuracy contribution beats what you'd get by
-processing the best single-body frames in your queue.
+The ring buffer holds raw frames so they can be used as
+stitching intermediaries. The buffer's lifetime is bounded by
+the stitching window (how far apart in time can two frames be
+and still produce a usable stitch). Realistic values:
 
-### When more isn't better
+- 30-60 fps capture; 1-2 second stitching window.
+- Buffer holds 30-120 raw frames + their intermediate
+  detection results (body candidates, horizon candidates).
+- Memory: ~few hundred MB at HD resolution; manageable on
+  Pi-class hardware.
 
-Beyond the N=5 inflection, adding more sights is wasted CPU
-unless those sights have *better* σ than the existing N. The
-streaming engine should:
+A frame is **evictable** from the ring buffer when both of:
 
-1. Accumulate sights into a rolling window (e.g. 10 minutes).
-2. Cap the window at N=10 sights or so; when the window is
-   full, replace the worst-σ sight with each new better-σ sight.
-3. Publish a fix on every successful new sight, not on a fixed
-   schedule — fix freshness matters as much as fix tightness.
+1. No body or horizon record from this frame is in the active
+   queues (i.e. it was rejected at Stages B/C, or its records
+   have been replaced by better ones).
+2. No frame currently in the body or horizon queue has this
+   frame as its closest viable stitching partner.
+
+In practice the first condition catches most evictions; the
+second is the safety check that keeps stitching intermediaries
+alive.
+
+## Sight window: cap, age-weighting, and operator surface
+
+- **Cap at N=10 sights.** Diminishing returns inflection at
+  N=5 with good azimuth spread; beyond N=10 marginal gain is
+  < 10% per sight. When the window is full, replace the worst-σ
+  sight with each new better-σ sight rather than evicting by age.
+- **Age-weight older sights linearly with a 10-minute time
+  constant.** A sight from 10 minutes ago has the same per-sight
+  σ as a fresh one but the observer may have moved (we have no
+  course/speed input by default). Linear weighting reflects this
+  without making heroic assumptions.
+- **Per-fix surface for the operator** (extending `$PBRIS`):
+  - Number of sights contributing.
+  - Azimuth spread (max - min azimuth across sights).
+  - Age of oldest contributing sight.
+  - Dominant per-sight σ source.
+  All of these are meaningful "should I trust this fix?"
+  diagnostics.
 
 ## Summary of design recommendations for Phase 3.5
 
-1. **Cheap quality scorer**: 5-10 ms pass that computes
-   - mean luma in the lower-2/3 of the frame
-   - saturated-pixel count
-   - peak count (for night frames)
-   - per-row std-dev profile (for textured-night frames)
-   - and emits a single scalar score.
+1. **Staged pipeline with per-stage early rejection.** Each
+   stage produces a partial σ; subsequent work on a frame is
+   cancelled when accumulated σ exceeds what we already have
+   in the sight window.
 
-2. **Priority queue + drop**: rolling window of recent frames,
-   sorted by score, drop the worst when full. Window size set
-   so the full pipeline can process the top-K frames within
-   the fix-publication interval.
+2. **Two parallel detection queues** — one for body records,
+   one for horizon records — both keyed on σ. Body and horizon
+   detection are independent within a frame.
 
-3. **Per-sight σ floor**: only feed sights into the rolling-
-   sight window when the per-sight σ is below `best_recent_σ ×
-   √N`. Multi-body frames get an automatic √N relaxation.
+3. **Lazy stitching at pair selection.** Estimate the stitching
+   σ contribution cheaply; commit to running the expensive
+   stitch only on the chosen (body, horizon) pair.
 
-4. **Sight window cap**: 10 sights, replace worst when full.
-   Diminishing returns kick in at N=5 with good azimuth spread;
-   beyond N=10 marginal gain is < 10% per sight.
+4. **Ring buffer for raw frames** sized to the stitching
+   window. Frames are evicted only when no current queue entry
+   could need them as a stitching intermediary.
 
-5. **Per-fix σ surface**: Bris already publishes fix σ via
-   `$GPGST` and dominant-source via `$PBRIS`. The streaming
-   engine should additionally surface the *number of sights*
-   contributing to the current fix and the *azimuth spread*
-   of those sights — both meaningful operator-facing
-   diagnostics for "should I trust this fix?"
+5. **Sight window cap at N=10** with replace-worst on insertion;
+   age-weighting with a 10-minute time constant.
+
+6. **Per-fix N + azimuth-spread + oldest-sight-age surface** in
+   the existing `$PBRIS` diagnostic stream.
 
 ## Open questions
 
-- **What's the right cheap-quality-score formula?** Probably
-  multiple per-condition variants (one for day, one for night)
-  weighted by the day/night classifier's output.
+- **Body and horizon parallelism.** Body detection and horizon
+  detection on the same frame are independent and could run on
+  separate threads. Whether the orchestration overhead is worth
+  it on Pi-class hardware needs measurement.
 
-- **Should the quality scorer itself be ML?** A small image-
-  classifier that outputs "expected fix σ" could work, but
-  classical heuristics over the existing detector outputs are
-  almost certainly fast enough and avoid the inference cost.
+- **Stitching σ prediction model.** The "cheap" stitching σ
+  estimate from time-gap-and-motion is a reasonable starting
+  point, but it might consistently under- or over-predict. A
+  feedback loop where actual post-stitch σ is compared to
+  predicted-σ and the model is updated is straightforward; the
+  question is whether we ever need that level of polish.
 
-- **How to handle sight obsolescence?** A sight from 5 minutes
-  ago has the same per-sight σ but the observer may have moved.
-  The dead-reckoning correction is not Bris's job (we have no
-  course/speed input by default), but we should weight older
-  sights down within the rolling window. Linear age-weighting
-  with a 10-minute time constant is a reasonable starting
-  point.
+- **What does "Unusable" Stage A do?** The classifier's Unusable
+  output should presumably skip the frame entirely; no other
+  stages run. Worth confirming this is the only place the
+  classifier's verdict gates further work — currently the
+  classifier is read-only diagnostic output.
 
-- **Should multi-frame stitching be opportunistic or
-  scheduled?** When a body and horizon are in different
-  frames within the rolling window, we *could* stitch. Whether
-  the resulting σ improves over the best single-frame sight
-  in the window is empirically unclear.
+- **Plate solving's database build cost.** The geometric hash
+  database build is ~10-30 seconds in release. The streaming
+  engine should build it once at startup and never again.
+  Whether the build runs at process start (eats 30s of warm-up)
+  or lazily on first night frame (sight pipeline blocks for 30s
+  the first time it tries to plate-solve) is a UX call.
 
 These are Phase 3.5 design decisions; this document captures the
 reasoning so we can act on it when the streaming engine work

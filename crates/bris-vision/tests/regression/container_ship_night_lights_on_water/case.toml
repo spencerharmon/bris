@@ -1,74 +1,46 @@
 # Regression metadata for container_ship_night_lights_on_water.
 #
 # Container ship deck at night with deck lights illuminating the
-# water. Two frames captured at different points in the timelapse:
+# water. The user flagged: "adversarial case for night horizon.
+# Aurora-like glow on horizon will fool simple 'find dark/bright
+# transition' approaches; deck lights on water create false
+# features."
 #
-#   frame.png (orig 0001): early in the timelapse, deck lights on,
-#     dark sea, aurora-like glow on horizon. Adversarial: every
-#     detector currently fails. Worth keeping as a regression
-#     floor — if any future detector starts producing a "horizon"
-#     on this scene, it's probably wrong.
+# Empirical: every default detector fails. Centroid refuses (no
+# extended body). Sky-region and segmentation find zero candidate
+# columns. Gradient finds 65, below threshold. Classifier reports
+# Twilight at 0.69 confidence (mean luma 0.235, just past the 0.05
+# night threshold — deck-light glow contributes).
 #
-#   frame_horizon_visible.png (orig 0024): later in the timelapse,
-#     ship is approaching Port of Colombo, Sri Lanka. City lights
-#     are visible along the actual sea horizon, and the
-#     atmospheric glow has cleared. The multi-pass night-horizon
-#     detector finds the actual horizon at y=241 (the city-lights
-#     row) with 122 inliers, *outvoting* the deck top at y=325 with
-#     114 inliers. This is the success case for the multi-pass
-#     algorithm: when the scene gives you a clean horizontal
-#     transition, multi-pass surfaces it even when a brighter
-#     deck-edge transition exists in the same frame.
+# This is a particularly hostile expected_failure case: even when a
+# future night-horizon detector lands, the deck-light glow on water
+# may fool it. Worth keeping as a regression-floor: if any future
+# detector starts producing a "horizon" on this scene, it's
+# probably wrong. Ideally the future detector also fails cleanly
+# rather than fabricating output.
 #
-# Empirical comparison across the timelapse: the deck-top edge
-# remains the strongest single-pass match in every frame
-# (intercept ~330, ~135 inliers), but only in frames 24+ does a
-# competing horizon-row transition appear with comparable inlier
-# strength to overtake it under the multi-pass sort. Earlier
-# frames have only the deck and noise.
+# # Companion case (same timelapse, later frame)
 #
-# An interesting follow-up: stitching frames 18-25 might amplify
-# the faint horizon signal in the early frames (the deck moves
-# subtly with ship motion; the horizon is fixed). The Phase 2
-# panorama machinery is in place; whether the SNR gain is
-# meaningful is a question only experiment can answer.
-#
-# Classifier reports Twilight on both frames; with the astronomical
-# prior (sun ~ -15° at this time of night) it would resolve to
-# Night. Image-only luma is lifted by the deck-light glow into the
-# Twilight band.
+# `container_ship_night_lights_on_water_horizon_visible/frame.png`
+# is frame 0024 of the same timelapse: the ship has moved into
+# Port of Colombo and city lights are visible along the actual
+# horizon. The multi-pass night detector handles that frame
+# correctly. The two cases together demonstrate how scene
+# conditions evolve over a 21-frame window, and motivate the
+# streaming engine's interest in keeping multiple frames around
+# for stitching and re-evaluation.
 
 [case]
 name         = "container_ship_night_lights_on_water"
-description  = "Container ship at night; deck lights illuminate the water; two frames showing adversarial early state and approachable later state"
+description  = "Container ship at night; deck lights illuminate the water; aurora-like glow on horizon"
 kind         = "expected_failure"
-frame_count  = 2
+frame_count  = 1
 frame_width  = 640
 frame_height = 360
-frames       = ["frame.png", "frame_horizon_visible.png"]
 
 [expected_classifier]
 condition = "twilight"
-notes     = "Image-only path on frame 0. Astronomical prior would say Night; deck-light glow lifts mean luma above the night threshold."
-
-# All three default detectors fail on frame.png. The multi-pass
-# night-horizon detector finds *something* horizontal on every
-# frame in this scene, but only on frame_horizon_visible.png does
-# the actual sea horizon win the inlier competition; on frame.png
-# the deck top wins and there is no actual horizon transition for
-# the detector to find as a runner-up.
-#
-# # Per-frame assertion split
-#
-# The harness's [horizon.*] tables below apply only to frame 0
-# (frame.png — the adversarial state). Per-frame assertions for
-# frame_horizon_visible.png live in the dedicated static test
-# `container_ship_night_lights_on_water_horizon_visible_via_multi_pass`
-# in regression_test.rs, which uses the multi-pass detector and
-# asserts the city-lights horizon at y ≈ 241. Promoting the
-# case.toml schema to per-frame [horizon.{method}.{frame_name}]
-# tables is queued; for now the split between TOML (frame 0) and
-# static test (frame 1) is the documented convention.
+notes     = "Image-only path. Astronomical prior would say Night; the deck-light glow lifts mean luma above the night threshold."
 
 [horizon.gradient]
 outcome       = "err"
