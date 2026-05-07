@@ -92,3 +92,26 @@ top_intercept_tolerance = 15.0
 top_inlier_count_min    = 150
 correctness             = "approximately_correct"
 notes                   = "Multi-pass finds the wake region (66 inliers) on its first pass, then masks it and finds the actual sea-sky horizon at y≈77 (195 inliers) on a subsequent pass. Sort by inlier count surfaces the horizon as the top candidate."
+
+# Plate solving: with placeholder camera intrinsics
+# (fx = fy = 1000) the pixel→ray angular mapping is wrong by
+# the calibration factor (~2-3× off for a real wide-angle
+# camera). Even the *correct* sky region won't fit within the
+# refinement-residual gate because all pairwise angular
+# distances are scaled. The solver correctly refuses rather
+# than fabricating a match.
+#
+# Once a calibration workflow lands and real intrinsics
+# replace the placeholder, this expectation will flip from
+# "err" to "ok" with a min_identified_stars assertion. The
+# canonical plate-solving target — "many bright stars visible
+# against truly dark sky" — exists in `container_ship_night`
+# (see that case.toml). This case is the secondary plate-
+# solving target.
+[plate_solve]
+outcome              = "err"
+error_variant        = "no candidate match"
+correctness          = "wrong"
+notes                = "Refusal is correct under placeholder intrinsics; will flip to ok once calibration arrives."
+config_mag_cutoff    = 5.0
+config_max_rms_residual_arcsec = 60.0

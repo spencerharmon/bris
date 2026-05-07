@@ -79,3 +79,29 @@ top_intercept_tolerance = 15.0
 top_inlier_count_min    = 130
 correctness             = "approximately_correct"
 notes                   = "Multi-pass finds the deck top first (105 inliers), then masks it and finds the actual sea horizon at y≈247 (164 inliers). Sort by inlier count surfaces the horizon as the top candidate."
+
+# Plate solving: this is the **canonical plate-solving target**
+# in the corpus — many bright stars visible against truly dark
+# sky, the right scene structure for geometric-hash matching.
+# But: with placeholder camera intrinsics (fx = fy = 1000), the
+# pixel→ray angular mapping is wrong by the calibration factor
+# (~2-3× off for a real wide-angle camera). Even the *correct*
+# sky region won't fit within the refinement-residual gate
+# because all pairwise angular distances are scaled. The solver
+# correctly refuses rather than fabricating a match.
+#
+# Once a calibration workflow lands and real intrinsics replace
+# the placeholder, this expectation will flip from "err" to
+# "ok" with a min_identified_stars assertion (this scene has
+# enough peaks to identify ~10+ stars). The refusal-under-
+# placeholder is itself a valuable regression: if someone later
+# changes the residual gate or the verification logic and
+# accidentally makes it accept false matches on this scene,
+# the test catches it.
+[plate_solve]
+outcome              = "err"
+error_variant        = "no candidate match"
+correctness          = "wrong"
+notes                = "Refusal is correct under placeholder intrinsics; will flip to ok once calibration arrives. Canonical plate-solving target."
+config_mag_cutoff    = 5.0
+config_max_rms_residual_arcsec = 60.0

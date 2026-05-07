@@ -132,12 +132,35 @@ config_search_row_range    = [0.55, 1.0]
 col_sky_to_sea_min          = 100
 col_sky_to_obstr_to_sea_min = 100
 
+[plate_solve]                             # optional; consumed by bris-platesolve
+outcome              = "ok"               # ok | err
+min_identified_stars = 5                  # required when outcome = "ok"
+error_variant        = "no candidate match"  # for outcome = "err"
+correctness          = "approximately_correct"  # documentation
+notes                = "..."
+config_mag_cutoff    = 5.0                # default 5.0
+config_max_rms_residual_arcsec = 60.0     # default 60 (looser than the library
+                                          # default of 30 to allow for
+                                          # placeholder-intrinsics calibration error)
+config_min_verifications        = 3       # default 3
+config_max_pattern_diameter_deg = 60.0    # default 60
+
 [fix]                                     # optional; runner pending
 outcome              = "ok"               # ok | err | low_confidence
 sigma_nm_min         = 0.5                # for low_confidence
 sigma_nm_max         = 5.0                # for ok (rarely set)
 dominant_source_in   = ["horizon", "centroiding"]
 ```
+
+The `[plate_solve]` table is read by a separate harness in
+`crates/bris-platesolve/tests/real_data.rs` (with its own
+`build.rs` walking this corpus). Generated plate-solve tests
+are `#[ignore]` because the geometric-hash database build is
+~10-30 seconds in release mode; CI runs them with
+`cargo test --release -p bris-platesolve --test real_data --
+--ignored --include-ignored`. Database is cached across tests
+in the same process, so a full corpus pass pays the build cost
+once.
 
 ## Generated tests vs. static tests
 

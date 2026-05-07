@@ -879,6 +879,42 @@ references to the regression tests that pin the behavior. See
    - External prior (observer location + time) to constrain
      candidate sky regions geometrically.
 
+** DONE Plate-solve regression integration
+   ~bris-platesolve/tests/real_data.rs~ has a TOML-driven
+   harness mirroring the bris-vision regression-test pattern.
+   A ~build.rs~ in bris-platesolve walks
+   ~../bris-vision/tests/regression/*/case.toml~ and emits one
+   generated test per case that declares a ~[plate_solve]~
+   table. The table supports ~outcome~ (ok|err),
+   ~min_identified_stars~, ~error_variant~, and
+   ~config_*~ overrides for mag cutoff, residual gate,
+   verification floor, and pattern diameter.
+
+   The two scenes that currently exercise plate solving
+   (~night_test_highres~, ~container_ship_night~) declare
+   ~outcome = "err"~ with
+   ~error_variant = "no candidate match"~. This refusal is the
+   *correct* behavior under placeholder camera intrinsics
+   (fx = fy = 1000): the pixel→ray angular mapping is wrong by
+   the calibration factor (~2-3× off for a real wide-angle
+   camera), so even the correct sky region won't fit within
+   the refinement-residual gate. Once a calibration workflow
+   lands and real intrinsics replace the placeholder, these
+   expectations will flip to ~outcome = "ok"~ with a
+   ~min_identified_stars~ assertion.
+
+   Until then, the refusal-under-placeholder is itself a
+   load-bearing regression: if someone changes the residual
+   gate or the verification logic and accidentally accepts
+   false matches on these scenes, the test catches it.
+
+   Generated tests are ~#[ignore]~ (db build is ~10-30s in
+   release); run with
+   ~cargo test --release -p bris-platesolve --test real_data
+   -- --ignored --include-ignored~. DB is cached across tests
+   in the same process so a full corpus pass pays build cost
+   once.
+
 ** DONE Per-star altitude extraction
    Implemented in ~bris-platesolve::altitude::star_altitudes~:
    convert each identified star from a ~PlateSolveResult~ into an

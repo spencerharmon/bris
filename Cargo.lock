@@ -203,7 +203,9 @@ dependencies = [
  "bris-vision",
  "image",
  "proptest",
+ "serde",
  "thiserror",
+ "toml",
  "tracing",
 ]
 
