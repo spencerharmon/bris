@@ -144,6 +144,27 @@ fn emit_case_module(out: &mut String, case_name: &str, parsed: &ParsedCase) {
             out.push_str("        harness::check_horizon_segmentation(&case);\n");
             out.push_str("    }\n\n");
         }
+        if h.night.is_some() {
+            out.push_str("    #[test]\n");
+            out.push_str("    fn horizon_night_outcome() {\n");
+            out.push_str("        let case = harness::load_case(CASE);\n");
+            out.push_str("        harness::check_horizon_night(&case);\n");
+            out.push_str("    }\n\n");
+        }
+        if h.night_textured.is_some() {
+            out.push_str("    #[test]\n");
+            out.push_str("    fn horizon_night_textured_outcome() {\n");
+            out.push_str("        let case = harness::load_case(CASE);\n");
+            out.push_str("        harness::check_horizon_night_textured(&case);\n");
+            out.push_str("    }\n\n");
+        }
+        if h.night_multi_pass.is_some() {
+            out.push_str("    #[test]\n");
+            out.push_str("    fn horizon_night_multi_pass_outcome() {\n");
+            out.push_str("        let case = harness::load_case(CASE);\n");
+            out.push_str("        harness::check_horizon_night_multi_pass(&case);\n");
+            out.push_str("    }\n\n");
+        }
     }
 
     if parsed
@@ -225,6 +246,12 @@ struct HorizonSection {
     sky_region: Option<toml::Value>,
     #[serde(default)]
     segmentation: Option<toml::Value>,
+    #[serde(default)]
+    night: Option<toml::Value>,
+    #[serde(default)]
+    night_textured: Option<toml::Value>,
+    #[serde(default)]
+    night_multi_pass: Option<toml::Value>,
 }
 
 #[derive(Debug, serde::Deserialize)]

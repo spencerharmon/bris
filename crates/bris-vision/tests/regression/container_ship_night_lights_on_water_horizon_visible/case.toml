@@ -76,3 +76,26 @@ correctness   = "wrong"
 outcome       = "err"
 error_variant = "not enough candidate columns"
 correctness   = "wrong"
+
+# Single-pass night: returns the deck top (y≈325). Recorded
+# ok-but-wrong since multi-pass internally produces this on its
+# first pass before exclusion.
+[horizon.night]
+outcome             = "ok"
+slope               = 0.0013
+intercept           = 324.64
+slope_tolerance     = 0.05
+intercept_tolerance = 15.0
+inlier_count_min    = 90
+correctness         = "wrong"
+notes               = "Lands on deck top, not the city-lights horizon. Multi-pass (below) finds the actual horizon."
+
+# Multi-pass: top candidate is the city-lights horizon at y≈241.
+# **Working path on this scene.**
+[horizon.night_multi_pass]
+candidates_min          = 2
+top_intercept           = 241.03
+top_intercept_tolerance = 15.0
+top_inlier_count_min    = 100
+correctness             = "approximately_correct"
+notes                   = "Top candidate is the city-lights horizon (y≈241, ~120 inliers); deck top is a runner-up (y≈325, ~115 inliers). Multi-pass surfaces the horizon by sorting candidates by inlier count."

@@ -152,4 +152,46 @@ notes         = "Sky-region detector requires a brightness percentile to identif
 outcome       = "err"
 error_variant = "only 90 inliers"
 correctness   = "wrong"
-notes         = "ADE20K-trained model finds some sky/sea structure but RANSAC rejects most as outliers. The textured detector (above) is the working path; the segmentation detector would still be useful as a per-frame quality vote in the future streaming engine."
+notes         = "ADE20K-trained model finds some sky/sea structure but RANSAC rejects most as outliers. The textured detector (below) is the working path; the segmentation detector would still be useful as a per-frame quality vote in the future streaming engine."
+
+# Single-pass night detector: returns the moon halo's edge at
+# y≈258 — wrong horizon, but recorded so we notice if the value
+# drifts. Listed as ok-but-wrong: the detector returns Ok with a
+# value, but the value is the moon halo edge, not the actual
+# horizon at y≈1310-1330.
+[horizon.night]
+outcome             = "ok"
+slope               = 0.0001
+intercept           = 257.82
+slope_tolerance     = 0.05
+intercept_tolerance = 15.0
+inlier_count_min    = 60
+correctness         = "wrong"
+notes               = "Lands on the moon halo's edge, not the sea horizon. Default mean-gradient algorithm is fundamentally wrong for this scene; see [horizon.night_textured] for the working approach."
+
+# Textured-water night detector: finds the actual horizon at
+# y≈1329 via per-row std-dev signal. Works *without* the body-
+# excluding mask because the moon's halo contributes mean-luma
+# but not texture. **This is the working path on this scene.**
+[horizon.night_textured]
+outcome             = "ok"
+slope               = -0.197
+intercept           = 1329.5
+slope_tolerance     = 0.10
+intercept_tolerance = 30.0
+inlier_count_min    = 70
+correctness         = "approximately_correct"
+notes               = "Lands on the actual sea-sky horizon at ~69% of frame height. The non-zero slope reflects real camera tilt at capture (handheld phone, no gimbal); slope tolerance is relaxed to accommodate this."
+
+# Multi-pass mean-gradient night detector: still doesn't handle
+# this scene. The moon's halo generates strong transitions at
+# multiple y values (inner halo edge AND outer halo edge) before
+# the dim sea-sky transition gets its turn; even with row
+# exclusion, multi-pass enumerates halo features.
+[horizon.night_multi_pass]
+candidates_min          = 1
+top_intercept           = 469.4
+top_intercept_tolerance = 100.0
+top_inlier_count_min    = 70
+correctness             = "wrong"
+notes                   = "Top candidate is in the upper portion of the frame (within the moon halo's influence). Multi-pass mean-gradient cannot find the actual horizon on this scene; the textured detector above is the working path."

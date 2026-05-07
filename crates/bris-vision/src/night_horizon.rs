@@ -943,9 +943,8 @@ fn per_column_texture_step_in_window(
     // For efficiency, precompute a per-pixel "is in mask" check
     // once and reuse. The local-std computation per (col, y) walks
     // a small window, so the inner loops are tiny.
-    let in_mask = |idx: usize| -> bool {
-        pixel_mask.is_none_or(|m| m.get(idx).copied().unwrap_or(false))
-    };
+    let in_mask =
+        |idx: usize| -> bool { pixel_mask.is_none_or(|m| m.get(idx).copied().unwrap_or(false)) };
 
     for x in 0..w {
         let mut best_log_step = 0.0_f64;

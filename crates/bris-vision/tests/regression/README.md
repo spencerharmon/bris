@@ -108,9 +108,25 @@ inlier_count_min    = 100                 # optional lower bound
 error_variant       = "InsufficientCandidates"  # required when outcome = "err"
 correctness         = "wrong"             # documentation only
 notes               = "..."
+# Optional per-method config overrides:
+config_min_inlier_fraction = 0.3          # relax RANSAC for noisy scenes
+config_search_row_range    = [0.55, 1.0]  # night detectors only
+config_exclude_body        = true         # apply body-excluding column mask
 
-[horizon.sky_region]   # same shape as [horizon.gradient]
-[horizon.segmentation] # same shape as [horizon.gradient]
+[horizon.sky_region]    # same shape as [horizon.gradient]
+[horizon.segmentation]  # same shape as [horizon.gradient]
+[horizon.night]         # single-pass night (mean-luma gradient)
+[horizon.night_textured] # textured-water night (per-row std-dev step)
+
+[horizon.night_multi_pass]                # different shape (Vec result)
+candidates_min          = 2               # default 1
+top_intercept           = 247.0           # optional: assert top candidate's intercept
+top_intercept_tolerance = 15.0
+top_inlier_count_min    = 130
+correctness             = "approximately_correct"
+notes                   = "..."
+config_min_inlier_fraction = 0.3
+config_search_row_range    = [0.55, 1.0]
 
 [segmentation.transition_counts]          # optional; runner stubbed
 col_sky_to_sea_min          = 100
@@ -122,6 +138,36 @@ sigma_nm_min         = 0.5                # for low_confidence
 sigma_nm_max         = 5.0                # for ok (rarely set)
 dominant_source_in   = ["horizon", "centroiding"]
 ```
+
+## Generated tests vs. static tests
+
+Most assertions live in `case.toml` and produce **generated
+tests** via `build.rs`. One generated test per declared
+expectation table; named after the case + table
+(`case_<name>::horizon_<method>_outcome`,
+`case_<name>::classifier`, etc.). When you add a new corpus
+scene or change an algorithm's expected output, you edit a
+TOML file; the test dispatch regenerates on the next `cargo
+build`.
+
+A small number of **static tests** live in `regression_test.rs`
+at the bottom (after the build-script `include!`). These are
+reserved for assertions that don't fit the per-case-per-method
+schema:
+
+- **Property tests of detector APIs** that aren't tied to a
+  specific case (e.g. "the segmentation detector returns a
+  typed error when `source_path` is None").
+- **Synthetic-input tests** with no real corpus frame backing.
+- **Multi-frame interactions** that the per-frame harness
+  can't express directly (e.g. "this peak is at intensity X in
+  frame A and intensity Y in frame B; assert Y < 0.8 × X").
+
+If you find yourself writing a static test that asserts
+"detector D gives result R on case C," that's a sign the
+schema needs another expectation type. Prefer extending the
+schema (small fixed cost, all future cases benefit) over
+accumulating static tests (linear cost in detectors × cases).
 
 ## What the tests assert
 

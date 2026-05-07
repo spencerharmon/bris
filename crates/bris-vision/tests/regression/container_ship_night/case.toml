@@ -5,21 +5,28 @@
 # when we have a plate solver. Many bright stars visible against
 # truly dark sky."
 #
-# Empirical: **every detector currently fails on this scene.** The
-# classifier reports Twilight (image-only path overestimates because
-# of moonlight or deck-light glow contributing to mean luma); with
-# an astronomical prior it would correctly resolve to Night. The
+# Empirical: the three classical horizon detectors and the
+# default-config peak/centroid all fail. The classifier reports
+# Twilight (image-only path overestimates because of moonlight or
+# deck-light glow contributing to mean luma); with an
+# astronomical prior it would correctly resolve to Night. The
 # centroid refuses (only 9 px above threshold — no extended bright
-# body in frame, the stars are too small). All three horizon
-# detectors fail.
+# body in frame, the stars are too small).
 #
-# This is the canonical expected_failure case for the current
-# pipeline. Once plate solving (Phase 3) and a night-horizon
-# detector land, this scene flips to a working night case.
+# **Multi-pass night-horizon does work on this scene.** Single-
+# pass finds the deck top (y=329, 105 inliers); multi-pass finds
+# the actual sea horizon (y=247, 164 inliers) on a subsequent
+# pass and surfaces it as the top candidate. This was the
+# canonical scene that motivated multi-pass detection.
+#
+# Once plate solving identifies the visible stars (Phase 3,
+# already implemented; integration into a fix-producing pipeline
+# is Phase 3.5), this scene becomes a "working" night case end-
+# to-end.
 
 [case]
 name         = "container_ship_night"
-description  = "Container ship deck; dark night sky; dense star field; no body, no horizon"
+description  = "Container ship deck; dark night sky; dense star field; multi-pass night-horizon finds sea horizon at y≈247 by outvoting the deck top at y≈329"
 kind         = "expected_failure"
 frame_count  = 1
 frame_width  = 640
@@ -31,7 +38,7 @@ frame_height = 360
 condition = "twilight"
 notes     = "Image-only. Once the engine consults the almanac this will report Night."
 
-# All three horizon detectors fail.
+# Three single-pass horizon detectors fail.
 [horizon.gradient]
 outcome       = "err"
 error_variant = "only 48 inliers"
@@ -47,3 +54,28 @@ outcome       = "err"
 error_variant = "not enough candidate columns"
 correctness   = "wrong"
 notes         = "ADE20K-trained model has no class for 'dark sky with stars'; classifies the entire frame as something other than sky→sea."
+
+# Single-pass night detector returns the deck top (y≈329) — wrong
+# horizon, but recorded as ok-but-wrong since multi-pass relies
+# on this same detector internally and a regression here would
+# break multi-pass too.
+[horizon.night]
+outcome             = "ok"
+slope               = -0.0047
+intercept           = 328.64
+slope_tolerance     = 0.05
+intercept_tolerance = 15.0
+inlier_count_min    = 80
+correctness         = "wrong"
+notes               = "Lands on the deck top, not the sea horizon. The multi-pass variant (below) finds the actual horizon as a stronger second-pass candidate."
+
+# Multi-pass night detector: surfaces the actual sea horizon at
+# y≈247 (164 inliers) as the top candidate, outvoting the deck
+# top (105 inliers). **Working path on this scene.**
+[horizon.night_multi_pass]
+candidates_min          = 2
+top_intercept           = 247.19
+top_intercept_tolerance = 15.0
+top_inlier_count_min    = 130
+correctness             = "approximately_correct"
+notes                   = "Multi-pass finds the deck top first (105 inliers), then masks it and finds the actual sea horizon at y≈247 (164 inliers). Sort by inlier count surfaces the horizon as the top candidate."

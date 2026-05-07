@@ -161,12 +161,33 @@ mod harness {
         pub sky_region: Option<HorizonExpectation>,
         #[serde(default)]
         pub segmentation: Option<HorizonExpectation>,
+        /// Single-pass night detector
+        /// ([`bris_vision::detect_horizon_night`]).
+        #[serde(default)]
+        pub night: Option<HorizonExpectation>,
+        /// Textured-water night detector
+        /// ([`bris_vision::detect_horizon_night_textured`]).
+        #[serde(default)]
+        pub night_textured: Option<HorizonExpectation>,
+        /// Multi-pass night detector
+        /// ([`bris_vision::detect_horizon_night_multi_pass`]).
+        /// Has different shape: returns a Vec of candidates ranked
+        /// by inlier count; assertions can pin the top candidate's
+        /// intercept and minimum inlier count.
+        #[serde(default)]
+        pub night_multi_pass: Option<MultiPassHorizonExpectation>,
     }
 
     /// Per-method horizon expectation. `outcome` selects what the
     /// assertion does: `ok` requires Ok-and-matches, `err` requires
     /// Err (optionally matching `error_variant` as a substring of
     /// the Display text).
+    ///
+    /// `config_*` fields are optional per-method config overrides
+    /// applied to the detector's default config before the call.
+    /// They're how a case can declare "this scene needs a relaxed
+    /// inlier fraction" or "search the lower half of the frame
+    /// only" without that requiring a separate static test.
     #[derive(Debug, serde::Deserialize)]
     pub struct HorizonExpectation {
         pub outcome: Outcome,
@@ -188,6 +209,53 @@ mod harness {
         pub correctness: Option<String>,
         #[serde(default)]
         pub notes: Option<String>,
+        /// Optional config override: minimum inlier fraction for
+        /// RANSAC. Lower than default (0.5 daylight, 0.3 night)
+        /// when the scene is genuinely noisy.
+        #[serde(default)]
+        pub config_min_inlier_fraction: Option<f64>,
+        /// Optional config override (night detectors only): row
+        /// range to search for the global gradient/step.
+        #[serde(default)]
+        pub config_search_row_range: Option<[f64; 2]>,
+        /// Optional config override: apply a body-excluding
+        /// column mask before detection, where the body is
+        /// detected by `centroid_saturated_body_in_mask`.
+        #[serde(default)]
+        pub config_exclude_body: bool,
+    }
+
+    /// Multi-pass-detector expectation. Asserts properties of the
+    /// returned Vec of candidates rather than a single Result.
+    #[derive(Debug, serde::Deserialize)]
+    pub struct MultiPassHorizonExpectation {
+        /// Minimum number of candidates expected.
+        #[serde(default = "default_min_candidates")]
+        pub candidates_min: usize,
+        /// Expected intercept of the top (most-inliers) candidate,
+        /// with tolerance.
+        #[serde(default)]
+        pub top_intercept: Option<f64>,
+        #[serde(default = "default_intercept_tolerance")]
+        pub top_intercept_tolerance: f64,
+        /// Minimum inlier count on the top candidate.
+        #[serde(default)]
+        pub top_inlier_count_min: Option<u32>,
+        /// Documentation only.
+        #[serde(default)]
+        pub correctness: Option<String>,
+        #[serde(default)]
+        pub notes: Option<String>,
+        /// Same config-override fields as
+        /// [`HorizonExpectation`].
+        #[serde(default)]
+        pub config_min_inlier_fraction: Option<f64>,
+        #[serde(default)]
+        pub config_search_row_range: Option<[f64; 2]>,
+    }
+
+    fn default_min_candidates() -> usize {
+        1
     }
 
     fn default_slope_tolerance() -> f64 {
@@ -471,6 +539,123 @@ mod harness {
     #[cfg(not(feature = "segmentation"))]
     pub fn check_horizon_segmentation(_case: &CaseSpec) {
         eprintln!("segmentation feature disabled; skipping horizon.segmentation check");
+    }
+
+    /// Run the single-pass night detector and assert its declared
+    /// outcome. Honors `config_min_inlier_fraction`,
+    /// `config_search_row_range`, and `config_exclude_body` from
+    /// the expectation.
+    pub fn check_horizon_night(case: &CaseSpec) {
+        use bris_vision::{
+            centroid_saturated_body_in_mask, detect_horizon_night,
+            detect_horizon_night_excluding_body, NightHorizonConfig, SaturatedBodyConfig,
+        };
+        let exp = case
+            .horizon
+            .night
+            .as_ref()
+            .expect("check_horizon_night called with no [horizon.night]");
+        let frame = load_case_frame(case, &first_frame_filename(case));
+        let mut cfg = NightHorizonConfig::default();
+        if let Some(f) = exp.config_min_inlier_fraction {
+            cfg.min_inlier_fraction = f;
+        }
+        if let Some(r) = exp.config_search_row_range {
+            cfg.search_row_range = (r[0], r[1]);
+        }
+        let result = if exp.config_exclude_body {
+            let body =
+                centroid_saturated_body_in_mask(&frame, SaturatedBodyConfig::default(), None)
+                    .expect("config_exclude_body requires a saturated body in the frame");
+            let radius = (f64::from(body.area_px) / std::f64::consts::PI).sqrt();
+            detect_horizon_night_excluding_body(&frame, cfg, body.x, body.y, radius, 8.0)
+        } else {
+            detect_horizon_night(&frame, cfg)
+        };
+        assert_horizon_outcome("night", &result, exp);
+    }
+
+    /// Run the textured-water night detector and assert its
+    /// declared outcome.
+    pub fn check_horizon_night_textured(case: &CaseSpec) {
+        use bris_vision::{
+            centroid_saturated_body_in_mask, detect_horizon_night_textured,
+            detect_horizon_night_textured_excluding_body, SaturatedBodyConfig,
+            TexturedHorizonConfig,
+        };
+        let exp = case
+            .horizon
+            .night_textured
+            .as_ref()
+            .expect("check_horizon_night_textured called with no [horizon.night_textured]");
+        let frame = load_case_frame(case, &first_frame_filename(case));
+        let mut cfg = TexturedHorizonConfig::default();
+        if let Some(f) = exp.config_min_inlier_fraction {
+            cfg.min_inlier_fraction = f;
+        }
+        if let Some(r) = exp.config_search_row_range {
+            cfg.search_row_range = (r[0], r[1]);
+        }
+        let result = if exp.config_exclude_body {
+            let body =
+                centroid_saturated_body_in_mask(&frame, SaturatedBodyConfig::default(), None)
+                    .expect("config_exclude_body requires a saturated body in the frame");
+            let radius = (f64::from(body.area_px) / std::f64::consts::PI).sqrt();
+            detect_horizon_night_textured_excluding_body(&frame, cfg, body.x, body.y, radius, 100.0)
+        } else {
+            detect_horizon_night_textured(&frame, cfg)
+        };
+        assert_horizon_outcome("night_textured", &result, exp);
+    }
+
+    /// Run the multi-pass night detector and assert its declared
+    /// candidate-list properties.
+    pub fn check_horizon_night_multi_pass(case: &CaseSpec) {
+        use bris_vision::{detect_horizon_night_multi_pass, NightHorizonConfig};
+        let exp = case
+            .horizon
+            .night_multi_pass
+            .as_ref()
+            .expect("check_horizon_night_multi_pass called with no [horizon.night_multi_pass]");
+        let frame = load_case_frame(case, &first_frame_filename(case));
+        let mut cfg = NightHorizonConfig::default();
+        if let Some(f) = exp.config_min_inlier_fraction {
+            cfg.min_inlier_fraction = f;
+        }
+        if let Some(r) = exp.config_search_row_range {
+            cfg.search_row_range = (r[0], r[1]);
+        }
+        let candidates = detect_horizon_night_multi_pass(&frame, cfg, None);
+        assert!(
+            candidates.len() >= exp.candidates_min,
+            "night_multi_pass: expected at least {} candidates, got {}",
+            exp.candidates_min,
+            candidates.len()
+        );
+        if let Some(top_intercept) = exp.top_intercept {
+            assert!(
+                !candidates.is_empty(),
+                "night_multi_pass: top_intercept asserted but no candidates returned"
+            );
+            let actual = candidates[0].intercept;
+            assert!(
+                (actual - top_intercept).abs() <= exp.top_intercept_tolerance,
+                "night_multi_pass: top intercept {actual:.2} not within {} of recorded {top_intercept:.2}",
+                exp.top_intercept_tolerance,
+            );
+        }
+        if let Some(min_inliers) = exp.top_inlier_count_min {
+            assert!(
+                !candidates.is_empty(),
+                "night_multi_pass: top_inlier_count_min asserted but no candidates returned"
+            );
+            assert!(
+                candidates[0].inlier_count >= min_inliers,
+                "night_multi_pass: top inlier count {} below recorded floor {}",
+                candidates[0].inlier_count,
+                min_inliers
+            );
+        }
     }
 
     /// Wraps `SegmentError` to satisfy the `Display` bound on
@@ -971,72 +1156,6 @@ fn sunrise_horizon_findable_with_body_exclusion_and_relaxed_ransac() {
     );
 }
 
-/// `night_test_lowres` revisited: with a manually-tuned
-/// `search_row_range` that skips the moon's halo, the night
-/// detector finds the actual sea-sky horizon at ~69% of the
-/// frame height (around y = 1324 of 1920).
-///
-/// The default-config night detector lands on the moon halo's
-/// edge at y ≈ 258 — the strongest luma transition in the frame.
-/// The body-excluding variant alone doesn't help much because the
-/// moon's halo extends well beyond the body's column range. The
-/// fix is to restrict the global gradient search to the lower
-/// portion of the frame (below the halo): `search_row_range:
-/// (0.55, 1.0)` works for this scene.
-///
-/// In the eventual streaming engine this kind of per-scene tuning
-/// would come from either:
-///   - A multi-pass detector (find strongest gradient, mask its
-///     neighborhood, find next-strongest).
-///   - Combining with the segmentation detector to get a sky/sea
-///     class prior.
-///   - Operator-supplied scene context.
-///
-/// For now this test documents that the night detector *can* find
-/// the right horizon when given the right search range — the
-/// algorithm is sound; the autoconfig is the missing piece.
-#[test]
-fn night_test_lowres_horizon_findable_with_tuned_search_range() {
-    use bris_core::time::{Tt, JD_J2000};
-    use bris_vision::{detect_horizon_night, load_frame_from_path, Intrinsics, NightHorizonConfig};
-    use std::path::Path;
-
-    let path = Path::new(harness::REGRESSION_DIR)
-        .join("night_test_lowres")
-        .join("frame.jpg");
-    let dims = image::image_dimensions(&path).expect("dims");
-    let intrinsics = Intrinsics::placeholder(dims.0, dims.1);
-    let frame = load_frame_from_path(&path, Tt::from_julian_date(JD_J2000), 0, intrinsics)
-        .expect("load frame");
-
-    let cfg = NightHorizonConfig {
-        search_row_range: (0.55, 1.0),
-        min_inlier_fraction: 0.2,
-        ..NightHorizonConfig::default()
-    };
-    let line =
-        detect_horizon_night(&frame, cfg).expect("tuned night detector should find a horizon");
-
-    // Recorded: intercept ≈ 1324, slope near zero, ~110 inliers.
-    // ~69% of the 1920-tall frame, which is where the actual
-    // moonlit-sky-to-sea transition sits.
-    assert!(
-        (line.intercept - 1324.0).abs() < 30.0,
-        "horizon intercept {} not near recorded ~1324",
-        line.intercept
-    );
-    assert!(
-        line.slope.abs() < 0.05,
-        "horizon slope {} not near horizontal",
-        line.slope
-    );
-    assert!(
-        line.inlier_count >= 80,
-        "expected at least 80 inliers, got {}",
-        line.inlier_count
-    );
-}
-
 /// Synthetic "moonlit sea brighter than dark sky" scene: confirms
 /// the night detector handles the **sea-brighter-than-sky** case
 /// (the daylight detectors all assume sky-brighter-than-sea).
@@ -1171,232 +1290,5 @@ fn marina_with_body_peak_detector_sees_moon_dim_when_rigging_obscures() {
         obscured < visible * 0.8,
         "expected obscured intensity ({obscured:.0}) to be substantially \
          below visible intensity ({visible:.0}); rigging should dim it",
-    );
-}
-
-/// Multi-pass night-horizon detector on `night_test_highres`:
-/// finds the actual sea-sky horizon at y ≈ 77 even though the
-/// single-pass detector lands on the wake region (y ≈ 180). The
-/// load-bearing assertion: with multi-pass, the
-/// most-inliers candidate is the real horizon.
-///
-/// This is a real-data demonstration of why multi-pass matters:
-/// the strongest horizontal luma transition isn't always the
-/// horizon. Multi-pass enumerates the top-N transitions; the
-/// caller picks by additional context (inlier count, position
-/// in the frame, segmentation prior).
-#[test]
-fn night_test_highres_multi_pass_finds_actual_horizon() {
-    use bris_core::time::{Tt, JD_J2000};
-    use bris_vision::{
-        detect_horizon_night_multi_pass, load_frame_from_path, Intrinsics, NightHorizonConfig,
-    };
-    use std::path::Path;
-
-    let path = Path::new(harness::REGRESSION_DIR)
-        .join("night_test_highres")
-        .join("frame.png");
-    let dims = image::image_dimensions(&path).expect("dims");
-    let intrinsics = Intrinsics::placeholder(dims.0, dims.1);
-    let frame = load_frame_from_path(&path, Tt::from_julian_date(JD_J2000), 0, intrinsics)
-        .expect("load frame");
-
-    let candidates = detect_horizon_night_multi_pass(&frame, NightHorizonConfig::default(), None);
-    assert!(
-        !candidates.is_empty(),
-        "multi-pass should find at least one horizon"
-    );
-    // The actual sea-sky horizon is around y=85 (visible in the
-    // frame as the dark-sky / dark-sea boundary). Multi-pass
-    // sorted by inlier count puts it first.
-    let top = &candidates[0];
-    assert!(
-        (top.intercept - 77.0).abs() < 15.0,
-        "top candidate should be near y=77 (actual horizon); got intercept {:.1}",
-        top.intercept,
-    );
-    assert!(
-        top.inlier_count > 150,
-        "top candidate should have strong inlier consensus; got {}",
-        top.inlier_count,
-    );
-}
-
-/// Multi-pass on `container_ship_night`: the deck-top is the
-/// strongest single-pass match (y ≈ 329), but multi-pass finds a
-/// stronger consensus near the actual sea horizon at y ≈ 247.
-#[test]
-fn container_ship_night_multi_pass_finds_horizon_below_deck() {
-    use bris_core::time::{Tt, JD_J2000};
-    use bris_vision::{
-        detect_horizon_night_multi_pass, load_frame_from_path, Intrinsics, NightHorizonConfig,
-    };
-    use std::path::Path;
-
-    let path = Path::new(harness::REGRESSION_DIR)
-        .join("container_ship_night")
-        .join("frame.png");
-    let dims = image::image_dimensions(&path).expect("dims");
-    let intrinsics = Intrinsics::placeholder(dims.0, dims.1);
-    let frame = load_frame_from_path(&path, Tt::from_julian_date(JD_J2000), 0, intrinsics)
-        .expect("load frame");
-
-    let candidates = detect_horizon_night_multi_pass(&frame, NightHorizonConfig::default(), None);
-    assert!(
-        candidates.len() >= 2,
-        "multi-pass should find at least 2 candidates on this scene; got {}",
-        candidates.len(),
-    );
-    // The top candidate (sorted by inlier count) is the actual
-    // sea-sky horizon near y=247 (164 inliers); the deck top
-    // appears as a secondary candidate near y=329 (105 inliers).
-    let top = &candidates[0];
-    assert!(
-        (top.intercept - 247.0).abs() < 15.0,
-        "top candidate should be near y=247 (sea horizon); got {:.1}",
-        top.intercept,
-    );
-    assert!(
-        top.inlier_count > candidates[1].inlier_count,
-        "top candidate should have more inliers than secondary",
-    );
-}
-
-/// `container_ship_night_lights_on_water_horizon_visible` —
-/// later frame from the same timelapse as
-/// `container_ship_night_lights_on_water` (originally frame 0024).
-/// The ship is approaching Port of Colombo, Sri Lanka; city
-/// lights are visible along the actual sea horizon, and the
-/// atmospheric glow has cleared. The multi-pass night-horizon
-/// detector finds the actual horizon at y ≈ 241 (the city-lights
-/// row) with ~120 inliers, *outvoting* the deck top at y ≈ 325
-/// with ~115 inliers.
-///
-/// Load-bearing assertion: this is the success case for the
-/// multi-pass algorithm. When a scene has both a strong
-/// non-horizon transition (the deck top) and a competing horizon
-/// transition with comparable inlier strength, multi-pass surfaces
-/// the horizon by sorting candidates by inlier count after
-/// enumerating all of them.
-#[test]
-fn container_ship_night_lights_on_water_horizon_visible_via_multi_pass() {
-    use bris_core::time::{Tt, JD_J2000};
-    use bris_vision::{
-        detect_horizon_night_multi_pass, load_frame_from_path, Intrinsics, NightHorizonConfig,
-    };
-    use std::path::Path;
-
-    let path = Path::new(harness::REGRESSION_DIR)
-        .join("container_ship_night_lights_on_water_horizon_visible")
-        .join("frame.png");
-    let dims = image::image_dimensions(&path).expect("dims");
-    let intrinsics = Intrinsics::placeholder(dims.0, dims.1);
-    let frame = load_frame_from_path(&path, Tt::from_julian_date(JD_J2000), 0, intrinsics)
-        .expect("load frame");
-
-    let candidates = detect_horizon_night_multi_pass(&frame, NightHorizonConfig::default(), None);
-    assert!(
-        candidates.len() >= 2,
-        "multi-pass should find at least 2 candidates on this scene; got {}",
-        candidates.len(),
-    );
-    let top = &candidates[0];
-    // The actual sea horizon (city lights row) is around y=241.
-    assert!(
-        (top.intercept - 241.0).abs() < 15.0,
-        "top candidate should be near y=241 (city-lights horizon); got {:.1}",
-        top.intercept,
-    );
-    // Inlier count should be competitive with the secondary
-    // (which is the deck top).
-    assert!(
-        top.inlier_count > 100,
-        "expected at least 100 inliers on the top candidate; got {}",
-        top.inlier_count,
-    );
-}
-
-/// `night_test_lowres` revisited with the textured-water detector.
-/// The case.toml docstring describes the per-row std-dev signal
-/// that should locate the horizon at y ≈ 1310-1330 once the moon
-/// is masked out as a 2D box. This test asserts that
-/// [`detect_horizon_night_textured`] finds it.
-///
-/// Empirically the detector finds y ≈ 1329 *even without the
-/// moon mask*, because the moon's bright halo doesn't generate a
-/// texture-step signal — only mean-luma signal — so the
-/// std-dev-based detector is naturally blind to it. The body-
-/// excluding variant is exercised separately to confirm it
-/// produces the same result (defensive against regressions in
-/// the masking machinery).
-///
-/// The detected slope on this frame is non-trivial (~-0.2),
-/// reflecting genuine camera tilt at capture (handheld phone, no
-/// gimbal). Slope is not asserted: it's a real degree of freedom
-/// of the captured scene, not noise to reject. The downstream
-/// [`bris_vision::measure_altitude`] consumes the slope as part
-/// of the horizon plane, so a tilted line still produces a
-/// correct altitude as long as the body's pixel position is
-/// above the line.
-#[test]
-fn night_test_lowres_textured_detector_finds_horizon() {
-    use bris_core::time::{Tt, JD_J2000};
-    use bris_vision::{
-        centroid_saturated_body_in_mask, detect_horizon_night_textured,
-        detect_horizon_night_textured_excluding_body, load_frame_from_path, Intrinsics,
-        SaturatedBodyConfig, TexturedHorizonConfig,
-    };
-    use std::path::Path;
-
-    let path = Path::new(harness::REGRESSION_DIR)
-        .join("night_test_lowres")
-        .join("frame.jpg");
-    let dims = image::image_dimensions(&path).expect("dims");
-    let intrinsics = Intrinsics::placeholder(dims.0, dims.1);
-    let frame = load_frame_from_path(&path, Tt::from_julian_date(JD_J2000), 0, intrinsics)
-        .expect("load frame");
-
-    // Unmasked path: the texture-step signal is so dominant on
-    // this scene that the moon's mean-luma halo doesn't interfere.
-    let line_unmasked = detect_horizon_night_textured(&frame, TexturedHorizonConfig::default())
-        .expect("textured detector should find the horizon on night_test_lowres");
-
-    // The actual sea horizon is at y ≈ 1310-1330 (recorded value
-    // ~1329; characterized in the case.toml docstring).
-    const HORIZON_Y: f64 = 1329.0;
-    const TOL_PX: f64 = 30.0;
-    assert!(
-        (line_unmasked.intercept - HORIZON_Y).abs() < TOL_PX,
-        "unmasked: expected intercept near {HORIZON_Y}, got {:.1}",
-        line_unmasked.intercept,
-    );
-
-    // Body-excluding variant: build the moon mask and re-run.
-    // Result should agree with the unmasked path within a small
-    // tolerance (the mask doesn't change much because the moon
-    // doesn't contaminate the texture signal anyway).
-    let moon = centroid_saturated_body_in_mask(&frame, SaturatedBodyConfig::default(), None)
-        .expect("moon present");
-    let radius = (f64::from(moon.area_px) / std::f64::consts::PI).sqrt();
-    let line_masked = detect_horizon_night_textured_excluding_body(
-        &frame,
-        TexturedHorizonConfig::default(),
-        moon.x,
-        moon.y,
-        radius,
-        100.0,
-    )
-    .expect("body-excluding textured detector should find the horizon");
-    assert!(
-        (line_masked.intercept - HORIZON_Y).abs() < TOL_PX,
-        "masked: expected intercept near {HORIZON_Y}, got {:.1}",
-        line_masked.intercept,
-    );
-    // The two should agree within a few pixels.
-    assert!(
-        (line_unmasked.intercept - line_masked.intercept).abs() < 10.0,
-        "unmasked ({:.1}) and masked ({:.1}) results should agree closely",
-        line_unmasked.intercept,
-        line_masked.intercept,
     );
 }

@@ -66,3 +66,29 @@ intercept_tolerance = 15.0
 inlier_count_min    = 400
 correctness         = "approximately_correct"
 notes               = "Segmentation finds 462 of 512 columns producing transitions on this dark-sky scene; the model generalizes better than expected here."
+
+# Single-pass night detector (mean-gradient): finds the wake
+# region at y≈180, not the actual sea horizon at y≈85. Recorded
+# as ok-but-wrong: returns Ok, but the value is the wake's
+# brightness transition, not the horizon.
+[horizon.night]
+outcome             = "ok"
+slope               = 0.0065
+intercept           = 180.44
+slope_tolerance     = 0.05
+intercept_tolerance = 15.0
+inlier_count_min    = 50
+correctness         = "wrong"
+notes               = "Single-pass mean-gradient lands on the wake, not the sea horizon. Multi-pass (below) finds the actual horizon as a stronger second-pass candidate."
+
+# Multi-pass night detector: surfaces the actual horizon at
+# y≈77 (195 inliers) as the top candidate, beating the wake
+# region (66 inliers) by inlier count. **This is the working
+# path on this scene.**
+[horizon.night_multi_pass]
+candidates_min          = 2
+top_intercept           = 77.0
+top_intercept_tolerance = 15.0
+top_inlier_count_min    = 150
+correctness             = "approximately_correct"
+notes                   = "Multi-pass finds the wake region (66 inliers) on its first pass, then masks it and finds the actual sea-sky horizon at y≈77 (195 inliers) on a subsequent pass. Sort by inlier count surfaces the horizon as the top candidate."
