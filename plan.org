@@ -916,72 +916,173 @@ references to the regression tests that pin the behavior. See
        observation.
 
 * Phase 3.5: Continuous operation & automatic body selection
-  Bris is not a "press the button to take a sight" app. The intended model
-  is a device mounted on deck or held in hand, continuously sweeping the
-  sky (manually, by boat motion, or by a mechanical mount), with fixes
-  published automatically as conditions allow. The operator does not select
-  a body or trigger a measurement.
-** TODO Streaming frame pipeline
-   Frames flow continuously from the camera into a pipeline: capture →
-   horizon detection → body detection → identification → sight extraction
-   → sight queue → fix publisher. Backpressure handling: drop frames at
-   the input rather than queueing them if downstream stages cannot keep up.
-** TODO Automatic day/night mode detection
-   Per-frame mean luminance + presence of saturated regions selects
-   between day pipeline (sun/moon centroiding) and night pipeline
-   (plate solving). Hysteresis prevents twilight flapping. No user toggle.
+  Bris is not a "press the button to take a sight" app. The
+  intended model is a device mounted on deck or held in hand,
+  continuously sweeping the sky (manually, by boat motion, or by
+  a mechanical mount), with fixes published automatically as
+  conditions allow. The operator does not select a body or
+  trigger a measurement.
 
-   *Status:* the classifier itself is implemented in
-   ~bris-vision::condition::classify~ (Phase 2.5; tested against
-   12 corpus scenes). It produces a ~Classification~ with
-   condition + confidence + image and astronomical evidence + a
-   disagreement flag for when sources contradict. The streaming
-   engine still needs to:
-   - Call the almanac once per batch to get sun altitude.
-   - Apply hysteresis (the per-frame classifier currently doesn't;
-     a dim cloud transit could flip day → twilight on a single
-     frame).
-   - Feed the result into method-set selection.
-** TODO Day-mode body identification
-   Detect saturated bright blob; classify Sun vs Moon by apparent angular
-   diameter and time-of-day priors. Apply semi-diameter correction from
-   almanac (sun and moon are not point sources; we measure to the limb
-   and reduce to center). When both visible, prefer the higher-altitude
-   body and queue both as independent sights when geometry allows.
-** TODO Night-mode automatic star selection
-   Plate-solve the frame to identify all stars present, then score each
-   for sight value:
-   - Altitude band: prefer 20°–70° (refraction error vs geometry tradeoff).
-   - Azimuth diversity: prefer stars whose LOPs are 60°–120° from
-     existing queued sights (minimizes position covariance).
-   - Brightness: better SNR improves centroiding.
-   - Catalog reliability: prefer the 57 standard navigational stars where
-     possible.
-   Add the top N (default 3–5) per opportunity to the sight queue.
-   Visible planets are treated as additional candidates with the same
-   scoring.
-** TODO Body tracking across frames
-   Once a body is identified in frame N, predict its position in frame
-   N+1 from camera motion (estimated from horizon line shift) and
-   sidereal motion. Re-detect at the predicted location rather than
-   re-running plate solve. Fall back to full plate solve when tracking
-   fails.
-** TODO Rolling sight window with aging
-   Maintain a sliding window (default 10 min, configurable) of accepted
-   sights. Each sight carries its capture timestamp; older sights are
-   weighted down or dropped from fix computation. Window contents,
-   ages, and weights surfaced in ~$PBRIS,SIGHT~.
-** TODO Continuous fix publishing
-   Publish a new fix whenever the sight window contents change
-   meaningfully (new sight added, old sight expired, or every N seconds
-   minimum). Each published fix is a snapshot of the current best
-   estimate from the current window — there is no concept of "starting"
-   or "ending" a sight session.
+  *Read this first:* [[file:docs/design/frame_scheduling.md][docs/design/frame_scheduling.md]]
+  describes the architecture: staged-pipeline-with-per-stage-
+  early-rejection + two parallel detection queues (body, horizon)
+  + lazy stitching at pair selection + ring buffer for raw
+  frames + sight window with diminishing-returns-aware cap.
+  That document also contains an implementation skeleton:
+  recommended crate layout (`bris-streaming`), public API
+  sketch, stage-by-stage mapping to existing code in the
+  workspace, threading model, test strategy, and a concrete
+  ordered list of first commits.
+
+  The TODOs below are organized in implementation order
+  matching the design doc's "Concrete first commits" list. Each
+  TODO references the design doc section that describes its
+  shape; the design doc has the rationale, this list has the
+  scoping for the changelog.
+
+** TODO bris-streaming crate skeleton + EngineConfig + push_frame + fix_stream API
+   New workspace crate. Types only at this stage; no processing
+   logic. Verifies the public API surface compiles cleanly
+   against the existing crates' types (Frame, ApparentPlace,
+   PlateSolveResult, FixPosition, etc.). The CLI / FFI / mobile
+   shells will eventually call into this crate; defining its
+   surface first lets implementation proceed without worrying
+   about consumer compatibility.
+
+   See "Implementation skeleton → Public API sketch" in the
+   design doc.
+
+** TODO Stage A + B: classifier + body detection (single-threaded, no queueing)
+   Wire the classifier ([[file:crates/bris-vision/src/condition.rs][bris-vision::condition::classify]])
+   and body detection ([[file:crates/bris-vision/src/centroid.rs][centroid_saturated_body_in_mask]] for
+   day, [[file:crates/bris-vision/src/peak.rs][detect_peaks]] for night) into the engine. Synchronously
+   process each pushed frame; log the per-stage σ; no fix
+   publication yet. The point of this stage is to surface any
+   API mismatches between detectors (e.g. does the classifier
+   need a sun-altitude wrapper that converts `Observer` + `Tt`
+   into a `f64` altitude? probably yes).
+
+   See "Stage-by-stage mapping → Stage A, Stage B" in the
+   design doc.
+
+** TODO Stage C: horizon detection in cheap-first order
+   Add horizon detection to the engine pipeline, ordered
+   cheapest-first. Skip later detectors when an earlier one
+   produces a horizon with σ better than the later one could
+   plausibly improve to. Order on the design doc:
+
+   - [[file:crates/bris-vision/src/horizon.rs][detect_horizon]] (gradient, ~5 ms)
+   - [[file:crates/bris-vision/src/horizon.rs][detect_horizon_via_sky_region]] (~10 ms)
+   - For night/twilight: [[file:crates/bris-vision/src/night_horizon.rs][detect_horizon_night]] +
+     [[file:crates/bris-vision/src/night_horizon.rs][detect_horizon_night_textured]] (try both, keep better σ);
+     fall back to [[file:crates/bris-vision/src/night_horizon.rs][detect_horizon_night_multi_pass]] if
+     neither is confident.
+   - [[file:crates/bris-vision/src/segment.rs][detect_horizon_via_segmentation]] last (~100 ms inference).
+
+   See "Stage-by-stage mapping → Stage C" in the design doc.
+
+** TODO Body and horizon priority queues + ring buffer + eviction
+   Pure data-structure work. The two queues are keyed on σ;
+   each entry is a (frame_id, detection_record). The ring
+   buffer holds raw frames + their detection records for the
+   stitching window (default 2 seconds at 30 fps = 60 frames).
+
+   The eviction criterion is precise: a frame is evictable when
+   *both* (1) no detection record from this frame is in either
+   queue, AND (2) no record currently in either queue has this
+   frame as its closest viable stitching partner.
+
+   See "Ring buffer and frame eviction" in the design doc.
+
+** TODO Stage E: pair selection + sight emission + sight window
+   The first end-to-end fix-publishing milestone. For each
+   body record in the queue, find the best-σ horizon record
+   that pairs with it (same frame is free; different frames
+   need a stitch which adds its alignment-residual σ to the
+   pair's combined σ). Use [[file:crates/bris-vision/src/measure.rs][measure_altitude]] for same-frame
+   pairs and [[file:crates/bris-vision/src/panorama.rs][panorama_altitude]] for cross-frame pairs.
+
+   The sight window has cap N=10 with replace-worst-on-
+   insertion; age-weighting with a 10-minute time constant.
+   When the window changes meaningfully (new sight added, old
+   sight expired), publish a new fix via [[file:crates/bris-nav/src/fix.rs][bris-nav::multi_sight_fix]].
+
+   *Stitching σ is estimated cheaply* (from time gap + frame-
+   to-frame motion) at pair-selection time; the engine commits
+   to running the actual stitch only on the chosen pair.
+
+   See "Stitching is part of pair selection, not an early
+   stage" and "Sight window: cap, age-weighting, and operator
+   surface" in the design doc.
+
+** TODO Stage D: plate solving + per-star altitude (night fixes)
+   Adds night-fix support. Plate solving runs only when Stage
+   B produced peaks AND the classifier said night/twilight.
+   Database is constructed at engine startup or lazily on
+   first night frame (see `PlateSolverInit` in the design
+   doc); the engine's UX call.
+
+   Identified stars become per-star altitude observations via
+   [[file:crates/bris-platesolve/src/altitude.rs][bris_platesolve::star_altitudes]], each contributing to
+   the sight window like any other body sight.
+
+   See "Stage-by-stage mapping → Stage D" + "Open questions →
+   Plate solving's database build cost" in the design doc.
+
+** TODO Hysteresis on the day/night classifier
+   The per-frame classifier doesn't have hysteresis; a dim
+   cloud transit could flip day → twilight on a single frame
+   and back. The engine adds a settle time (default ~3 seconds
+   = ~90 frames) before honoring a classifier transition,
+   keeping the prior method-set active during transients.
+
+   The classifier itself stays per-frame and read-only; the
+   engine layer holds the hysteresis state.
+
+** TODO $PBRIS extensions: N sights, azimuth spread, oldest age
+   The engine has new diagnostics that aren't yet in any NMEA
+   sentence. Extend [[file:crates/bris-nmea/src/pbris.rs][$PBRIS,*]] with these fields so the
+   chartplotter-side tooling can surface "this fix is built
+   from 3 sights at 25° azimuth spread, oldest 5 minutes ago,
+   dominant source: refraction." The fields are operator-
+   meaningful: a 25° spread means the position covariance is
+   poorly conditioned even if individual σ values look fine.
+
+   See "Sight window → Per-fix surface for the operator" in
+   the design doc.
+
+** TODO Engine integration tests + stress tests
+   Synthetic frame sequences fed through `push_frame` at
+   controlled cadences. Assert the right frames make it past
+   each stage, eviction respects the stitching window,
+   multi-frame stitching pairs the right (body, horizon), and
+   the final fix matches an expected position within σ.
+
+   The case.toml schema's existing `[fix]` table type (runner
+   currently unimplemented) is the natural place to declare
+   expected fix output for multi-frame sequences. Phase 3.5
+   implementation should give it a runner and exercise it on
+   sequences derived from `orig_test_video/` (603 frames of
+   `sailing_sun_upper_left` — a good multi-frame stress test).
+
+   Stress tests: feed at 60 fps with 100 ms per-frame
+   processing budget; assert fix-publication interval stays
+   within bounds (i.e. backpressure works correctly and the
+   engine doesn't fall behind indefinitely).
+
+   See "Test strategy" in the design doc.
+
 ** TODO Sweep guidance (mobile only)
-   On phone frontends, render a minimal overlay showing horizon
-   detection status and current body candidates. No body-selection UI.
-   The operator's only job is to sweep slowly enough for stitching to
-   work; the overlay communicates whether they are sweeping too fast.
+   On phone frontends, render a minimal overlay showing
+   horizon detection status and current body candidates. No
+   body-selection UI. The operator's only job is to sweep
+   slowly enough for stitching to work; the overlay
+   communicates whether they are sweeping too fast.
+
+   This is mobile-shell work (Kotlin/Swift), not engine work,
+   but the engine's diagnostics output (current method set,
+   per-stage σ, current sight window contents) is what the
+   overlay reads.
 
 * Phase 4: Sight reduction & fix
 ** TODO Per-stage uncertainty propagation

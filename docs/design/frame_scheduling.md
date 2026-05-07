@@ -287,3 +287,199 @@ alive.
 These are Phase 3.5 design decisions; this document captures the
 reasoning so we can act on it when the streaming engine work
 begins.
+
+## Implementation skeleton
+
+This section is for the next agent picking up Phase 3.5. It
+sketches the crate layout, public API, and how each pipeline
+stage maps to existing code.
+
+### New crate
+
+The streaming engine lives in a new `bris-streaming` workspace
+crate. It depends on every existing crate (`bris-vision`,
+`bris-almanac`, `bris-platesolve`, `bris-nav`, `bris-nmea`,
+`bris-core`) but no other workspace crate depends on it — it's
+the top of the stack, the orchestration layer that consumers
+(CLI, FFI, mobile) call into.
+
+### Public API sketch
+
+```rust
+/// Top-level engine. Owns the ring buffer, queues, sight
+/// window, and worker thread(s).
+pub struct StreamingEngine {
+    config: EngineConfig,
+    // ... internals
+}
+
+pub struct EngineConfig {
+    pub observer: bris_almanac::Observer,
+    pub stitching_window_seconds: f64,    // default 2.0
+    pub sight_window_seconds: f64,        // default 600.0 (10 min)
+    pub sight_window_capacity: usize,     // default 10
+    pub min_fix_publication_interval_ms: u64,  // default 1000
+    pub max_concurrent_pipeline_workers: usize, // default 1
+    pub plate_solver_config: PlateSolverInit,
+    // ...
+}
+
+pub enum PlateSolverInit {
+    /// Build the hash db at engine construction. Blocks ~10-30s.
+    AtStartup,
+    /// Build lazily on first night frame. First night fix
+    /// blocks ~10-30s.
+    Lazy,
+    /// Use a pre-built db (loaded from disk; future).
+    Cached(/* path */),
+}
+
+impl StreamingEngine {
+    pub fn new(config: EngineConfig) -> Self;
+
+    /// Push one captured frame into the engine. Non-blocking;
+    /// the engine queues it and processes asynchronously. Drops
+    /// the frame silently if the input ring is full
+    /// (backpressure).
+    pub fn push_frame(&self, frame: bris_vision::Frame);
+
+    /// Subscribe to fix publications. Each fix carries a
+    /// position estimate, full covariance, dominant-source
+    /// attribution, and the diagnostic fields the $PBRIS
+    /// sentence needs.
+    pub fn fix_stream(&self) -> impl Stream<Item = PublishedFix>;
+
+    /// Snapshot of current engine state for diagnostics.
+    pub fn diagnostics(&self) -> EngineDiagnostics;
+}
+
+pub struct PublishedFix {
+    pub position: bris_nav::FixPosition,
+    pub covariance: [[f64; 2]; 2],
+    pub n_sights: usize,
+    pub azimuth_spread_rad: f64,
+    pub oldest_sight_age_seconds: f64,
+    pub dominant_source: PBrisDominantSource,
+    pub timestamp: bris_core::time::Tt,
+}
+```
+
+The CLI's eventual `bris serve` subcommand wraps this engine
+plus a frame-capture path (V4L2 / libcamera) plus an NMEA
+transport layer.
+
+### Stage-by-stage mapping to existing code
+
+Each stage in the design above maps directly to existing code:
+
+- **Stage A (classifier)**: `bris_vision::condition::classify`.
+  The engine adds the almanac call (one per batch / per
+  publication interval, not per frame) for sun altitude.
+
+- **Stage B (body detection)**:
+  - Day path: `centroid_saturated_body_in_mask`.
+  - Night path: `detect_peaks` (then plate solve).
+  - For non-saturated bodies (Moon at dusk, planets):
+    `centroid_brightest_body_in_mask` with the sky-segmentation
+    mask if available.
+
+- **Stage C (horizon detection)** in cheap-first order:
+  - `detect_horizon` (gradient).
+  - `detect_horizon_via_sky_region`.
+  - For night/twilight: `detect_horizon_night` and
+    `detect_horizon_night_textured` (try both; keep the better
+    σ); `detect_horizon_night_multi_pass` if neither is
+    confident.
+  - `detect_horizon_via_segmentation` last, because of the
+    100ms inference cost.
+
+- **Stage D (plate solve)**: `bris_platesolve::plate_solve`.
+  The hash database is constructed once at engine startup (or
+  lazily on first call; see `PlateSolverInit`).
+
+- **Stage E (sight assembly)**:
+  - Same-frame body+horizon: `bris_vision::measure_altitude`.
+  - Cross-frame: `bris_vision::panorama::panorama_altitude`
+    or the lower-level stitching primitives in
+    `bris_vision::track`.
+  - Per-star altitude (night, after plate solve):
+    `bris_platesolve::star_altitudes`.
+
+- **Sight reduction + fix**: `bris_nav::sight::line_of_position`
+  per sight, then `bris_nav::fix::multi_sight_fix` over the
+  rolling window.
+
+- **NMEA emission**: `bris_nmea::standard` for `$GP*` and
+  `bris_nmea::pbris` for `$PBRIS,*` diagnostics. The engine's
+  per-fix surface (N sights, azimuth spread, oldest age,
+  dominant source) drops into the existing `$PBRIS,UNC` and
+  related sentences.
+
+### Threading model
+
+Start with **one worker thread** processing the ring buffer. A
+single Pi Zero 2W core running the staged pipeline at the
+target throughput is the baseline; if that's insufficient, the
+two parallel queues (body, horizon) are independent and can be
+processed on separate worker threads with the obvious cost in
+synchronization complexity. Don't optimize until measurement
+demands it.
+
+The capture side runs on its own thread (V4L2 callback, AVF
+delegate, etc.) and pushes frames into the engine via
+`push_frame`. Backpressure is "drop on full ring."
+
+### Test strategy
+
+The engine is testable in CI without real cameras by feeding
+it synthetic frame sequences:
+
+1. **Per-stage unit tests** (already exist in their respective
+   crates): each detector's behavior on the regression corpus.
+2. **Engine integration tests**: synthetic sequences of
+   `bris_vision::Frame` constructed from corpus PNGs, fed
+   through `push_frame` at controlled cadences. Assert:
+   - The right frames make it past each stage.
+   - Eviction logic respects the stitching window.
+   - Multi-frame stitching pairs the right body+horizon.
+   - The final fix matches an expected position to within σ.
+3. **Stress tests**: feed at 60 fps with 100 ms per-frame
+   processing budget and assert fix-publication interval
+   stays within bounds (i.e. backpressure works correctly).
+
+The regression corpus's `case.toml` schema may need a new
+`[fix]` table type that captures expected fix output for
+multi-frame sequences. Currently the `[fix]` table exists in
+the schema as a stub; the runner is unimplemented. Phase 3.5
+implementation should give it a runner and exercise it on
+sequences derived from `orig_test_video/` (which has 603
+frames of the `sailing_sun_upper_left` scene — a good
+multi-frame stress test).
+
+### Concrete first commits
+
+A reasonable order for Phase 3.5 commits:
+
+1. **Skeleton crate + EngineConfig + push_frame + fix_stream
+   API surface** (no actual processing). Wire types together,
+   verify the shape compiles against the existing crates'
+   public APIs.
+2. **Stage A + B (single-threaded, no queueing)**: classify,
+   detect body, log results. No fix publication yet. This
+   surfaces any API mismatches (e.g. does the classifier need
+   a sun-altitude wrapper?).
+3. **Add Stage C with the cheap-first ordering**.
+4. **Add the body/horizon priority queues + ring buffer +
+   eviction logic**. Pure data-structure work; no new
+   detectors.
+5. **Stage E pair selection + sight emission + sight window**.
+   First end-to-end fix publishes here.
+6. **Plate solving (Stage D) + per-star altitude**.
+7. **Hysteresis on the day/night classifier**, with config-
+   driven settle time (default ~3 seconds = ~90 frames).
+8. **NMEA emission integration** (`$PBRIS,*` extensions for
+   N + azimuth-spread + age).
+9. **Stress + integration tests**.
+
+The CLI's `bris serve` subcommand and the V4L2 capture path
+are post-engine work; Phase 6 territory.

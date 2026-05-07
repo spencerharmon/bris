@@ -445,11 +445,15 @@ the most egregious false matches.
 
 ### Larger pieces
 
-5. **Streaming engine + continuous-operation engine** (Phase 3.5).
-   Reads frames continuously, classifies day/night/twilight via
-   the existing classifier, accumulates sights, publishes fixes
-   when ≥2 azimuth-diverse sights are available. Includes
-   cross-frame body tracking for the `marina_with_body` motivation.
+5. **Streaming engine** (Phase 3.5). Architecture and
+   implementation order are documented in
+   `docs/design/frame_scheduling.md`; plan.org's Phase 3.5 list
+   tracks the per-task scoping. Key decisions already made:
+   staged-pipeline-with-per-stage-early-rejection, two parallel
+   detection queues (body + horizon), lazy stitching at pair
+   selection, ring buffer for raw frames, sight window with
+   diminishing-returns-aware cap. New `bris-streaming` crate
+   will hold the engine; existing crates remain unchanged.
 
 6. **NMEA transport** (Phase 5 remainder).
 
