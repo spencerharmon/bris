@@ -169,6 +169,7 @@ pub fn run_plate_solve_case(case_name: &str) {
         verify_match_radius_rad: 1.5_f64.to_radians(),
         max_rms_residual_rad: (exp.config_max_rms_residual_arcsec / 3600.0).to_radians(),
         max_tuple_diameter_rad: exp.config_max_pattern_diameter_deg.to_radians(),
+        exhaustive_permutations: false,
     };
     let result = plate_solve(&peaks, &intrinsics, &db, solve_cfg);
 

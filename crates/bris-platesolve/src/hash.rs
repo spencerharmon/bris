@@ -62,6 +62,24 @@ pub struct CatalogPattern {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct PatternHash([u16; 4]);
 
+/// One catalog entry as needed by the plate-solver's
+/// verification loop. Built once at db construction time so the
+/// solver never recomputes unit vectors or rescans the magnitude
+/// filter inside its hot path.
+#[derive(Debug, Clone, Copy)]
+pub struct VerifyStar {
+    /// Yale BSC HR id.
+    pub hr: u32,
+    /// Apparent V magnitude (already known to satisfy `vmag <= mag_cutoff`).
+    pub vmag: f64,
+    /// J2000 RA, radians.
+    pub ra_rad: f64,
+    /// J2000 Dec, radians.
+    pub dec_rad: f64,
+    /// Cached J2000 ICRS unit vector for `(ra_rad, dec_rad)`.
+    pub unit_vec: [f64; 3],
+}
+
 /// The hash database.
 #[derive(Debug)]
 pub struct StarHashDb {
@@ -71,6 +89,15 @@ pub struct StarHashDb {
     /// included star, keyed by HR id. Reused at solve time for
     /// pose computation.
     pub(crate) star_vectors: HashMap<u32, [f64; 3]>,
+    /// Flat list of all stars passing the magnitude cutoff,
+    /// each with cached unit vector. The plate-solver's
+    /// verification loop iterates this directly instead of
+    /// re-filtering [`bris_almanac::all_stars`] and re-computing
+    /// unit vectors from `(ra, dec)` on every call. With ~1600
+    /// stars at mag 5.0 and ~2 billion inner-loop iterations per
+    /// `plate_solve` call, this saves the trig overhead that
+    /// otherwise dominates wall time.
+    pub(crate) verify_stars: Vec<VerifyStar>,
 }
 
 impl StarHashDb {
@@ -89,6 +116,7 @@ impl StarHashDb {
     /// per choice of anchor); we deduplicate via the sorted
     /// `hr_ids` so only one entry per pattern lands in the table.
     #[must_use]
+    #[allow(clippy::too_many_lines)] // single-purpose builder; splitting hurts readability
     pub fn build(cfg: StarHashDbConfig) -> Self {
         let stars: Vec<&StarRecord> = all_stars()
             .iter()
@@ -208,6 +236,16 @@ impl StarHashDb {
             table,
             cfg,
             star_vectors,
+            verify_stars: stars
+                .iter()
+                .map(|s| VerifyStar {
+                    hr: s.hr,
+                    vmag: s.vmag,
+                    ra_rad: s.ra_rad,
+                    dec_rad: s.dec_rad,
+                    unit_vec: ra_dec_to_unit_vec(s.ra_rad, s.dec_rad),
+                })
+                .collect(),
         }
     }
 
@@ -264,6 +302,14 @@ impl StarHashDb {
     #[must_use]
     pub fn star_vector(&self, hr: u32) -> Option<[f64; 3]> {
         self.star_vectors.get(&hr).copied()
+    }
+
+    /// All catalog stars passing the magnitude cutoff, each with
+    /// cached unit vector. Used by [`crate::plate_solve`]'s
+    /// verification loop.
+    #[must_use]
+    pub fn verify_stars(&self) -> &[VerifyStar] {
+        &self.verify_stars
     }
 }
 

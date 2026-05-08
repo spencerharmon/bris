@@ -8,7 +8,7 @@
 
 use crate::hash::{pattern_hash, ra_dec_to_unit_vec, CatalogPattern, StarHashDb};
 use crate::kabsch::{kabsch_rotation, rotate_vec};
-use bris_almanac::{all_stars, by_hr};
+use bris_almanac::by_hr;
 use bris_vision::{lens, Intrinsics, Peak};
 
 /// Configuration for [`plate_solve`].
@@ -41,6 +41,14 @@ pub struct PlateSolveConfig {
     /// in a candidate 4-tuple, radians. Should match the database
     /// configuration's `max_pattern_diameter_rad`. Default 60°.
     pub max_tuple_diameter_rad: f64,
+    /// When `true`, try all 24 permutations of catalog ↔ peak
+    /// assignment in the verification step instead of the 2
+    /// picked by [`pick_geometric_permutations`]. ~12× slower
+    /// per `try_verify` invocation but useful as a diagnostic
+    /// fallback when the heuristic might be discarding the
+    /// right correspondence (e.g. real-data noise rearranging
+    /// per-star distance footprints). Default `false`.
+    pub exhaustive_permutations: bool,
 }
 
 impl Default for PlateSolveConfig {
@@ -51,6 +59,7 @@ impl Default for PlateSolveConfig {
             verify_match_radius_rad: 1.0_f64.to_radians(),
             max_rms_residual_rad: (30.0 / 3600.0_f64).to_radians(), // 30 arcsec
             max_tuple_diameter_rad: 60.0_f64.to_radians(),
+            exhaustive_permutations: false,
         }
     }
 }
@@ -251,7 +260,53 @@ fn try_verify(
 
     let mut best: Option<(Attitude, Vec<IdentifiedStar>, usize)> = None;
 
-    for perm in PERMUTATIONS_OF_4 {
+    // Precompute (perm-invariant) the catalog 4-tuple's centroid
+    // and the list of catalog stars within `cos_search` of it.
+    // Centroid is the normalized sum of 4 unit vectors — order
+    // doesn't matter, so this is constant across the 24
+    // permutations below. Cone-filtering ~1600 catalog stars
+    // down to ~50-100 (the FOV-relevant set) is the highest-
+    // leverage hoist in this loop: every permutation re-projects
+    // and inner-loops over only the cone, instead of the full
+    // catalog. (~50% of plate_solve time per profile.)
+    let centroid = catalog_centroid(&catalog_vecs);
+    let cos_search = cfg.max_tuple_diameter_rad.cos();
+    let cone_stars: Vec<&crate::hash::VerifyStar> = db
+        .verify_stars()
+        .iter()
+        .filter(|s| !catalog_pattern.hr_ids.contains(&s.hr))
+        .filter(|s| {
+            let cv = s.unit_vec;
+            cv[0] * centroid[0] + cv[1] * centroid[1] + cv[2] * centroid[2] >= cos_search
+        })
+        .collect();
+
+    // Pick the (≤ 2) permutations of catalog → peak indices that
+    // are geometrically consistent, instead of trying all 24.
+    //
+    // Each star in a 4-tuple has a "distance signature": the
+    // sorted triple of its angular distances to the other 3
+    // stars. The signature is invariant under permutation of
+    // the other 3, so it uniquely (up to chirality) identifies
+    // each star within the tuple. Matching catalog ↔ peak by
+    // signature rank gives one canonical correspondence; its
+    // chiral mirror (swap any two non-anchor stars) gives the
+    // second. The remaining 22 permutations align stars whose
+    // pairwise distances don't even approximately match, so
+    // Kabsch produces a rotation that almost never verifies.
+    //
+    // 24 → 2 perms is the dominant remaining win in this loop.
+    // Bind both perm sources up-front so lifetimes are
+    // unambiguous: the slice borrowed below comes from one of
+    // them based on `cfg.exhaustive_permutations`.
+    let geom = pick_geometric_permutations(&catalog_vecs, &peak_vecs);
+    let perms_to_try: &[[usize; 4]] = if cfg.exhaustive_permutations {
+        &PERMUTATIONS_OF_4
+    } else {
+        &geom[..]
+    };
+
+    for &perm in perms_to_try {
         let permuted_catalog: Vec<[f64; 3]> = perm.iter().map(|&p| catalog_vecs[p]).collect();
         let camera: Vec<[f64; 3]> = peak_vecs.to_vec();
 
@@ -264,11 +319,10 @@ fn try_verify(
         // count matches.
 
         // Verify: project additional catalog stars and count matches.
-        // For efficiency we limit to stars within max_tuple_diameter
-        // of the *centroid* of the matched 4-star pattern (in
-        // catalog space).
-        let centroid = catalog_centroid(&permuted_catalog);
-        let cos_search = cfg.max_tuple_diameter_rad.cos();
+        // We iterate the precomputed `cone_stars` (subset of the
+        // catalog within `cos_search` of the 4-tuple's centroid)
+        // rather than the full catalog — see the hoist comment
+        // above the perm loop.
 
         let mut identified: Vec<IdentifiedStar> = Vec::new();
         // Push the initial 4.
@@ -300,30 +354,26 @@ fn try_verify(
         for &peak_idx in &tuple {
             claimed_peaks[peak_idx] = true;
         }
-        for catalog_star in all_stars()
-            .iter()
-            .filter(|s| s.vmag <= db.config().mag_cutoff)
-        {
-            // Skip stars already in the 4-tuple.
-            if catalog_pattern.hr_ids.contains(&catalog_star.hr) {
+        // Hoisted out of the per-star inner loop: `cos_match`
+        // is constant across all candidate stars for a given
+        // permutation, so compute the cosine once.
+        let cos_match = cfg.verify_match_radius_rad.cos();
+        for catalog_star in &cone_stars {
+            let cv = catalog_star.unit_vec;
+            // Project to camera frame. The Kabsch rotation is
+            // orthonormal and `cv` is a unit vector, so the
+            // result has length 1 to within float epsilon —
+            // skip the explicit `normalize` (was ~27% of total
+            // plate_solve time per profile). The downstream
+            // dot-product comparisons are tolerant of the ε
+            // residual.
+            let pp = rotate_vec(&rot, cv);
+            if pp[2] <= 0.0 {
                 continue;
             }
-            let cv = ra_dec_to_unit_vec(catalog_star.ra_rad, catalog_star.dec_rad);
-            // Within search cone of pattern centroid?
-            let dot_centroid = cv[0] * centroid[0] + cv[1] * centroid[1] + cv[2] * centroid[2];
-            if dot_centroid < cos_search {
-                continue;
-            }
-            // Project to camera frame.
-            let projected = rotate_vec(&rot, cv);
-            if projected[2] <= 0.0 {
-                continue;
-            }
-            let pp = normalize([projected[0], projected[1], projected[2]]);
 
             // Find the *closest* unclaimed peak within
             // verify_match_radius. One star ↔ at most one peak.
-            let cos_match = cfg.verify_match_radius_rad.cos();
             let mut best_peak: Option<(usize, f64)> = None;
             for (peak_idx, _) in peaks.iter().enumerate() {
                 if claimed_peaks[peak_idx] {
@@ -423,6 +473,83 @@ fn catalog_centroid(vecs: &[[f64; 3]]) -> [f64; 3] {
     normalize(c)
 }
 
+/// Pick the (≤ 2) permutations of catalog → peak indices that
+/// are geometrically consistent with the two 4-tuples' pairwise
+/// distances. Avoids the cost of trying all 24.
+///
+/// # Algorithm
+///
+/// For each star in a 4-tuple, its "footprint" is the sum of
+/// dot products to the other 3 stars (equivalently, a
+/// permutation-invariant scalar derived from its 3 distances).
+/// Sorting catalog stars by footprint and peaks by footprint
+/// gives a unique ordering on each side; pairing them by rank
+/// produces the canonical correspondence.
+///
+/// Two valid permutations remain — the canonical one and its
+/// chiral mirror (swap the two middle ranks) — because the
+/// hash bucket collapses chirality. We return both; Kabsch +
+/// verification picks the one that actually fits.
+///
+/// If the catalog and peak footprint distributions don't match
+/// (e.g. a hash-bucket collision with geometrically incompatible
+/// patterns), the returned permutations will Kabsch-fit with
+/// large residual and verify 0 stars — the same behavior as the
+/// 22 non-canonical perms in the previous all-perms loop, but
+/// without paying the cost.
+fn pick_geometric_permutations(catalog: &[[f64; 3]; 4], peaks: &[[f64; 3]; 4]) -> [[usize; 4]; 2] {
+    // Per-star footprint: sum of dot products to the other 3.
+    // Two unit vectors with smaller angular separation have
+    // larger dot product, so a star "in the middle" of the
+    // 4-tuple has the largest footprint and a star "out at the
+    // edge" has the smallest.
+    let footprints = |t: &[[f64; 3]; 4]| -> [f64; 4] {
+        let mut f = [0.0; 4];
+        for i in 0..4 {
+            for j in 0..4 {
+                if i == j {
+                    continue;
+                }
+                f[i] += t[i][0] * t[j][0] + t[i][1] * t[j][1] + t[i][2] * t[j][2];
+            }
+        }
+        f
+    };
+    let cf = footprints(catalog);
+    let pf = footprints(peaks);
+
+    // Indices of catalog and peak stars sorted by footprint
+    // ascending. Rank-i catalog star ↔ rank-i peak star is the
+    // canonical correspondence; perm[peak_pos] = catalog_idx.
+    let mut c_order = [0_usize, 1, 2, 3];
+    c_order.sort_by(|&a, &b| {
+        cf[a]
+            .partial_cmp(&cf[b])
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    let mut p_order = [0_usize, 1, 2, 3];
+    p_order.sort_by(|&a, &b| {
+        pf[a]
+            .partial_cmp(&pf[b])
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    // Build the canonical permutation: for each peak position
+    // (the original [0,1,2,3] order), find which catalog star
+    // that peak corresponds to. peak at p_order[r] corresponds
+    // to catalog at c_order[r].
+    let mut canonical = [0_usize; 4];
+    for r in 0..4 {
+        canonical[p_order[r]] = c_order[r];
+    }
+    // Mirror: swap the two middle-ranked stars (ranks 1 and 2).
+    // Ranks 0 and 3 (extremes by footprint) are unambiguous;
+    // swapping ranks 1 and 2 explores the other chirality.
+    let mut mirror = canonical;
+    mirror.swap(p_order[1], p_order[2]);
+    [canonical, mirror]
+}
+
 fn normalize(v: [f64; 3]) -> [f64; 3] {
     let n = (v[0].powi(2) + v[1].powi(2) + v[2].powi(2)).sqrt();
     if n == 0.0 {
@@ -432,7 +559,10 @@ fn normalize(v: [f64; 3]) -> [f64; 3] {
     }
 }
 
-/// All 24 permutations of [0, 1, 2, 3].
+/// All 24 permutations of [0, 1, 2, 3]. Used by the verification
+/// loop when [`PlateSolveConfig::exhaustive_permutations`] is
+/// `true`. The default fast path uses
+/// [`pick_geometric_permutations`] instead (~12× faster).
 const PERMUTATIONS_OF_4: [[usize; 4]; 24] = [
     [0, 1, 2, 3],
     [0, 1, 3, 2],
@@ -583,6 +713,7 @@ mod tests {
                 verify_match_radius_rad: 1.0_f64.to_radians(),
                 max_rms_residual_rad: (30.0 / 3600.0_f64).to_radians(),
                 max_tuple_diameter_rad: 60.0_f64.to_radians(),
+                exhaustive_permutations: false,
             },
         );
         // Either NoMatch or InsufficientPeaks; both are correct

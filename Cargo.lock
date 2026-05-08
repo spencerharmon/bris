@@ -206,7 +206,9 @@ dependencies = [
  "clap",
  "ctrlc",
  "image",
+ "serde",
  "tempfile",
+ "toml",
  "tracing",
  "tracing-subscriber",
 ]
@@ -276,6 +278,7 @@ dependencies = [
  "bris-nmea",
  "bris-platesolve",
  "bris-vision",
+ "chrono",
  "proptest",
  "thiserror",
  "tracing",
