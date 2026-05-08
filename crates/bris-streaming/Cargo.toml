@@ -1,0 +1,34 @@
+[package]
+name = "bris-streaming"
+description = "Continuous-operation streaming engine: orchestrates classification, body and horizon detection, plate solving, sight assembly, and fix publication from a stream of camera frames."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+default = ["segmentation"]
+# Enable horizon detection via the pretrained semantic-
+# segmentation model. Pulls in the heavyweight ONNX runtime
+# (~50MB native lib via bris-vision's `segmentation` feature).
+# Disable for small embedded builds that don't ship the model.
+segmentation = ["bris-vision/segmentation"]
+
+[dependencies]
+bris-core.workspace = true
+bris-almanac.workspace = true
+bris-vision.workspace = true
+bris-platesolve.workspace = true
+bris-nav.workspace = true
+bris-nmea.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+approx.workspace = true

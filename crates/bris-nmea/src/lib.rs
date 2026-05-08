@@ -14,7 +14,7 @@ pub mod standard;
 
 pub use checksum::{checksum, format_sentence};
 pub use pbris::{
-    pbris_err, pbris_full, pbris_sight, pbris_time, pbris_unc, pbris_ver, ErrorCounters,
-    TimeDiagnostic, UncertaintyBudget, PBRIS_SCHEMA_VERSION,
+    pbris_err, pbris_fix, pbris_full, pbris_sight, pbris_time, pbris_unc, pbris_ver,
+    ErrorCounters, FixSummary, TimeDiagnostic, UncertaintyBudget, PBRIS_SCHEMA_VERSION,
 };
 pub use standard::{gpgga, gpgll, gpgst, gprmc, FixQuality, QualityThresholds};

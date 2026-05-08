@@ -210,6 +210,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "bris-streaming"
+version = "0.0.1"
+dependencies = [
+ "approx",
+ "bris-almanac",
+ "bris-core",
+ "bris-nav",
+ "bris-nmea",
+ "bris-platesolve",
+ "bris-vision",
+ "proptest",
+ "thiserror",
+ "tracing",
+]
+
+[[package]]
 name = "bris-vision"
 version = "0.0.1"
 dependencies = [

@@ -976,7 +976,7 @@ references to the regression tests that pin the behavior. See
   shape; the design doc has the rationale, this list has the
   scoping for the changelog.
 
-** TODO bris-streaming crate skeleton + EngineConfig + push_frame + fix_stream API
+** DONE bris-streaming crate skeleton + EngineConfig + push_frame + fix_stream API
    New workspace crate. Types only at this stage; no processing
    logic. Verifies the public API surface compiles cleanly
    against the existing crates' types (Frame, ApparentPlace,
@@ -988,7 +988,7 @@ references to the regression tests that pin the behavior. See
    See "Implementation skeleton → Public API sketch" in the
    design doc.
 
-** TODO Stage A + B: classifier + body detection (single-threaded, no queueing)
+** DONE Stage A + B: classifier + body detection (single-threaded, no queueing)
    Wire the classifier ([[file:crates/bris-vision/src/condition.rs][bris-vision::condition::classify]])
    and body detection ([[file:crates/bris-vision/src/centroid.rs][centroid_saturated_body_in_mask]] for
    day, [[file:crates/bris-vision/src/peak.rs][detect_peaks]] for night) into the engine. Synchronously
@@ -1001,7 +1001,7 @@ references to the regression tests that pin the behavior. See
    See "Stage-by-stage mapping → Stage A, Stage B" in the
    design doc.
 
-** TODO Stage C: horizon detection in cheap-first order
+** DONE Stage C: horizon detection in cheap-first order
    Add horizon detection to the engine pipeline, ordered
    cheapest-first. Skip later detectors when an earlier one
    produces a horizon with σ better than the later one could
@@ -1017,7 +1017,7 @@ references to the regression tests that pin the behavior. See
 
    See "Stage-by-stage mapping → Stage C" in the design doc.
 
-** TODO Body and horizon priority queues + ring buffer + eviction
+** DONE Body and horizon priority queues + ring buffer + eviction
    Pure data-structure work. The two queues are keyed on σ;
    each entry is a (frame_id, detection_record). The ring
    buffer holds raw frames + their detection records for the
@@ -1030,7 +1030,7 @@ references to the regression tests that pin the behavior. See
 
    See "Ring buffer and frame eviction" in the design doc.
 
-** TODO Stage E: pair selection + sight emission + sight window
+** DONE Stage E: pair selection + sight emission + sight window
    The first end-to-end fix-publishing milestone. For each
    body record in the queue, find the best-σ horizon record
    that pairs with it (same frame is free; different frames
@@ -1051,7 +1051,7 @@ references to the regression tests that pin the behavior. See
    stage" and "Sight window: cap, age-weighting, and operator
    surface" in the design doc.
 
-** TODO Stage D: plate solving + per-star altitude (night fixes)
+** DONE Stage D: plate solving + per-star altitude (night fixes)
    Adds night-fix support. Plate solving runs only when Stage
    B produced peaks AND the classifier said night/twilight.
    Database is constructed at engine startup or lazily on
@@ -1065,7 +1065,7 @@ references to the regression tests that pin the behavior. See
    See "Stage-by-stage mapping → Stage D" + "Open questions →
    Plate solving's database build cost" in the design doc.
 
-** TODO Hysteresis on the day/night classifier
+** DONE Hysteresis on the day/night classifier
    The per-frame classifier doesn't have hysteresis; a dim
    cloud transit could flip day → twilight on a single frame
    and back. The engine adds a settle time (default ~3 seconds
@@ -1075,7 +1075,7 @@ references to the regression tests that pin the behavior. See
    The classifier itself stays per-frame and read-only; the
    engine layer holds the hysteresis state.
 
-** TODO $PBRIS extensions: N sights, azimuth spread, oldest age
+** DONE $PBRIS extensions: N sights, azimuth spread, oldest age
    The engine has new diagnostics that aren't yet in any NMEA
    sentence. Extend [[file:crates/bris-nmea/src/pbris.rs][$PBRIS,*]] with these fields so the
    chartplotter-side tooling can surface "this fix is built
@@ -1087,24 +1087,31 @@ references to the regression tests that pin the behavior. See
    See "Sight window → Per-fix surface for the operator" in
    the design doc.
 
-** TODO Engine integration tests + stress tests
+** DONE Engine integration tests + stress tests
    Synthetic frame sequences fed through `push_frame` at
    controlled cadences. Assert the right frames make it past
    each stage, eviction respects the stitching window,
    multi-frame stitching pairs the right (body, horizon), and
    the final fix matches an expected position within σ.
 
-   The case.toml schema's existing `[fix]` table type (runner
-   currently unimplemented) is the natural place to declare
-   expected fix output for multi-frame sequences. Phase 3.5
-   implementation should give it a runner and exercise it on
-   sequences derived from `orig_test_video/` (603 frames of
-   `sailing_sun_upper_left` — a good multi-frame stress test).
+   *Done in commit 9 of the streaming engine work:*
+   `crates/bris-streaming/src/engine.rs` adds engine-level
+   integration tests covering ring-buffer capacity caps,
+   stitching-window-driven eviction of unreferenced frames,
+   60 fps stress (600 pushes complete in bounded wall clock),
+   pathological out-of-order TT inputs, sight-window capacity
+   enforcement, and the PublishedFix → $PBRIS,FIX summary
+   conversion. The bris-streaming test suite has grown from
+   the commit-1 7 tests to 61 tests covering the full pipeline.
 
-   Stress tests: feed at 60 fps with 100 ms per-frame
-   processing budget; assert fix-publication interval stays
-   within bounds (i.e. backpressure works correctly and the
-   engine doesn't fall behind indefinitely).
+   *Deferred to a follow-up:* hooking the case.toml schema's
+   existing `[fix]` table type (runner currently unimplemented
+   in the bris-vision regression harness) up to actual
+   multi-frame fix expectations driven from `orig_test_video/`
+   (603 frames of `sailing_sun_upper_left`). The harness work
+   is cross-crate (bris-vision regression infrastructure) and
+   is its own substantial work item rather than a streaming-
+   engine commit.
 
    See "Test strategy" in the design doc.
 

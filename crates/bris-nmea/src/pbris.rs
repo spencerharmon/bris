@@ -160,6 +160,71 @@ pub fn pbris_unc(utc: DateTime<Utc>, budget: &UncertaintyBudget) -> String {
     s
 }
 
+/// Engine-level per-fix summary: the operator-meaningful
+/// "should I trust this fix?" diagnostics that don't fit on
+/// the standard `$GP*` sentences and aren't naturally part of
+/// `$PBRIS,UNC` (which is per-source, not per-fix). Carried
+/// by the `$PBRIS,FIX` sentence.
+#[derive(Debug, Clone, Copy)]
+pub struct FixSummary {
+    /// Number of sights contributing to the fix. ≤ 99 in
+    /// practice given the sight-window cap of 10; 2-byte
+    /// field width is generous for unforeseen overrides.
+    pub n_sights: u32,
+    /// Spread, in radians, between the maximum and minimum
+    /// azimuth across the contributing sights, accounting
+    /// for [0, 2π) wrap. A small spread (e.g. < 0.5 rad ≈
+    /// 30°) means the position covariance is poorly
+    /// conditioned — the fix is "good along one direction,
+    /// weak across it."
+    pub azimuth_spread_rad: f64,
+    /// Age of the oldest sight contributing to the fix, in
+    /// seconds. ≤ 99 999 by the sight window's 10-min cap
+    /// in practice; 5-byte field width is generous.
+    pub oldest_sight_age_s: u32,
+    /// Stable string label of the per-source σ component
+    /// dominating the fix uncertainty. The streaming engine
+    /// computes this from its uncertainty budget; consumers
+    /// of this sentence can map it back to the operator
+    /// remediation guide ("centroid → longer exposure",
+    /// "horizon → pan to a cleaner stretch", etc.).
+    pub dominant_source: &'static str,
+}
+
+/// Emit `$PBRIS,FIX,...`.
+///
+/// Format:
+/// `$PBRIS,FIX,hhmmss.ss,<n_sights>,<az_spread_deg>,<oldest_age_s>,<dominant>*XX`
+///
+/// Azimuth spread is emitted in degrees (not radians) for
+/// operator readability; consumers convert to radians if they
+/// need them. Two-decimal precision (max 360.00 → 6 chars).
+///
+/// Holds well under the NMEA 0183 82-char-per-sentence cap:
+/// even at maximum field widths the body fits in ~50 chars.
+#[must_use]
+pub fn pbris_fix(utc: DateTime<Utc>, summary: &FixSummary) -> String {
+    let body = format!(
+        "PBRIS,FIX,{},{},{:.2},{},{}",
+        format_hms(utc),
+        summary.n_sights,
+        summary.azimuth_spread_rad.to_degrees(),
+        summary.oldest_sight_age_s,
+        summary.dominant_source,
+    );
+    let s = format_sentence(&body);
+    debug!(
+        sentence = "$PBRIS,FIX",
+        n_sights = summary.n_sights,
+        azimuth_spread_deg = summary.azimuth_spread_rad.to_degrees(),
+        oldest_sight_age_s = summary.oldest_sight_age_s,
+        dominant_source = summary.dominant_source,
+        bytes = s.trim_end_matches("\r\n"),
+        "emitted PBRIS"
+    );
+    s
+}
+
 /// Emit one `$PBRIS,SIGHT,n,...` sentence per sight in the current fix.
 ///
 /// Format:
@@ -298,7 +363,7 @@ mod tests {
     #[test]
     fn ver_includes_schema() {
         let s = pbris_ver();
-        assert!(s.starts_with("$PBRIS,VER,1"));
+        assert!(s.starts_with(&format!("$PBRIS,VER,{PBRIS_SCHEMA_VERSION}")));
         assert!(s.ends_with("\r\n"));
     }
 
@@ -469,6 +534,15 @@ mod tests {
             pbris_unc(utc, &budget),
             pbris_sight(255, "VeryLongStarName", 1.0, 1.0, &lop),
             pbris_err(utc, &counters),
+            pbris_fix(
+                utc,
+                &FixSummary {
+                    n_sights: 99,
+                    azimuth_spread_rad: std::f64::consts::TAU,
+                    oldest_sight_age_s: 99_999,
+                    dominant_source: "calibration",
+                },
+            ),
         ] {
             // Strip the \r\n; NMEA's 82-char limit excludes line ending.
             let body_len = s.trim_end_matches("\r\n").len();
@@ -478,4 +552,23 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn pbris_fix_emits_summary_fields() {
+        let summary = FixSummary {
+            n_sights: 4,
+            azimuth_spread_rad: 0.5_f64,
+            oldest_sight_age_s: 300,
+            dominant_source: "horizon",
+        };
+        let s = pbris_fix(sample_utc(), &summary);
+        assert!(s.starts_with("$PBRIS,FIX,"));
+        assert!(s.ends_with("\r\n"));
+        assert!(s.contains(",4,"), "expected n_sights=4 in {s}");
+        // 0.5 rad ≈ 28.65°
+        assert!(s.contains(",28.65,"), "expected ≈28.65° spread in {s}");
+        assert!(s.contains(",300,"), "expected oldest_age=300 in {s}");
+        assert!(s.contains(",horizon*"), "expected dominant=horizon in {s}");
+    }
+
 }
