@@ -34,6 +34,7 @@
 )]
 
 use crate::frame::Frame;
+use crate::horizon::HorizonLine;
 
 /// A detected star-like peak.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -75,8 +76,47 @@ impl Default for PeakConfig {
 }
 
 /// Detect star-like peaks in a frame.
+///
+/// Considers every pixel as a peak candidate. Use this when no
+/// horizon is known (e.g. sky-pointed frame, horizon detector
+/// returned `Err`) or when peak detection should be unconstrained
+/// (synthetic tests, calibration). For frames that contain a
+/// horizon, prefer [`detect_peaks_above_horizon`] — wake glitter,
+/// deck lights, and lit superstructure routinely produce peaks
+/// brighter than dim stars and crowd real stars out of the
+/// `max_peaks` budget.
 #[must_use]
 pub fn detect_peaks(frame: &Frame, cfg: PeakConfig) -> Vec<Peak> {
+    detect_peaks_inner(frame, cfg, None)
+}
+
+/// Detect star-like peaks restricted to pixels above the horizon
+/// line (sky region).
+///
+/// A small safety margin (`horizon_margin_px` rows above the
+/// line) is also excluded to avoid the horizon's own gradient
+/// being picked up as a peak. Pass `0` to disable the margin.
+///
+/// When the horizon line is unknown — for example a frame
+/// pointed straight up that genuinely contains no horizon —
+/// callers should use [`detect_peaks`] (no mask) and rely on
+/// cross-frame stitching to attach the resulting peaks to a
+/// horizon measured on a neighbouring frame.
+#[must_use]
+pub fn detect_peaks_above_horizon(
+    frame: &Frame,
+    cfg: PeakConfig,
+    horizon: HorizonLine,
+    horizon_margin_px: u32,
+) -> Vec<Peak> {
+    detect_peaks_inner(frame, cfg, Some((horizon, horizon_margin_px)))
+}
+
+fn detect_peaks_inner(
+    frame: &Frame,
+    cfg: PeakConfig,
+    horizon: Option<(HorizonLine, u32)>,
+) -> Vec<Peak> {
     let w = frame.width() as usize;
     let h = frame.height() as usize;
     if w < (2 * cfg.background_half_size as usize + 1)
@@ -96,12 +136,29 @@ pub fn detect_peaks(frame: &Frame, cfg: PeakConfig) -> Vec<Peak> {
         foreground[i] = f.max(0);
     }
 
-    // Step 3: local-maximum search over the foreground.
+    // Step 3: local-maximum search over the foreground. If a
+    // horizon is supplied, skip pixels at or below `(horizon_y -
+    // margin)` for that column. Pixels with y < ceiling are sky
+    // candidates (image y grows downward).
     let k = cfg.maximum_half_size as i32;
     let threshold = i32::from(cfg.min_intensity);
     let mut raw_peaks: Vec<(u32, u32, i32)> = Vec::new();
     for y in (k as usize)..(h - k as usize) {
         for x in (k as usize)..(w - k as usize) {
+            if let Some((line, margin)) = horizon {
+                // y must be strictly above (smaller than) the
+                // horizon at this column, with margin rows of
+                // additional clearance to avoid horizon-edge
+                // gradient artifacts. Negative intercepts (line
+                // above the frame) make every pixel below the
+                // line; in that case the comparison naturally
+                // skips everything.
+                let horizon_y = line.slope * (x as f64) + line.intercept;
+                let ceiling = horizon_y - f64::from(margin);
+                if (y as f64) >= ceiling {
+                    continue;
+                }
+            }
             let v = foreground[y * w + x];
             if v < threshold {
                 continue;
@@ -404,5 +461,105 @@ mod tests {
         };
         let peaks = detect_peaks(&frame, cfg);
         assert!(peaks.len() <= 25, "got {} peaks, max was 25", peaks.len());
+    }
+
+    /// Build a `HorizonLine` for a given slope/intercept; the
+    /// other fields don't influence peak masking.
+    fn horizon(slope: f64, intercept: f64) -> crate::horizon::HorizonLine {
+        crate::horizon::HorizonLine {
+            slope,
+            intercept,
+            inlier_count: 100,
+            candidate_count: 100,
+            residual_rms_px: 0.0,
+            altitude_sigma: bris_core::Sigma::new(1e-3).unwrap(),
+        }
+    }
+
+    #[test]
+    fn detect_peaks_above_horizon_excludes_below_line() {
+        // Synthetic scene: a "star" above the horizon at y=20
+        // and a "wake glint" of equal brightness below the
+        // horizon at y=200. With a flat horizon at y=120, only
+        // the star should survive masking; the glint should be
+        // excluded.
+        let star = (160.0_f64, 20.0, 30_000_u16);
+        let glint = (160.0_f64, 200.0, 30_000_u16);
+        let frame = synth_star_field(320, 240, &[star, glint]);
+
+        let unmasked = detect_peaks(&frame, PeakConfig::default());
+        assert!(
+            unmasked.iter().any(|p| (p.y - 20.0).abs() < 2.0),
+            "unmasked: missing the above-horizon star"
+        );
+        assert!(
+            unmasked.iter().any(|p| (p.y - 200.0).abs() < 2.0),
+            "unmasked: missing the below-horizon glint"
+        );
+
+        let masked =
+            detect_peaks_above_horizon(&frame, PeakConfig::default(), horizon(0.0, 120.0), 0);
+        assert!(
+            masked.iter().any(|p| (p.y - 20.0).abs() < 2.0),
+            "masked: should keep the above-horizon star, got {masked:?}"
+        );
+        assert!(
+            !masked.iter().any(|p| p.y > 120.0),
+            "masked: no peaks should sit at or below the horizon (y=120), got {masked:?}"
+        );
+    }
+
+    #[test]
+    fn horizon_margin_excludes_pixels_just_above_line() {
+        // A "peak" sits 3 px above a flat horizon at y=120
+        // (pixel y=117). With margin=0 it survives; with
+        // margin=10 it is excluded.
+        let near_horizon = (160.0_f64, 117.0, 30_000_u16);
+        let frame = synth_star_field(320, 240, &[near_horizon]);
+
+        let no_margin =
+            detect_peaks_above_horizon(&frame, PeakConfig::default(), horizon(0.0, 120.0), 0);
+        assert!(
+            no_margin.iter().any(|p| (p.y - 117.0).abs() < 2.0),
+            "margin=0: peak just above horizon should survive"
+        );
+
+        let with_margin =
+            detect_peaks_above_horizon(&frame, PeakConfig::default(), horizon(0.0, 120.0), 10);
+        assert!(
+            with_margin.is_empty(),
+            "margin=10: peak at y=117 sits within 10 px of horizon, should be excluded; got {with_margin:?}"
+        );
+    }
+
+    #[test]
+    fn sloped_horizon_masks_per_column() {
+        // Slope = 0.5: the horizon rises from y=20 at x=0 to
+        // y=180 at x=320. A "star" at (50, 50) is above the
+        // local horizon (50 < 0.5*50 + 20 = 45 → false; actually
+        // below). Reframe: at column x=50 the horizon is at
+        // y=45, so y=50 is below. Place the star at (50, 30)
+        // instead — above the horizon. A glint at (250, 100):
+        // local horizon is y=145, so 100 < 145, also above.
+        // Make the glint at (250, 200) — local horizon y=145,
+        // 200 > 145, below.
+        let star = (50.0_f64, 30.0, 30_000_u16);
+        let glint = (250.0_f64, 200.0, 30_000_u16);
+        let frame = synth_star_field(320, 240, &[star, glint]);
+
+        let masked =
+            detect_peaks_above_horizon(&frame, PeakConfig::default(), horizon(0.5, 20.0), 0);
+        assert!(
+            masked
+                .iter()
+                .any(|p| (p.x - 50.0).abs() < 2.0 && (p.y - 30.0).abs() < 2.0),
+            "should keep above-horizon star at (50, 30); got {masked:?}"
+        );
+        assert!(
+            !masked
+                .iter()
+                .any(|p| (p.x - 250.0).abs() < 5.0 && (p.y - 200.0).abs() < 5.0),
+            "should exclude below-horizon glint at (250, 200); got {masked:?}"
+        );
     }
 }

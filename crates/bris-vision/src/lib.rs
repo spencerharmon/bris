@@ -46,7 +46,7 @@ pub use night_horizon::{
     detect_horizon_night_with_column_mask, NightHorizonConfig, TexturedHorizonConfig,
 };
 pub use panorama::{panorama_altitude, panorama_altitude_with_detector, FrameRoles, PanoramaError};
-pub use peak::{detect_peaks, Peak, PeakConfig};
+pub use peak::{detect_peaks, detect_peaks_above_horizon, Peak, PeakConfig};
 #[cfg(feature = "segmentation")]
 pub use segment::{
     detect_horizon_via_segmentation, detect_horizon_via_segmentation_with_column_mask, load_model,
