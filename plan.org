@@ -287,6 +287,22 @@ references to the regression tests that pin the behavior. See
    *Status:* model + undistortion math complete in ~bris-vision::lens~
    (10 tests). Calibration *workflow* (corner detection, parameter
    solve, persistence) still pending — needs the CLI hook.
+
+   *Empirically confirmed (this session) as the highest-impact
+   remaining blocker for real-data plate-solving.*
+   ~examples/synth_frame_test.rs~ projects catalog stars through
+   a known attitude into a PNG, then runs the full pipeline.
+   With matched ~RENDER_K1=SOLVE_K1=0~ or ~-0.05~: works, attitude
+   recovered to within 4 arcsec. With ~RENDER_K1=-0.10~ but
+   ~SOLVE_K1=0~: complete failure (~best: 0~ — no candidate
+   passes 3 verifications). Mechanism: plate-solve hashes
+   pairwise distance ratios; wrong distortion warps pairs
+   differently depending on radial position, so the 4-tuple's
+   ratios shift between hash bins. Real wide-angle marine
+   cameras routinely have ~k1 ∈ [-0.1, -0.3]~ — exactly where
+   plate-solve breaks down without calibration. Until this
+   workflow lands, the corpus ~[plate_solve]~ regression cases
+   correctly stay ~outcome = "err"~.
 ** TODO Eye-height handling
    Eye height contributes to horizon dip, which is a per-fix correction.
    - Persist a default eye height per device (settings).

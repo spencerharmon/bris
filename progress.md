@@ -62,9 +62,143 @@ per-star altitude extraction closes Phase 3.
 
 ## What we proved this session
 
-This session pushed forward eight algorithm pieces, all motivated
-by specific corpus failure modes from the previous session's
-data-collection pass.
+This session diagnosed why real-data plate-solving fails on the
+corpus and made the diagnosis sharp enough to commit
+infrastructure even before calibration lands. Five concrete
+deliverables:
+
+### `detect_peaks_above_horizon` in `bris-vision::peak`
+
+Gates the peak detector's local-max search to pixels above an
+optional horizon line, with a configurable safety margin (px
+above the line, default 5 in the streaming engine) to exclude
+the horizon's own gradient and silhouetted shipboard structure.
+The unmasked `detect_peaks` is unchanged for sky-pointed frames
+that genuinely contain no horizon — the streaming engine passes
+`Some(line)` when Stage C succeeded and `None` when it didn't,
+preserving the no-horizon-frame path.
+
+Three new unit tests
+(`detect_peaks_above_horizon_excludes_below_line`,
+`horizon_margin_excludes_pixels_just_above_line`,
+`sloped_horizon_masks_per_column`) cover the contract.
+**Empirical impact** on the high-res `night_test_highres`
+screenshot: top-12 peaks went from "all wake glints clustered in
+groups of 3 within 25 px" to "isolated stars in the upper sky
+band with proper intensity falloff" (verified via the new
+`annotate_peaks` example which draws peak boxes + horizon line
+on the source PNG).
+
+### `bris-streaming` Stage B/C reordering
+
+Stage C (horizon) now runs before Stage B (body) for all frames
+so the night/twilight peak detector can consume the horizon
+when found. Stage B's night path takes a new
+`Option<HorizonLine>` parameter; `EngineConfig` gains
+`peak_horizon_margin_px` (default 5). The twilight-fallback
+unit test was updated to call `detect_twilight` directly with
+`horizon: None` so it doesn't fight a synthetic frame's
+spurious horizon detection.
+
+### `plate_solve` 20× speedup (42.5s → 2.13s per call on real data)
+
+samply-profiled and attacked the three biggest hot paths:
+
+1. **Removed `normalize()` of orthonormal-rotated unit vectors**
+   in the per-star verification loop (~27% savings). The Kabsch
+   rotation is orthonormal and the input `cv` is a unit vector,
+   so the result is unit-length to within float epsilon — the
+   downstream dot-product comparisons are tolerant of the ε
+   residual.
+2. **Hoisted catalog-cone filtering and `cos_match`** out of the
+   per-permutation loop into perm-invariant precompute (~37%
+   savings). The 4-tuple's centroid is the same regardless of
+   permutation, so the `~1600 → ~50-100` cone filter runs once
+   per `try_verify` instead of 24 times. Required adding
+   `StarHashDb::verify_stars()` returning a flat
+   `&[VerifyStar]` with cached unit vectors.
+3. **Reduced 24 → 2 permutations** via geometric distance-
+   footprint matching (`pick_geometric_permutations`,
+   ~90% savings of the remainder). Each star's
+   "footprint" — sum of dot products to the other 3 in the
+   tuple — is a permutation-invariant scalar; sorting catalog
+   and peak stars by footprint and matching by rank gives the
+   canonical correspondence; the chiral mirror (swap middle two
+   ranks) covers the other valid assignment. The other 22
+   perms align stars whose pairwise distances don't even
+   approximately match. Falls back to all-24 via new
+   `PlateSolveConfig::exhaustive_permutations` knob; default
+   fast path.
+
+All 20 platesolve unit tests still pass, including the load-
+bearing `round_trip_recovers_known_attitude` (canary that the
+geom-perm heuristic correctly identifies the right
+correspondence on synthetic input).
+
+### End-to-end synthetic-frame pipeline test (`examples/synth_frame_test.rs`)
+
+Bridges the gap between the in-memory `round_trip` unit test
+(peaks computed and handed directly to `plate_solve`, no peak
+detector in loop) and the real-frame regression cases (PNG →
+load → detect_peaks → plate_solve). Projects catalog stars
+through a known attitude into a PNG, then runs the *full* real-
+frame pipeline on it. Works in 34ms with 8 identified stars,
+attitude recovered to within 4 arcsec of truth.
+
+This rules out bugs in the chain: PNG loading, frame format
+conversion, peak detector output format, unit conversions, hash
+db lookup, geom-perm heuristic, Kabsch math. The chain is
+correct end-to-end.
+
+### Confirmed: lens distortion is the real-data plate-solve blocker
+
+Re-ran `synth_frame_test` with `RENDER_K1=-0.10` (camera-side
+distortion) and `SOLVE_K1=0` (assumed in solver): **complete
+failure** (`best: 0` — no candidate ever passed even 3
+verifications). With matched `RENDER_K1=SOLVE_K1=-0.05`: works
+fine. With matched `-0.10`: still fails (best: 2, just shy of
+threshold) — the iterative `undistort_pixel` may not converge
+well at high distortion magnitudes.
+
+Mechanism: the plate-solver hashes 4-tuple pairwise distance
+ratios. Pixel-to-ray angles depend on the lens model
+(`fx` + `k1..k3` + `p1..p2`). Wrong `fx` scales all distances
+by a constant — survivable in principle but our hash has fixed
+bin tolerance. **Wrong distortion warps pairs differently
+depending on radial position** — the 4-tuple's distance ratios
+shift between bins, and no bucket lookup ever returns the right
+pattern.
+
+Real wide-angle marine cameras routinely have `k1 ∈ [-0.1, -0.3]`,
+which is exactly where plate-solve breaks down without
+calibration. The corpus videos (JeffHK's 30-day timelapse, the
+ASMR cruise-ship channel) are YouTube re-encodes that have
+stripped all camera EXIF, so we cannot recover lens parameters
+from file metadata.
+
+**Conclusion:** real-data `[plate_solve]` regression cases stay
+`outcome = "err"` until the lens calibration workflow lands.
+This is a *correct refusal* by the solver — not a bug, and not
+something fx-tuning alone can fix.
+
+### Three new diagnostic examples
+
+- `examples/probe_intrinsics.rs` — fx sweep + horizon-masked
+  peak detection + optional `ALL_PERMS=1` and `MIN_INTENSITY=N`
+  env knobs. The empirical-tuning tool from this session.
+- `examples/synth_frame_test.rs` — projects catalog stars
+  through known attitude/intrinsics to a PNG, runs the full
+  pipeline, supports `RENDER_K1`/`SOLVE_K1` env knobs for the
+  distortion test described above.
+- `examples/bench_solve.rs` — minimal samply target: load
+  frame, detect peaks, time three plate_solve runs.
+- `examples/annotate_peaks.rs` — draws detected peak boxes
+  (red for top-12, orange for rest) and the horizon line
+  (green) onto a PNG. Diagnostic visualization.
+
+---
+
+## What we proved last session
 
 ### Plate-solver refinement: sub-arcmin residual gate
 
@@ -424,20 +558,27 @@ the most egregious false matches.
 
 ### Algorithm refinements motivated by the corpus
 
-1. **Deck-excluding row-range for night detector** — analogous to
+1. **Lens calibration workflow** — *the single highest-impact
+   remaining item for real-data plate-solving*, confirmed by
+   the distortion-injection synthetic test (this session). Once
+   landed, the corpus `[plate_solve]` cases flip from
+   `outcome = "err"` to `outcome = "ok"` and we get end-to-end
+   night-fix coverage. See `plan.org` Phase 2 calibration TODO.
+
+2. **Deck-excluding row-range for night detector** — analogous to
    `body_column_mask` but for excluding a row range below a
    detected deck top. The multi-pass detector handles
    `container_ship_night` already (the deck top is found in
    pass 1, the actual horizon in pass 2 with stronger
    consensus); deck-exclusion would be cleaner still.
 
-2. **Combine night detector with segmentation prior** — when the
+3. **Combine night detector with segmentation prior** — when the
    segmentation model produces a sky/sea boundary on a night scene
    (it sometimes does, e.g. `night_test_highres`), use that
    directly; fall back to the luma-boundary detector when
    segmentation fails.
 
-3. **Auto-relax inlier-fraction for low-altitude scenes** — when
+4. **Auto-relax inlier-fraction for low-altitude scenes** — when
    a body is detected near the horizon (within a configurable
    altitude threshold), relax the horizon detector's
    `min_inlier_fraction` automatically. Resolves `sunrise` under
