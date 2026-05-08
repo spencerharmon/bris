@@ -1296,9 +1296,24 @@ references to the regression tests that pin the behavior. See
    the signed ~bris-data~ payload containing leap-second table, almanac
    coefficients, and star catalog as a unified set; verify signature,
    atomically swap, log version transition).
-** TODO Camera capture via ~libcamera~ / V4L2
-   Use the ~libcamera-rs~ bindings or shell out to ~rpicam-still~ as a
-   first pass. Frames flow into ~bris-vision~.
+** DONE Camera capture via V4L2 (libcamera deferred)
+   New ~bris-capture~ workspace crate wraps the ~v4l~ crate's
+   mmap streaming capture. Wired into ~bris capture~ (record
+   YUYV frames to PNG on disk) and ~bris serve~ (V4L2 →
+   StreamingEngine → published-fix log).
+
+   *Verified to compile and to surface a clean error path
+   when the device is missing; not yet exercised against
+   real hardware in the development environment.* Bring-up
+   on a Pi or USB webcam is the next step.
+
+   Currently YUYV-only. MJPEG / NV12 / RAW Bayer demosaic
+   are deferred until the YUYV path is exercised on real
+   hardware. ~libcamera~ is similarly deferred — the Pi
+   camera modules speak V4L2 too via the ~bcm2835-codec~
+   and ~unicam~ kernel drivers, so the same backend reaches
+   them; libcamera becomes interesting when we need
+   exposure/gain/ISP tuning that isn't exposed via raw V4L2.
 ** TODO Pi Zero 2W appliance image
    Buildroot or ~pi-gen~ recipe: minimal kernel, ~bris-cli serve~ as
    systemd unit, read-only rootfs, NTP enabled, NMEA on TCP 10110.

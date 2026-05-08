@@ -22,12 +22,15 @@ bris-vision.workspace = true
 bris-platesolve.workspace = true
 bris-nav.workspace = true
 bris-nmea.workspace = true
+bris-streaming.workspace = true
+bris-capture.workspace = true
 anyhow.workspace = true
 chrono.workspace = true
 image.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 clap = { version = "4", features = ["derive"] }
+ctrlc.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

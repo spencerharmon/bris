@@ -1,10 +1,14 @@
 //! Bris reference CLI: desktop and embedded Linux frontend.
 //!
 //! Subcommands (per `plan.org` Phase 6):
-//! - `capture` — capture frames from the camera (stub).
+//! - `capture` — record frames from a V4L2 camera to disk.
+//!   *Implemented* against the YUYV format on Linux.
 //! - `calibrate` — lens calibration workflow (stub).
-//! - `fix` — one-shot fix from a webcam (stub; pending V4L2 wiring).
-//! - `serve` — continuous engine + NMEA serving (stub).
+//! - `fix` — one-shot fix from a webcam (stub; the streaming
+//!   engine in `serve` supersedes this).
+//! - `serve` — continuous engine + NMEA serving. *Implemented*
+//!   for the V4L2 → engine → published-fix path; NMEA
+//!   transport (TCP/serial) is a follow-up.
 //! - `replay` — process saved frames through the full pipeline.
 //!   *Implemented* as the validation path before live capture.
 //! - `log` — sight log management (stub).
@@ -12,6 +16,9 @@
 
 use anyhow::{bail, Context};
 use bris_almanac::{body_apparent_place, ApparentPlace, Atmosphere, Observer, SolarSystemBody};
+use bris_capture::{
+    run_capture_loop, run_capture_loop_with, CaptureLoopAction, V4l2Capture, V4l2Config,
+};
 use bris_core::time::{utc_to_tt, Tt};
 use bris_core::{Latitude, Longitude, Sigma, Uncertain};
 use bris_nav::{line_of_position, multi_sight_fix, screen_sights, Fix, ScreeningConfig};
@@ -19,16 +26,20 @@ use bris_nmea::{
     gpgga, gpgll, gpgst, gprmc, pbris_full, ErrorCounters, QualityThresholds, TimeDiagnostic,
     UncertaintyBudget,
 };
+use bris_streaming::{EngineConfig, StreamingEngine};
 use bris_vision::{
     centroid_brightest_body, detect_horizon, detect_horizon_via_segmentation,
     detect_horizon_via_sky_region, load_frame_from_path, load_model, measure_altitude,
-    panorama_altitude_with_detector, CentroidConfig, Frame, HorizonConfig, HorizonLine, Intrinsics,
-    TrackConfig,
+    panorama_altitude_with_detector, save_frame_as_png, CentroidConfig, Frame, HorizonConfig,
+    HorizonLine, Intrinsics, TrackConfig,
 };
 use chrono::{DateTime, Utc};
 use clap::{Parser, Subcommand};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tracing::{info, warn};
 
 #[derive(Debug, Parser)]
@@ -46,14 +57,26 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
-    /// Capture frames from the camera (stub).
-    Capture,
+    /// Record frames from a V4L2 camera to disk.
+    ///
+    /// The captured frames are saved as 16-bit grayscale PNGs
+    /// suitable for re-processing via `bris replay`. Use this
+    /// to (a) sanity-check that the camera is talking, (b)
+    /// build a local corpus for offline development, (c)
+    /// gather data for lens calibration.
+    Capture(CaptureArgs),
     /// Run the lens calibration workflow (stub).
     Calibrate,
-    /// Compute a one-shot fix from a webcam (stub; pending V4L2 wiring).
+    /// Compute a one-shot fix from a webcam (stub; the
+    /// streaming engine in `serve` supersedes this).
     Fix,
-    /// Run the continuous engine and serve NMEA output (stub).
-    Serve,
+    /// Run the continuous streaming engine against a V4L2
+    /// camera, logging each published fix.
+    ///
+    /// NMEA transport (TCP server, serial port) is a
+    /// follow-up; for now fixes are reported via `tracing` at
+    /// info level.
+    Serve(ServeArgs),
     /// Re-derive a fix from a directory of saved frames.
     ///
     /// Frames are processed in lexicographic filename order. Each
@@ -70,6 +93,77 @@ enum Command {
     Log,
     /// Download almanac/catalog/leap-second updates (stub).
     Update,
+}
+
+#[derive(Debug, clap::Args)]
+struct CaptureArgs {
+    /// Path to the V4L2 device node. Default `/dev/video0`.
+    #[arg(long, default_value = "/dev/video0")]
+    device: PathBuf,
+    /// Capture width (pixels). Default 640.
+    #[arg(long, default_value_t = 640)]
+    width: u32,
+    /// Capture height (pixels). Default 480.
+    #[arg(long, default_value_t = 480)]
+    height: u32,
+    /// Output directory for captured PNG frames. Created if
+    /// it doesn't exist. Existing files in the directory are
+    /// not modified, but new captures may overwrite same-
+    /// numbered files from a prior run.
+    #[arg(long)]
+    output: PathBuf,
+    /// Maximum number of frames to capture. The capture
+    /// stops at whichever of `--frames` and `--duration`
+    /// is reached first; if neither is given, runs until
+    /// Ctrl-C.
+    #[arg(long)]
+    frames: Option<u32>,
+    /// Maximum capture duration in seconds. See
+    /// `--frames` for stop semantics.
+    #[arg(long)]
+    duration: Option<f64>,
+    /// Camera exposure for the timestamp correction, in
+    /// microseconds. Used as the per-frame mid-exposure
+    /// offset; see `bris_capture::V4l2Config::exposure_us`.
+    /// Default 10000 (10 ms — typical daylight).
+    #[arg(long, default_value_t = 10_000)]
+    exposure_us: u32,
+}
+
+#[derive(Debug, clap::Args)]
+struct ServeArgs {
+    /// Path to the V4L2 device node. Default `/dev/video0`.
+    #[arg(long, default_value = "/dev/video0")]
+    device: PathBuf,
+    /// Capture width (pixels). Default 640.
+    #[arg(long, default_value_t = 640)]
+    width: u32,
+    /// Capture height (pixels). Default 480.
+    #[arg(long, default_value_t = 480)]
+    height: u32,
+    /// Camera exposure for the timestamp correction, in
+    /// microseconds. Default 10000.
+    #[arg(long, default_value_t = 10_000)]
+    exposure_us: u32,
+    /// Observer latitude in degrees (north positive). The
+    /// engine uses this for almanac apparent-place
+    /// computations and for the assumed position in sight
+    /// reduction. The fix it publishes is a refinement of
+    /// this assumed position; an error of a few hundred nm
+    /// in the assumed position introduces a few-arcmin
+    /// linearization error in the fix, which is in the
+    /// noise for typical sights but matters offshore. Use
+    /// the most-recent known fix (DR or GNSS) when
+    /// available.
+    #[arg(long, allow_hyphen_values = true)]
+    assumed_lat: f64,
+    /// Observer longitude in degrees (east positive). See
+    /// `--assumed-lat` for accuracy requirements.
+    #[arg(long, allow_hyphen_values = true)]
+    assumed_lon: f64,
+    /// Eye height above sea level, meters. Default 2.0.
+    #[arg(long, default_value_t = 2.0)]
+    eye_height_m: f64,
 }
 
 #[derive(Debug, clap::Args)]
@@ -206,12 +300,9 @@ fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     match cli.command {
         Command::Replay(args) => run_replay(&args),
-        Command::Capture
-        | Command::Calibrate
-        | Command::Fix
-        | Command::Serve
-        | Command::Log
-        | Command::Update => {
+        Command::Capture(args) => run_capture(&args),
+        Command::Serve(args) => run_serve(&args),
+        Command::Calibrate | Command::Fix | Command::Log | Command::Update => {
             bail!("not yet implemented; see plan.org for the development roadmap");
         }
     }
@@ -488,4 +579,209 @@ fn utc_to_jd_utc(utc: DateTime<Utc>) -> f64 {
         + f64::from(b)
         - 1524.5;
     jd_int + day_fraction
+}
+
+// ---------------------------------------------------------
+// Capture: V4L2 → PNG files on disk.
+// ---------------------------------------------------------
+
+fn run_capture(args: &CaptureArgs) -> anyhow::Result<()> {
+    fs::create_dir_all(&args.output)
+        .with_context(|| format!("create output dir {}", args.output.display()))?;
+
+    let v4l_config = V4l2Config {
+        device_path: args.device.clone(),
+        width: args.width,
+        height: args.height,
+        buffer_count: 4,
+        exposure_us: args.exposure_us,
+    };
+    let intrinsics = Intrinsics::placeholder(args.width, args.height);
+    let capture =
+        V4l2Capture::open(v4l_config, intrinsics).context("open V4L2 device")?;
+    info!(
+        device = %args.device.display(),
+        width = args.width,
+        height = args.height,
+        output = %args.output.display(),
+        "bris capture: starting"
+    );
+    info!(
+        "bris capture: using placeholder camera intrinsics (fx=fy=1000); \
+         this is fine for raw frame capture (the saved PNGs are not \
+         intrinsics-dependent), but downstream processing of these \
+         frames via `bris replay` or `bris serve` will be wrong by the \
+         calibration error until `bris calibrate` lands."
+    );
+
+    let shutdown = install_ctrlc_handler()?;
+    let start = Instant::now();
+    let max_frames = args.frames;
+    let max_duration = args.duration.map(Duration::from_secs_f64);
+    let output_dir = args.output.clone();
+    let mut counter: u32 = 0;
+
+    let stats = run_capture_loop_with(capture, shutdown.clone(), |frame| {
+        // Stop conditions in priority order:
+        //   1. Ctrl-C (handled by the shutdown atomic; the
+        //      loop polls it on each iteration).
+        //   2. --frames cap reached.
+        //   3. --duration cap reached.
+        if let Some(max) = max_frames {
+            if counter >= max {
+                return CaptureLoopAction::Stop;
+            }
+        }
+        if let Some(d) = max_duration {
+            if start.elapsed() >= d {
+                return CaptureLoopAction::Stop;
+            }
+        }
+        let path = output_dir.join(format!("frame_{counter:08}.png"));
+        match save_frame_as_png(&frame, &path) {
+            Ok(()) => {
+                counter += 1;
+                if counter.is_multiple_of(30) {
+                    info!(
+                        frames_saved = counter,
+                        elapsed_s = start.elapsed().as_secs_f64(),
+                        "bris capture: progress"
+                    );
+                }
+            }
+            Err(e) => {
+                warn!(error = %e, path = %path.display(), "bris capture: save failed");
+            }
+        }
+        CaptureLoopAction::Continue
+    })
+    .context("V4L2 capture loop")?;
+
+    info!(
+        frames_saved = counter,
+        frames_captured = stats.frames_captured,
+        frames_dropped = stats.frames_dropped_at_capture,
+        elapsed_s = start.elapsed().as_secs_f64(),
+        "bris capture: done"
+    );
+    Ok(())
+}
+
+// ---------------------------------------------------------
+// Serve: V4L2 → streaming engine → published fixes.
+// ---------------------------------------------------------
+
+fn run_serve(args: &ServeArgs) -> anyhow::Result<()> {
+    let observer = Observer {
+        latitude: Latitude::from_degrees(args.assumed_lat)
+            .context("assumed_lat out of [-90, 90]")?,
+        longitude: Longitude::from_degrees(args.assumed_lon).context("assumed_lon")?,
+        eye_height_m: args.eye_height_m,
+        eye_height_sigma_m: 0.5,
+        atmosphere: Atmosphere::STANDARD,
+    };
+    let engine_config = EngineConfig::new(observer);
+    let engine = Arc::new(StreamingEngine::new(engine_config));
+
+    // Subscribe before the capture thread starts so we never
+    // miss the first publication.
+    let fix_rx = engine
+        .fix_stream()
+        .map_err(|e| anyhow::anyhow!("fix_stream: {e}"))?;
+
+    let v4l_config = V4l2Config {
+        device_path: args.device.clone(),
+        width: args.width,
+        height: args.height,
+        buffer_count: 4,
+        exposure_us: args.exposure_us,
+    };
+    let intrinsics = Intrinsics::placeholder(args.width, args.height);
+    let capture =
+        V4l2Capture::open(v4l_config, intrinsics).context("open V4L2 device")?;
+    info!(
+        device = %args.device.display(),
+        width = args.width,
+        height = args.height,
+        observer_lat = args.assumed_lat,
+        observer_lon = args.assumed_lon,
+        "bris serve: starting"
+    );
+    warn!(
+        "bris serve: using placeholder camera intrinsics (fx=fy=1000); \
+         published fixes will be wrong by the calibration error \
+         (potentially tens of nm). Run `bris calibrate` once that \
+         workflow lands to fit per-device intrinsics."
+    );
+
+    let shutdown = install_ctrlc_handler()?;
+    let engine_thread = engine.clone();
+    let shutdown_thread = shutdown.clone();
+    let capture_handle = std::thread::Builder::new()
+        .name("bris-capture".to_string())
+        .spawn(move || run_capture_loop(capture, engine_thread, shutdown_thread))
+        .context("spawn capture thread")?;
+
+    // Main thread drains the fix stream, logging each
+    // published fix until shutdown is signalled. NMEA
+    // transport (TCP / serial) is the next follow-up;
+    // until then operators see fixes in the tracing log.
+    info!("bris serve: draining fix stream (Ctrl-C to stop)");
+    while !shutdown.load(Ordering::Relaxed) {
+        match fix_rx.try_recv() {
+            Ok(Some(fix)) => {
+                info!(
+                    lat_deg = fix.fix.lat.degrees(),
+                    lon_deg = fix.fix.lon.degrees(),
+                    sigma_nm = fix.fix.sigma_nm().value(),
+                    n_sights = fix.n_sights,
+                    azimuth_spread_deg = fix.azimuth_spread_rad.to_degrees(),
+                    oldest_sight_age_s = fix.oldest_sight_age_seconds,
+                    "bris serve: published fix"
+                );
+            }
+            Ok(None) => {
+                // No fix available right now; sleep briefly to
+                // avoid busy-spinning. 100ms matches the
+                // engine's default min_fix_publication_interval_ms.
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            Err(()) => {
+                // Channel closed — engine is gone (unexpected
+                // since we hold an Arc; defensive log).
+                warn!("bris serve: fix stream channel closed");
+                break;
+            }
+        }
+    }
+
+    info!("bris serve: shutdown signalled, joining capture thread");
+    let stats = capture_handle
+        .join()
+        .map_err(|_| anyhow::anyhow!("capture thread panicked"))?
+        .context("capture loop")?;
+    let diag = engine.diagnostics();
+    info!(
+        frames_captured = stats.frames_captured,
+        frames_dropped_at_capture = stats.frames_dropped_at_capture,
+        engine_frames_pushed = diag.frames_pushed,
+        engine_frames_dropped = diag.frames_dropped,
+        "bris serve: done"
+    );
+    Ok(())
+}
+
+/// Install a Ctrl-C handler that flips the returned atomic
+/// from `false` to `true`. The handler runs once; subsequent
+/// SIGINTs use the default (terminate) handler so the
+/// operator can hard-kill if the graceful shutdown hangs.
+fn install_ctrlc_handler() -> anyhow::Result<Arc<AtomicBool>> {
+    let shutdown = Arc::new(AtomicBool::new(false));
+    let shutdown_for_handler = shutdown.clone();
+    ctrlc::set_handler(move || {
+        info!("Ctrl-C received: shutting down");
+        shutdown_for_handler.store(true, Ordering::Relaxed);
+    })
+    .context("install Ctrl-C handler")?;
+    Ok(shutdown)
 }

@@ -8,6 +8,7 @@ members = [
     "crates/bris-nav",
     "crates/bris-nmea",
     "crates/bris-streaming",
+    "crates/bris-capture",
     "crates/bris-cli",
 ]
 # bris-ffi is intentionally not in the workspace yet. The FFI surface is
@@ -56,6 +57,16 @@ vsop87 = "3"
 # Image I/O
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "pnm"] }
 
+# Camera capture (Linux only). The v4l crate is a safe wrapper
+# around the V4L2 ioctl interface; the implementation lives in
+# bris-capture, gated behind that crate's `v4l2` feature so
+# non-Linux targets and minimal builds can opt out.
+v4l = "0.14"
+
+# Ctrl-C handling for the headless CLI (long-running serve /
+# capture sessions need a graceful shutdown path).
+ctrlc = "3.5"
+
 # ML inference (segmentation-based horizon detection).
 # We use ort (ONNX Runtime bindings) rather than tract because tract
 # 0.22 doesn't support the dynamic-shape Reshape operations in
@@ -77,6 +88,7 @@ bris-platesolve = { path = "crates/bris-platesolve" }
 bris-nav = { path = "crates/bris-nav" }
 bris-nmea = { path = "crates/bris-nmea" }
 bris-streaming = { path = "crates/bris-streaming" }
+bris-capture = { path = "crates/bris-capture" }
 
 [profile.release]
 lto = "thin"

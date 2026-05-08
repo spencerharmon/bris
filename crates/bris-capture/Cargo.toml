@@ -1,0 +1,32 @@
+[package]
+name = "bris-capture"
+description = "Camera capture for the Bris streaming engine: V4L2 frame ingest, pixel-format conversion to grayscale u16, mid-exposure timestamping."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+default = ["v4l2"]
+# Enable the V4L2 capture backend (Linux only). Disabling lets
+# non-Linux targets and minimal builds still depend on this
+# crate for the pixel-format conversion utilities.
+v4l2 = ["dep:v4l"]
+
+[dependencies]
+bris-core.workspace = true
+bris-streaming.workspace = true
+bris-vision.workspace = true
+chrono.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+v4l = { workspace = true, optional = true }
+
+[dev-dependencies]
+proptest.workspace = true
+approx.workspace = true
