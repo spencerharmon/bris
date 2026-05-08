@@ -7,12 +7,16 @@
 //! - `fix` — one-shot fix from a webcam (stub; the streaming
 //!   engine in `serve` supersedes this).
 //! - `serve` — continuous engine + NMEA serving. *Implemented*
-//!   for the V4L2 → engine → published-fix path; NMEA
-//!   transport (TCP/serial) is a follow-up.
+//!   for the V4L2 → engine → published-fix path with NMEA
+//!   stdout and TCP server transports. Serial-port and
+//!   UDP-broadcast sinks are follow-ups.
 //! - `replay` — process saved frames through the full pipeline.
 //!   *Implemented* as the validation path before live capture.
 //! - `log` — sight log management (stub).
 //! - `update` — refresh almanac/catalog/leap-seconds (stub).
+
+mod config;
+mod nmea_transport;
 
 use anyhow::{bail, Context};
 use bris_almanac::{body_apparent_place, ApparentPlace, Atmosphere, Observer, SolarSystemBody};
@@ -51,6 +55,15 @@ use tracing::{info, warn};
                   See https://github.com/anomalyco/bris."
 )]
 struct Cli {
+    /// Path to a TOML configuration file. Default search
+    /// location: `$XDG_CONFIG_HOME/bris/config.toml` (falling
+    /// back to `~/.config/bris/config.toml`). When the
+    /// default path doesn't exist, missing values must be
+    /// supplied via subcommand flags. See
+    /// `crates/bris-cli/src/config.rs` for the schema.
+    #[arg(long, global = true)]
+    config: Option<PathBuf>,
+
     #[command(subcommand)]
     command: Command,
 }
@@ -71,11 +84,11 @@ enum Command {
     /// streaming engine in `serve` supersedes this).
     Fix,
     /// Run the continuous streaming engine against a V4L2
-    /// camera, logging each published fix.
+    /// camera, logging each published fix and emitting NMEA
+    /// to the configured sinks (stdout, TCP server).
     ///
-    /// NMEA transport (TCP server, serial port) is a
-    /// follow-up; for now fixes are reported via `tracing` at
-    /// info level.
+    /// Serial-port and UDP-broadcast sinks are not yet
+    /// implemented.
     Serve(ServeArgs),
     /// Re-derive a fix from a directory of saved frames.
     ///
@@ -97,15 +110,18 @@ enum Command {
 
 #[derive(Debug, clap::Args)]
 struct CaptureArgs {
-    /// Path to the V4L2 device node. Default `/dev/video0`.
-    #[arg(long, default_value = "/dev/video0")]
-    device: PathBuf,
-    /// Capture width (pixels). Default 640.
-    #[arg(long, default_value_t = 640)]
-    width: u32,
-    /// Capture height (pixels). Default 480.
-    #[arg(long, default_value_t = 480)]
-    height: u32,
+    /// Path to the V4L2 device node. Defaults to the
+    /// config-file value if set, then `/dev/video0`.
+    #[arg(long)]
+    device: Option<PathBuf>,
+    /// Capture width (pixels). Defaults to the config-file
+    /// value if set, then 640.
+    #[arg(long)]
+    width: Option<u32>,
+    /// Capture height (pixels). Defaults to the config-file
+    /// value if set, then 480.
+    #[arg(long)]
+    height: Option<u32>,
     /// Output directory for captured PNG frames. Created if
     /// it doesn't exist. Existing files in the directory are
     /// not modified, but new captures may overwrite same-
@@ -123,28 +139,31 @@ struct CaptureArgs {
     #[arg(long)]
     duration: Option<f64>,
     /// Camera exposure for the timestamp correction, in
-    /// microseconds. Used as the per-frame mid-exposure
-    /// offset; see `bris_capture::V4l2Config::exposure_us`.
-    /// Default 10000 (10 ms — typical daylight).
-    #[arg(long, default_value_t = 10_000)]
-    exposure_us: u32,
+    /// microseconds. Defaults to the config-file value if
+    /// set, then 10000 (10 ms — typical daylight).
+    #[arg(long)]
+    exposure_us: Option<u32>,
 }
 
 #[derive(Debug, clap::Args)]
 struct ServeArgs {
-    /// Path to the V4L2 device node. Default `/dev/video0`.
-    #[arg(long, default_value = "/dev/video0")]
-    device: PathBuf,
-    /// Capture width (pixels). Default 640.
-    #[arg(long, default_value_t = 640)]
-    width: u32,
-    /// Capture height (pixels). Default 480.
-    #[arg(long, default_value_t = 480)]
-    height: u32,
+    /// Path to the V4L2 device node. Defaults to the
+    /// config-file value if set, then `/dev/video0`.
+    #[arg(long)]
+    device: Option<PathBuf>,
+    /// Capture width (pixels). Defaults to the config-file
+    /// value if set, then 640.
+    #[arg(long)]
+    width: Option<u32>,
+    /// Capture height (pixels). Defaults to the config-file
+    /// value if set, then 480.
+    #[arg(long)]
+    height: Option<u32>,
     /// Camera exposure for the timestamp correction, in
-    /// microseconds. Default 10000.
-    #[arg(long, default_value_t = 10_000)]
-    exposure_us: u32,
+    /// microseconds. Defaults to the config-file value if
+    /// set, then 10000.
+    #[arg(long)]
+    exposure_us: Option<u32>,
     /// Observer latitude in degrees (north positive). The
     /// engine uses this for almanac apparent-place
     /// computations and for the assumed position in sight
@@ -154,16 +173,32 @@ struct ServeArgs {
     /// linearization error in the fix, which is in the
     /// noise for typical sights but matters offshore. Use
     /// the most-recent known fix (DR or GNSS) when
-    /// available.
+    /// available. Required: must be set via this flag or
+    /// the config file.
     #[arg(long, allow_hyphen_values = true)]
-    assumed_lat: f64,
-    /// Observer longitude in degrees (east positive). See
-    /// `--assumed-lat` for accuracy requirements.
+    assumed_lat: Option<f64>,
+    /// Observer longitude in degrees (east positive).
+    /// Required: must be set via this flag or the config
+    /// file. See `--assumed-lat` for accuracy requirements.
     #[arg(long, allow_hyphen_values = true)]
-    assumed_lon: f64,
-    /// Eye height above sea level, meters. Default 2.0.
-    #[arg(long, default_value_t = 2.0)]
-    eye_height_m: f64,
+    assumed_lon: Option<f64>,
+    /// Eye height above sea level, meters. Defaults to the
+    /// config-file value if set, then 2.0.
+    #[arg(long)]
+    eye_height_m: Option<f64>,
+    /// Emit NMEA sentences to stdout in addition to any
+    /// `[[nmea]]` sinks defined in the config file. Off by
+    /// default; useful for piping into another tool
+    /// (`bris serve --nmea-stdout | gpsd`) or for debugging
+    /// without editing the config file.
+    #[arg(long, default_value_t = false)]
+    nmea_stdout: bool,
+    /// Bind a TCP server on this address and broadcast NMEA
+    /// sentences to every connected client. Adds to any
+    /// `[[nmea]]` sinks defined in the config file. Use
+    /// `0.0.0.0:10110` for the `OpenCPN` convention.
+    #[arg(long)]
+    nmea_tcp: Option<std::net::SocketAddr>,
 }
 
 #[derive(Debug, clap::Args)]
@@ -298,10 +333,12 @@ fn main() -> anyhow::Result<()> {
         .init();
 
     let cli = Cli::parse();
+    let raw_config = config::load_config(cli.config.as_deref())
+        .context("load configuration")?;
     match cli.command {
         Command::Replay(args) => run_replay(&args),
-        Command::Capture(args) => run_capture(&args),
-        Command::Serve(args) => run_serve(&args),
+        Command::Capture(args) => run_capture(&args, &raw_config),
+        Command::Serve(args) => run_serve(&args, &raw_config),
         Command::Calibrate | Command::Fix | Command::Log | Command::Update => {
             bail!("not yet implemented; see plan.org for the development roadmap");
         }
@@ -585,24 +622,32 @@ fn utc_to_jd_utc(utc: DateTime<Utc>) -> f64 {
 // Capture: V4L2 → PNG files on disk.
 // ---------------------------------------------------------
 
-fn run_capture(args: &CaptureArgs) -> anyhow::Result<()> {
+fn run_capture(args: &CaptureArgs, raw_config: &config::RawConfig) -> anyhow::Result<()> {
+    let resolved = config::ResolvedCaptureConfig::resolve(
+        raw_config,
+        args.device.clone(),
+        args.width,
+        args.height,
+        args.exposure_us,
+    );
+
     fs::create_dir_all(&args.output)
         .with_context(|| format!("create output dir {}", args.output.display()))?;
 
     let v4l_config = V4l2Config {
-        device_path: args.device.clone(),
-        width: args.width,
-        height: args.height,
+        device_path: resolved.device.clone(),
+        width: resolved.width,
+        height: resolved.height,
         buffer_count: 4,
-        exposure_us: args.exposure_us,
+        exposure_us: resolved.exposure_us,
     };
-    let intrinsics = Intrinsics::placeholder(args.width, args.height);
+    let intrinsics = Intrinsics::placeholder(resolved.width, resolved.height);
     let capture =
         V4l2Capture::open(v4l_config, intrinsics).context("open V4L2 device")?;
     info!(
-        device = %args.device.display(),
-        width = args.width,
-        height = args.height,
+        device = %resolved.device.display(),
+        width = resolved.width,
+        height = resolved.height,
         output = %args.output.display(),
         "bris capture: starting"
     );
@@ -671,12 +716,25 @@ fn run_capture(args: &CaptureArgs) -> anyhow::Result<()> {
 // Serve: V4L2 → streaming engine → published fixes.
 // ---------------------------------------------------------
 
-fn run_serve(args: &ServeArgs) -> anyhow::Result<()> {
+fn run_serve(args: &ServeArgs, raw_config: &config::RawConfig) -> anyhow::Result<()> {
+    let resolved = config::ResolvedServeConfig::resolve(
+        raw_config,
+        args.device.clone(),
+        args.width,
+        args.height,
+        args.exposure_us,
+        args.assumed_lat,
+        args.assumed_lon,
+        args.eye_height_m,
+        args.nmea_stdout,
+        args.nmea_tcp,
+    )?;
+
     let observer = Observer {
-        latitude: Latitude::from_degrees(args.assumed_lat)
+        latitude: Latitude::from_degrees(resolved.assumed_lat)
             .context("assumed_lat out of [-90, 90]")?,
-        longitude: Longitude::from_degrees(args.assumed_lon).context("assumed_lon")?,
-        eye_height_m: args.eye_height_m,
+        longitude: Longitude::from_degrees(resolved.assumed_lon).context("assumed_lon")?,
+        eye_height_m: resolved.eye_height_m,
         eye_height_sigma_m: 0.5,
         atmosphere: Atmosphere::STANDARD,
     };
@@ -690,21 +748,21 @@ fn run_serve(args: &ServeArgs) -> anyhow::Result<()> {
         .map_err(|e| anyhow::anyhow!("fix_stream: {e}"))?;
 
     let v4l_config = V4l2Config {
-        device_path: args.device.clone(),
-        width: args.width,
-        height: args.height,
+        device_path: resolved.device.clone(),
+        width: resolved.width,
+        height: resolved.height,
         buffer_count: 4,
-        exposure_us: args.exposure_us,
+        exposure_us: resolved.exposure_us,
     };
-    let intrinsics = Intrinsics::placeholder(args.width, args.height);
+    let intrinsics = Intrinsics::placeholder(resolved.width, resolved.height);
     let capture =
         V4l2Capture::open(v4l_config, intrinsics).context("open V4L2 device")?;
     info!(
-        device = %args.device.display(),
-        width = args.width,
-        height = args.height,
-        observer_lat = args.assumed_lat,
-        observer_lon = args.assumed_lon,
+        device = %resolved.device.display(),
+        width = resolved.width,
+        height = resolved.height,
+        observer_lat = resolved.assumed_lat,
+        observer_lon = resolved.assumed_lon,
         "bris serve: starting"
     );
     warn!(
@@ -714,6 +772,31 @@ fn run_serve(args: &ServeArgs) -> anyhow::Result<()> {
          workflow lands to fit per-device intrinsics."
     );
 
+    // Materialize NMEA sinks from the resolved sink list
+    // (file + CLI flags merged). Empty is fine: fixes still
+    // publish via the structured `info!` log inside the
+    // dispatch loop.
+    let mut sinks: Vec<Box<dyn nmea_transport::NmeaSink>> = Vec::new();
+    for sink_spec in &resolved.nmea_sinks {
+        match sink_spec {
+            config::RawNmea::Stdout => {
+                sinks.push(Box::new(nmea_transport::StdoutSink));
+            }
+            config::RawNmea::Tcp { addr } => {
+                let tcp = nmea_transport::TcpServerSink::bind(*addr)
+                    .with_context(|| format!("bind NMEA TCP server on {addr}"))?;
+                sinks.push(Box::new(tcp));
+            }
+        }
+    }
+    if sinks.is_empty() {
+        info!(
+            "bris serve: no NMEA sinks configured; fixes are visible via the \
+             structured info! log only. Add [[nmea]] entries to the config \
+             file or pass --nmea-stdout / --nmea-tcp ADDR to emit NMEA bytes."
+        );
+    }
+
     let shutdown = install_ctrlc_handler()?;
     let engine_thread = engine.clone();
     let shutdown_thread = shutdown.clone();
@@ -722,38 +805,15 @@ fn run_serve(args: &ServeArgs) -> anyhow::Result<()> {
         .spawn(move || run_capture_loop(capture, engine_thread, shutdown_thread))
         .context("spawn capture thread")?;
 
-    // Main thread drains the fix stream, logging each
-    // published fix until shutdown is signalled. NMEA
-    // transport (TCP / serial) is the next follow-up;
-    // until then operators see fixes in the tracing log.
-    info!("bris serve: draining fix stream (Ctrl-C to stop)");
-    while !shutdown.load(Ordering::Relaxed) {
-        match fix_rx.try_recv() {
-            Ok(Some(fix)) => {
-                info!(
-                    lat_deg = fix.fix.lat.degrees(),
-                    lon_deg = fix.fix.lon.degrees(),
-                    sigma_nm = fix.fix.sigma_nm().value(),
-                    n_sights = fix.n_sights,
-                    azimuth_spread_deg = fix.azimuth_spread_rad.to_degrees(),
-                    oldest_sight_age_s = fix.oldest_sight_age_seconds,
-                    "bris serve: published fix"
-                );
-            }
-            Ok(None) => {
-                // No fix available right now; sleep briefly to
-                // avoid busy-spinning. 100ms matches the
-                // engine's default min_fix_publication_interval_ms.
-                std::thread::sleep(Duration::from_millis(100));
-            }
-            Err(()) => {
-                // Channel closed — engine is gone (unexpected
-                // since we hold an Arc; defensive log).
-                warn!("bris serve: fix stream channel closed");
-                break;
-            }
-        }
-    }
+    // Main thread runs the NMEA dispatch loop, which drains
+    // the fix stream and emits to all configured sinks plus
+    // the structured info! log.
+    nmea_transport::run_nmea_dispatch(
+        fix_rx,
+        sinks,
+        shutdown.clone(),
+        QualityThresholds::default(),
+    );
 
     info!("bris serve: shutdown signalled, joining capture thread");
     let stats = capture_handle

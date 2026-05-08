@@ -60,9 +60,11 @@ mod config;
 mod diagnostics;
 mod engine;
 mod fix;
+mod nmea;
 mod pipeline;
 
 pub use config::{EngineConfig, PlateSolverInit};
 pub use diagnostics::{EngineDiagnostics, PipelineStageStats};
 pub use engine::{FixReceiver, PushError, StreamingEngine};
 pub use fix::{DominantSource, PublishedFix};
+pub use nmea::format_fix_as_nmea;

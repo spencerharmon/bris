@@ -1,0 +1,67 @@
+# Bris configuration file (TOML)
+#
+# Default search location: $XDG_CONFIG_HOME/bris/config.toml
+# (falling back to ~/.config/bris/config.toml). Override with
+# `bris --config <path>`.
+#
+# Every section is optional. Required values for a given
+# subcommand must be supplied either by the file or by a CLI
+# flag; missing required values surface as a startup error.
+#
+# CLI flags **override** file values (except for [[nmea]],
+# where CLI flags add sinks rather than replacing them).
+
+[observer]
+# Latitude in degrees, north positive. Required for `bris
+# serve`. The fix the engine publishes is a refinement of
+# this assumed position; an error of a few hundred nm in the
+# assumed position introduces a few-arcmin linearization
+# error in the resulting fix, which is in the noise for
+# typical sights but matters offshore. Use the most-recent
+# known fix (DR or GNSS) when available.
+latitude = 47.6
+
+# Longitude in degrees, east positive. Required for `bris
+# serve`. See `latitude` for accuracy requirements.
+longitude = -122.3
+
+# Eye height above sea level, meters. Default 2.0.
+eye_height_m = 2.5
+
+[camera]
+# V4L2 device node. Default `/dev/video0`. On Pi systems with
+# both libcamera and a USB camera, `/dev/video0` is usually
+# the libcamera one and `/dev/video1` is the USB camera.
+device = "/dev/video0"
+
+# Capture resolution. Default 640×480. The camera negotiates
+# the closest supported size; check `bris capture` startup
+# logs for the actual values.
+width = 640
+height = 480
+
+# Camera exposure for the timestamp correction, in
+# microseconds. Used as the per-frame mid-exposure offset.
+# For fixed-exposure deployments this is correct; for
+# auto-exposure, this is a per-frame approximation that's
+# correct on average and biased by at most ±frame_period/2
+# per frame. Default 10000 (10 ms — typical daylight).
+exposure_us = 10000
+
+# Each [[nmea]] table defines one transport sink for
+# `bris serve`'s NMEA emission. CLI flags
+# (--nmea-stdout, --nmea-tcp) add to this list rather than
+# replacing it.
+
+# Stdout sink: writes each NMEA batch to the process's
+# stdout. Useful for piping (`bris serve | gpsd`) and for
+# debugging.
+# [[nmea]]
+# type = "stdout"
+
+# TCP server sink: binds a TCP listener and broadcasts each
+# NMEA batch to every connected client. Standard port for
+# OpenCPN / MaxSea / Coastal Explorer is 10110.
+# [[nmea]]
+# type = "tcp"
+# addr = "0.0.0.0:10110"

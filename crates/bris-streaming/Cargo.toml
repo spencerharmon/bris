@@ -26,6 +26,7 @@ bris-vision.workspace = true
 bris-platesolve.workspace = true
 bris-nav.workspace = true
 bris-nmea.workspace = true
+chrono.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 

@@ -1249,9 +1249,20 @@ references to the regression tests that pin the behavior. See
    Vendor-prefixed sentences carrying time-since-sync, drift estimate,
    step-detected flag, horizon confidence, sights used in fix. Ignored
    by standard consumers; consumed by our own tooling.
-** TODO Transport layer
+** PARTIAL Transport layer
    TCP server, UDP broadcast, serial (~serialport~ crate). Configurable
    via a small TOML/JSON config.
+
+   *Done in commit X of the headless-stack work:* TCP server
+   sink + stdout sink, configured via the `bris-cli` config
+   file's `[[nmea]]` tables and the `--nmea-tcp` /
+   `--nmea-stdout` flags. Standard port 10110 honoured by
+   convention. Multi-client broadcast with per-client write
+   timeout (slow client gets dropped, others continue).
+
+   Still missing: serial port (`serialport` crate dep + a
+   `RawNmea::Serial { device, baud }` variant) and UDP
+   broadcast (`std::net::UdpSocket`).
 ** TODO OpenCPN integration test
    Scripted: spin up Bris emitting a canned fix, connect OpenCPN in a
    container/VM, assert vessel icon appears at expected position and
@@ -1290,12 +1301,23 @@ references to the regression tests that pin the behavior. See
    start) so consumers can detect schema changes.
 
 * Phase 6: Reference frontend (CLI / embedded Linux)
-** TODO ~bris-cli~ with subcommands
+** PARTIAL ~bris-cli~ with subcommands
    ~capture~, ~calibrate~, ~fix~, ~serve~, ~replay~ (process saved frames),
    ~log~ (list/show/delete/restore/export), ~update~ (download and apply
    the signed ~bris-data~ payload containing leap-second table, almanac
    coefficients, and star catalog as a unified set; verify signature,
    atomically swap, log version transition).
+
+   *Implemented:* ~capture~ (record YUYV frames to PNG via
+   V4L2), ~serve~ (V4L2 → StreamingEngine → NMEA sinks),
+   ~replay~ (process saved frames). All three honour a
+   shared TOML config file at
+   ~$XDG_CONFIG_HOME/bris/config.toml~ (or ~--config <path>~);
+   CLI flags override file values. Sample config at
+   ~crates/bris-cli/examples/config.toml~.
+
+   *Stubs:* ~calibrate~, ~fix~, ~log~, ~update~ (return a
+   "not yet implemented" error pointing at this plan).
 ** DONE Camera capture via V4L2 (libcamera deferred)
    New ~bris-capture~ workspace crate wraps the ~v4l~ crate's
    mmap streaming capture. Wired into ~bris capture~ (record
