@@ -1,0 +1,28 @@
+[package]
+name = "bris-calibrate"
+description = "Lens calibration for Bris: chessboard corner detection, intrinsics solve via Zhang's method, persistence, quality reporting."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+bris-vision.workspace = true
+anyhow.workspace = true
+chess-corners = "0.8"
+calib-targets = "0.8"
+vision-calibration = "0.3"
+image.workspace = true
+serde.workspace = true
+toml.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+approx.workspace = true
+tempfile.workspace = true

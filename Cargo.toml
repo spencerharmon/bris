@@ -9,6 +9,7 @@ members = [
     "crates/bris-nmea",
     "crates/bris-streaming",
     "crates/bris-capture",
+    "crates/bris-calibrate",
     "crates/bris-cli",
 ]
 # bris-ffi is intentionally not in the workspace yet. The FFI surface is
@@ -89,6 +90,7 @@ bris-nav = { path = "crates/bris-nav" }
 bris-nmea = { path = "crates/bris-nmea" }
 bris-streaming = { path = "crates/bris-streaming" }
 bris-capture = { path = "crates/bris-capture" }
+bris-calibrate = { path = "crates/bris-calibrate" }
 
 [profile.release]
 lto = "thin"

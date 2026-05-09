@@ -20,6 +20,10 @@ mod nmea_transport;
 
 use anyhow::{bail, Context};
 use bris_almanac::{body_apparent_place, ApparentPlace, Atmosphere, Observer, SolarSystemBody};
+use bris_calibrate::{
+    calibrate, default_intrinsics_path, detect_corners_in_directory, diagnose, write_intrinsics,
+    CheckerboardTarget, DiagnosisLevel,
+};
 use bris_capture::{
     run_capture_loop, run_capture_loop_with, CaptureLoopAction, V4l2Capture, V4l2Config,
 };
@@ -78,8 +82,10 @@ enum Command {
     /// build a local corpus for offline development, (c)
     /// gather data for lens calibration.
     Capture(CaptureArgs),
-    /// Run the lens calibration workflow (stub).
-    Calibrate,
+    /// Fit camera intrinsics from captured frames of a
+    /// printed checkerboard. See `docs/calibration.md` for
+    /// the operator workflow.
+    Calibrate(CalibrateArgs),
     /// Compute a one-shot fix from a webcam (stub; the
     /// streaming engine in `serve` supersedes this).
     Fix,
@@ -199,6 +205,43 @@ struct ServeArgs {
     /// `0.0.0.0:10110` for the `OpenCPN` convention.
     #[arg(long)]
     nmea_tcp: Option<std::net::SocketAddr>,
+    /// Path to a calibration intrinsics TOML file written
+    /// by `bris calibrate`. Overrides the
+    /// `[camera] intrinsics` config-file value. When neither
+    /// is set, falls back to placeholder intrinsics
+    /// (fx = fy = 1000) with a loud warning — fixes will be
+    /// off by the calibration error (potentially tens of
+    /// nautical miles).
+    #[arg(long)]
+    intrinsics: Option<PathBuf>,
+}
+
+#[derive(Debug, clap::Args)]
+struct CalibrateArgs {
+    /// Directory containing captured calibration frames
+    /// (PNG/JPEG). Use `bris capture --output <dir> --frames N`
+    /// to record them, or capture with any other tool that
+    /// produces grayscale or color images.
+    #[arg(long)]
+    frames: PathBuf,
+    /// Number of *inner* corners along the short side of
+    /// the checkerboard. Default 7 (an 8-square-tall board).
+    #[arg(long, default_value_t = 7)]
+    rows: u32,
+    /// Number of *inner* corners along the long side of
+    /// the checkerboard. Default 11 (a 12-square-wide
+    /// board).
+    #[arg(long, default_value_t = 11)]
+    cols: u32,
+    /// Square edge length in millimeters. Default 25.
+    /// Measure your printed board carefully — printer
+    /// scaling is a common source of millimeter-scale error.
+    #[arg(long, default_value_t = 25.0)]
+    square_size_mm: f64,
+    /// Where to write the resulting intrinsics TOML file.
+    /// Default: `$XDG_DATA_HOME/bris/intrinsics.toml`.
+    #[arg(long)]
+    output: Option<PathBuf>,
 }
 
 #[derive(Debug, clap::Args)]
@@ -339,7 +382,8 @@ fn main() -> anyhow::Result<()> {
         Command::Replay(args) => run_replay(&args),
         Command::Capture(args) => run_capture(&args, &raw_config),
         Command::Serve(args) => run_serve(&args, &raw_config),
-        Command::Calibrate | Command::Fix | Command::Log | Command::Update => {
+        Command::Calibrate(args) => run_calibrate(&args),
+        Command::Fix | Command::Log | Command::Update => {
             bail!("not yet implemented; see plan.org for the development roadmap");
         }
     }
@@ -716,6 +760,14 @@ fn run_capture(args: &CaptureArgs, raw_config: &config::RawConfig) -> anyhow::Re
 // Serve: V4L2 → streaming engine → published fixes.
 // ---------------------------------------------------------
 
+#[allow(
+    // The serve subcommand orchestrates the full pipeline:
+    // resolve config, open camera, build engine, spawn
+    // capture thread, drain fix stream, log everything,
+    // join cleanly. Splitting it into helpers obscures the
+    // top-down flow more than it helps.
+    clippy::too_many_lines,
+)]
 fn run_serve(args: &ServeArgs, raw_config: &config::RawConfig) -> anyhow::Result<()> {
     let resolved = config::ResolvedServeConfig::resolve(
         raw_config,
@@ -728,6 +780,7 @@ fn run_serve(args: &ServeArgs, raw_config: &config::RawConfig) -> anyhow::Result
         args.eye_height_m,
         args.nmea_stdout,
         args.nmea_tcp,
+        args.intrinsics.clone(),
     )?;
 
     let observer = Observer {
@@ -754,7 +807,11 @@ fn run_serve(args: &ServeArgs, raw_config: &config::RawConfig) -> anyhow::Result
         buffer_count: 4,
         exposure_us: resolved.exposure_us,
     };
-    let intrinsics = Intrinsics::placeholder(resolved.width, resolved.height);
+    let (intrinsics, used_placeholder) = load_intrinsics(
+        resolved.intrinsics.as_deref(),
+        resolved.width,
+        resolved.height,
+    )?;
     let capture =
         V4l2Capture::open(v4l_config, intrinsics).context("open V4L2 device")?;
     info!(
@@ -765,12 +822,16 @@ fn run_serve(args: &ServeArgs, raw_config: &config::RawConfig) -> anyhow::Result
         observer_lon = resolved.assumed_lon,
         "bris serve: starting"
     );
-    warn!(
-        "bris serve: using placeholder camera intrinsics (fx=fy=1000); \
-         published fixes will be wrong by the calibration error \
-         (potentially tens of nm). Run `bris calibrate` once that \
-         workflow lands to fit per-device intrinsics."
-    );
+    if used_placeholder {
+        warn!(
+            "bris serve: using placeholder camera intrinsics (fx=fy=1000); \
+             published fixes will be wrong by the calibration error \
+             (potentially tens of nm). Run `bris calibrate --frames <dir>` to \
+             fit per-device intrinsics, then point `bris serve` at the resulting \
+             file via `[camera] intrinsics = ...` in your config or \
+             `--intrinsics PATH` on the command line."
+        );
+    }
 
     // Materialize NMEA sinks from the resolved sink list
     // (file + CLI flags merged). Empty is fine: fixes still
@@ -844,4 +905,162 @@ fn install_ctrlc_handler() -> anyhow::Result<Arc<AtomicBool>> {
     })
     .context("install Ctrl-C handler")?;
     Ok(shutdown)
+}
+
+/// Load camera intrinsics from a calibration file when one
+/// is configured, otherwise fall back to the placeholder.
+///
+/// Returns `(intrinsics, used_placeholder)`. The caller logs
+/// a warning at `warn!` level when `used_placeholder` is
+/// `true` so operators see the calibration shortfall in
+/// every relevant subcommand.
+///
+/// Validates the file's recorded resolution against the
+/// camera's actual capture resolution; mismatched
+/// resolution silently produces wrong altitudes (focal
+/// length scales with sensor crop / binning), so this
+/// function errors loudly when they don't match.
+fn load_intrinsics(
+    intrinsics_path: Option<&Path>,
+    capture_width: u32,
+    capture_height: u32,
+) -> anyhow::Result<(Intrinsics, bool)> {
+    let Some(path) = intrinsics_path else {
+        return Ok((Intrinsics::placeholder(capture_width, capture_height), true));
+    };
+    let persisted = bris_calibrate::read_intrinsics(path)
+        .with_context(|| format!("read intrinsics from {}", path.display()))?;
+    if persisted.intrinsics.image_width != capture_width
+        || persisted.intrinsics.image_height != capture_height
+    {
+        bail!(
+            "intrinsics file {} was calibrated against {}×{} but camera is producing {}×{}; \
+             focal length scales with resolution and using these intrinsics would silently \
+             produce wrong altitudes. Re-run `bris calibrate` at the camera's current \
+             resolution.",
+            path.display(),
+            persisted.intrinsics.image_width,
+            persisted.intrinsics.image_height,
+            capture_width,
+            capture_height,
+        );
+    }
+    info!(
+        path = %path.display(),
+        rms_px = persisted.quality.mean_reproj_error_px,
+        view_count = persisted.quality.view_count,
+        "loaded camera intrinsics"
+    );
+    Ok((persisted.intrinsics(), false))
+}
+
+// ---------------------------------------------------------
+// Calibrate: chessboard frames → camera intrinsics file.
+// ---------------------------------------------------------
+
+fn run_calibrate(args: &CalibrateArgs) -> anyhow::Result<()> {
+    let target = CheckerboardTarget::new(
+        args.rows,
+        args.cols,
+        args.square_size_mm / 1000.0,
+    )
+    .with_context(|| {
+        format!(
+            "invalid checkerboard target ({}×{} inner corners, {} mm squares)",
+            args.rows, args.cols, args.square_size_mm
+        )
+    })?;
+
+    info!(
+        frames = %args.frames.display(),
+        rows = target.rows,
+        cols = target.cols,
+        square_size_mm = target.square_size_m * 1000.0,
+        "bris calibrate: starting"
+    );
+
+    let (views, stats) = detect_corners_in_directory(&args.frames, target)
+        .with_context(|| format!("detect corners in {}", args.frames.display()))?;
+    info!(
+        successful_views = views.len(),
+        skipped_no_board = stats.skipped_no_board,
+        skipped_wrong_size = stats.skipped_wrong_size,
+        skipped_io = stats.skipped_io,
+        tried = stats.tried,
+        "bris calibrate: detection done"
+    );
+    if stats.skipped_no_board + stats.skipped_wrong_size > stats.tried / 3 {
+        warn!(
+            "more than a third of frames produced no usable detection; \
+             consider re-shooting with sharper focus and a fully-visible board"
+        );
+    }
+
+    let result = calibrate(&views).context("calibration solve")?;
+    info!(
+        rms_px = result.mean_reproj_error_px,
+        fx = result.intrinsics.fx,
+        fy = result.intrinsics.fy,
+        cx = result.intrinsics.cx,
+        cy = result.intrinsics.cy,
+        k1 = result.intrinsics.k1,
+        "bris calibrate: solve done"
+    );
+
+    let diagnosis = diagnose(&result);
+    print_diagnosis(&diagnosis);
+    if matches!(diagnosis.overall, DiagnosisLevel::Error) {
+        bail!(
+            "calibration diagnostic flagged at least one error; not writing intrinsics. \
+             Re-shoot frames or address the issues above and re-run."
+        );
+    }
+
+    let output_path = match args.output.clone() {
+        Some(p) => p,
+        None => default_intrinsics_path().ok_or_else(|| {
+            anyhow::anyhow!(
+                "no --output specified and could not derive a default path \
+                 (XDG_DATA_HOME and HOME both unset). Pass --output PATH explicitly."
+            )
+        })?,
+    };
+    write_intrinsics(&output_path, &result)
+        .with_context(|| format!("write {}", output_path.display()))?;
+    info!(
+        path = %output_path.display(),
+        rms_px = result.mean_reproj_error_px,
+        view_count = result.view_count,
+        "bris calibrate: wrote intrinsics"
+    );
+
+    eprintln!();
+    eprintln!("Calibration written to: {}", output_path.display());
+    eprintln!("  RMS reprojection: {:.3} px", result.mean_reproj_error_px);
+    eprintln!("  Views used:       {}", result.view_count);
+    eprintln!("  Observations:     {}", result.observation_count);
+    eprintln!("  Diagnosis:        {}", diagnosis.overall.label());
+    eprintln!();
+    eprintln!(
+        "Use the file with `bris serve` by setting `[camera] intrinsics = \"{}\"` \
+         in your config file, or by passing `--intrinsics {}` on the command line.",
+        output_path.display(),
+        output_path.display(),
+    );
+
+    Ok(())
+}
+
+fn print_diagnosis(d: &bris_calibrate::Diagnosis) {
+    if d.issues.is_empty() {
+        eprintln!("Diagnosis: OK (no issues found)");
+        return;
+    }
+    eprintln!();
+    eprintln!("Diagnosis: {} ({} issue{})", d.overall.label(), d.issues.len(),
+        if d.issues.len() == 1 { "" } else { "s" });
+    for issue in &d.issues {
+        eprintln!("  [{}] {}: {}", issue.level.label(), issue.code, issue.message);
+        eprintln!("       → {}", issue.remediation);
+    }
 }

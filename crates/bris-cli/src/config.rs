@@ -89,6 +89,14 @@ pub(crate) struct RawCamera {
     pub width: Option<u32>,
     pub height: Option<u32>,
     pub exposure_us: Option<u32>,
+    /// Path to a calibration intrinsics file written by
+    /// `bris calibrate`. When `None`, both
+    /// [`ResolvedServeConfig`] and [`ResolvedCaptureConfig`]
+    /// fall back to [`bris_vision::Intrinsics::placeholder`]
+    /// — the engine will still produce fixes but they'll be
+    /// wrong by the calibration error (potentially tens of
+    /// nautical miles).
+    pub intrinsics: Option<PathBuf>,
 }
 
 /// One NMEA output sink. Discriminated by the `type` field.
@@ -180,6 +188,11 @@ pub(crate) struct ResolvedServeConfig {
     pub assumed_lon: f64,
     pub eye_height_m: f64,
     pub nmea_sinks: Vec<RawNmea>,
+    /// Path to a calibration intrinsics file. `None` means
+    /// "fall back to placeholder intrinsics with a loud
+    /// warning" — see the `bris_calibrate::PersistedIntrinsics`
+    /// doc for what that means for fix accuracy.
+    pub intrinsics: Option<PathBuf>,
 }
 
 /// Resolved config for the `capture` subcommand.
@@ -219,6 +232,7 @@ impl ResolvedServeConfig {
         cli_eye_height_m: Option<f64>,
         cli_nmea_stdout: bool,
         cli_nmea_tcp: Option<SocketAddr>,
+        cli_intrinsics: Option<PathBuf>,
     ) -> Result<Self> {
         let camera = file.camera.as_ref();
         let observer = file.observer.as_ref();
@@ -235,6 +249,7 @@ impl ResolvedServeConfig {
         let eye_height_m = cli_eye_height_m
             .or_else(|| observer.and_then(|o| o.eye_height_m))
             .unwrap_or(2.0);
+        let intrinsics = cli_intrinsics.or_else(|| camera.and_then(|c| c.intrinsics.clone()));
 
         // Required: lat + lon. Collect both into one error
         // message if both are missing.
@@ -275,6 +290,7 @@ impl ResolvedServeConfig {
             assumed_lon,
             eye_height_m,
             nmea_sinks,
+            intrinsics,
         })
     }
 }
@@ -385,6 +401,7 @@ latitudo = 47.6  # typo
             Some(3.0),
             true,
             None,
+            None,
         )
         .unwrap();
         assert_eq!(resolved.device, PathBuf::from("/dev/video1"));
@@ -407,7 +424,7 @@ device = "/dev/video2"
         )
         .unwrap();
         let resolved = ResolvedServeConfig::resolve(
-            &file, None, None, None, None, None, None, None, false, None,
+            &file, None, None, None, None, None, None, None, false, None, None,
         )
         .unwrap();
         assert_eq!(resolved.device, PathBuf::from("/dev/video2"));
@@ -422,7 +439,7 @@ device = "/dev/video2"
     fn resolve_serve_errors_on_missing_required_lat() {
         let file = RawConfig::default();
         let err = ResolvedServeConfig::resolve(
-            &file, None, None, None, None, None, Some(0.0), None, false, None,
+            &file, None, None, None, None, None, Some(0.0), None, false, None, None,
         )
         .unwrap_err();
         assert!(err.to_string().contains("latitude"), "got: {err}");
@@ -445,6 +462,7 @@ addr = "10.0.0.1:10110"
         let resolved = ResolvedServeConfig::resolve(
             &file, None, None, None, None, None, None, None,
             true, // --nmea-stdout adds a second sink
+            None,
             None,
         )
         .unwrap();

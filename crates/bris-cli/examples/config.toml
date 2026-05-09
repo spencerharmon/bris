@@ -48,6 +48,14 @@ height = 480
 # per frame. Default 10000 (10 ms — typical daylight).
 exposure_us = 10000
 
+# Path to a calibration intrinsics TOML file written by
+# `bris calibrate`. Without this, `bris serve` falls back to
+# placeholder intrinsics (fx = fy = 1000) with a loud
+# warning — fixes will be off by the calibration error
+# (potentially tens of nautical miles). See
+# `docs/calibration.md` for the calibration workflow.
+# intrinsics = "/home/operator/.local/share/bris/intrinsics.toml"
+
 # Each [[nmea]] table defines one transport sink for
 # `bris serve`'s NMEA emission. CLI flags
 # (--nmea-stdout, --nmea-tcp) add to this list rather than

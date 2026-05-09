@@ -278,31 +278,33 @@ references to the regression tests that pin the behavior. See
    sensor pixels in non-viewing orientation); default is no
    rotation, since phone JPEGs and conventional camera images are
    already in viewing orientation.
-** TODO Lens model + calibration
+** PARTIAL Lens model + calibration
    Pinhole + Brown-Conrady distortion (k1, k2, k3, p1, p2). Calibration
    workflow: capture N frames of a printed checkerboard or use star
    field self-calibration. Persist intrinsics per-device. For shipped
    hardware, a factory-default calibration is baked into the image and
    the user calibration workflow overrides it.
-   *Status:* model + undistortion math complete in ~bris-vision::lens~
-   (10 tests). Calibration *workflow* (corner detection, parameter
-   solve, persistence) still pending — needs the CLI hook.
 
-   *Empirically confirmed (this session) as the highest-impact
-   remaining blocker for real-data plate-solving.*
-   ~examples/synth_frame_test.rs~ projects catalog stars through
-   a known attitude into a PNG, then runs the full pipeline.
-   With matched ~RENDER_K1=SOLVE_K1=0~ or ~-0.05~: works, attitude
-   recovered to within 4 arcsec. With ~RENDER_K1=-0.10~ but
-   ~SOLVE_K1=0~: complete failure (~best: 0~ — no candidate
-   passes 3 verifications). Mechanism: plate-solve hashes
-   pairwise distance ratios; wrong distortion warps pairs
-   differently depending on radial position, so the 4-tuple's
-   ratios shift between hash bins. Real wide-angle marine
-   cameras routinely have ~k1 ∈ [-0.1, -0.3]~ — exactly where
-   plate-solve breaks down without calibration. Until this
-   workflow lands, the corpus ~[plate_solve]~ regression cases
-   correctly stay ~outcome = "err"~.
+   *Status:* model + undistortion math complete in
+   ~bris-vision::lens~ (10 tests). Calibration *workflow* now also
+   implemented in the new ~bris-calibrate~ crate: corner detection
+   via the `chess-corners` ChESS detector + `calib-targets`
+   chessboard extractor, parameter solve via `vision-calibration`'s
+   planar-intrinsics workflow (Zhang's method + non-linear bundle
+   adjustment), TOML persistence, and a quality diagnostic.
+   Wired into the CLI as ~bris calibrate --frames <dir> --rows
+   --cols --square-size-mm~. ~bris serve~ loads the persisted
+   intrinsics via the config file's ~[camera] intrinsics = ...~
+   field or ~--intrinsics PATH~ and refuses to apply a calibration
+   recorded at a different resolution than the camera is currently
+   producing. Operator-facing user documentation in
+   [[file:docs/calibration.md][docs/calibration.md]].
+
+   Star-field self-calibration is still pending — interesting once
+   plate solving on real data is reliable enough to bootstrap.
+   Factory-default per-device intrinsics for shipped hardware
+   units is also still pending — needs the hardware product
+   pipeline.
 ** TODO Eye-height handling
    Eye height contributes to horizon dip, which is a per-fix correction.
    - Persist a default eye height per device (settings).
