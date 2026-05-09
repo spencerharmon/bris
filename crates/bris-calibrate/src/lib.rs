@@ -10,7 +10,7 @@
 //! FOVs, which is the dominant absolute-altitude error after
 //! refraction.
 //!
-//! See `docs/calibration.md` for the operator-facing guide:
+//! See `docs/operator/calibration.md` for the operator-facing guide:
 //! target choice, capture procedure, expected residuals,
 //! troubleshooting.
 //!

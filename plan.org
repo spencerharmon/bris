@@ -298,7 +298,7 @@ references to the regression tests that pin the behavior. See
    field or ~--intrinsics PATH~ and refuses to apply a calibration
    recorded at a different resolution than the camera is currently
    producing. Operator-facing user documentation in
-   [[file:docs/calibration.md][docs/calibration.md]].
+   [[file:docs/operator/calibration.md][docs/operator/calibration.md]].
 
    Star-field self-calibration is still pending — interesting once
    plate solving on real data is reliable enough to bootstrap.

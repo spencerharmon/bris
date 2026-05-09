@@ -83,7 +83,7 @@ enum Command {
     /// gather data for lens calibration.
     Capture(CaptureArgs),
     /// Fit camera intrinsics from captured frames of a
-    /// printed checkerboard. See `docs/calibration.md` for
+    /// printed checkerboard. See `docs/operator/calibration.md` for
     /// the operator workflow.
     Calibrate(CalibrateArgs),
     /// Compute a one-shot fix from a webcam (stub; the
