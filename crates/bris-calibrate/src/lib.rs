@@ -63,7 +63,10 @@ pub mod persist;
 pub mod solve;
 pub mod target;
 
-pub use detect::{detect_corners_in_directory, DetectError, DetectedView};
+pub use detect::{
+    detect_corners_in_directory, detect_corners_in_directory_with_progress, DetectError,
+    DetectedView, DetectionStats,
+};
 pub use doctor::{diagnose, Diagnosis, DiagnosisIssue, DiagnosisLevel};
 pub use persist::{
     default_intrinsics_path, read_intrinsics, write_intrinsics, PersistError, PersistedIntrinsics,

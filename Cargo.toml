@@ -68,6 +68,13 @@ v4l = "0.14"
 # capture sessions need a graceful shutdown path).
 ctrlc = "3.5"
 
+# Progress bars for long-running CLI commands (calibrate's
+# corner-detection loop, primarily). The bar writes to stderr
+# alongside tracing's existing writer; indicatif handles
+# re-rendering correctly when interleaved with newline-
+# terminated log lines.
+indicatif = "0.18"
+
 # ML inference (segmentation-based horizon detection).
 # We use ort (ONNX Runtime bindings) rather than tract because tract
 # 0.22 doesn't support the dynamic-shape Reshape operations in

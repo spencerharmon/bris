@@ -126,9 +126,51 @@ pub enum DetectError {
 /// # Errors
 ///
 /// See [`DetectError`].
+/// Detect chessboard corners in every supported image file
+/// in `directory`, in lexicographic filename order.
+///
+/// Convenience wrapper around
+/// [`detect_corners_in_directory_with_progress`] with a
+/// no-op progress callback. Library callers and tests use
+/// this; the CLI uses the `_with_progress` variant to drive
+/// a progress bar.
+///
+/// # Errors
+///
+/// See [`DetectError`].
 pub fn detect_corners_in_directory(
     directory: &Path,
     target: CheckerboardTarget,
+) -> Result<(Vec<DetectedView>, DetectionStats), DetectError> {
+    detect_corners_in_directory_with_progress(directory, target, &mut |_, _| {})
+}
+
+/// Detect chessboard corners in every supported image file
+/// in `directory`, in lexicographic filename order, calling
+/// `on_progress` once before each frame.
+///
+/// `target` describes the expected board geometry; detection
+/// is filtered to keep only views whose recovered grid
+/// matches the expected dimensions (after accounting for
+/// the detector's choice of which axis is "rows").
+///
+/// `on_progress(current, total)` is called immediately
+/// before processing the `current`-th frame (0-indexed) of
+/// `total`. The CLI passes a closure that ticks an
+/// [`indicatif::ProgressBar`]; library callers pass a
+/// no-op via [`detect_corners_in_directory`].
+///
+/// Returns the successful views and a [`DetectionStats`]
+/// summary. If more than ~30% of frames are skipped the
+/// operator should consider re-shooting.
+///
+/// # Errors
+///
+/// See [`DetectError`].
+pub fn detect_corners_in_directory_with_progress(
+    directory: &Path,
+    target: CheckerboardTarget,
+    on_progress: &mut dyn FnMut(usize, usize),
 ) -> Result<(Vec<DetectedView>, DetectionStats), DetectError> {
     let entries = std::fs::read_dir(directory).map_err(|e| DetectError::ReadDir {
         path: directory.to_path_buf(),
@@ -164,8 +206,10 @@ pub fn detect_corners_in_directory(
         skipped_io: 0,
     };
     let mut canonical_dims: Option<(PathBuf, u32, u32)> = None;
+    let total = paths.len();
 
-    for path in &paths {
+    for (i, path) in paths.iter().enumerate() {
+        on_progress(i, total);
         let img = match image::ImageReader::open(path) {
             Ok(r) => match r.decode() {
                 Ok(d) => d.to_luma8(),
@@ -221,6 +265,8 @@ pub fn detect_corners_in_directory(
         };
         views.push(view);
     }
+    // Final tick at total so the bar reaches 100%.
+    on_progress(total, total);
 
     if views.len() < 3 {
         return Err(DetectError::TooFewViews {

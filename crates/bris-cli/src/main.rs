@@ -21,8 +21,8 @@ mod nmea_transport;
 use anyhow::{bail, Context};
 use bris_almanac::{body_apparent_place, ApparentPlace, Atmosphere, Observer, SolarSystemBody};
 use bris_calibrate::{
-    calibrate, default_intrinsics_path, detect_corners_in_directory, diagnose, write_intrinsics,
-    CheckerboardTarget, DiagnosisLevel,
+    calibrate, default_intrinsics_path, detect_corners_in_directory_with_progress, diagnose,
+    write_intrinsics, CheckerboardTarget, DiagnosisLevel,
 };
 use bris_capture::{
     run_capture_loop, run_capture_loop_with, CaptureLoopAction, V4l2Capture, V4l2Config,
@@ -958,6 +958,14 @@ fn load_intrinsics(
 // Calibrate: chessboard frames → camera intrinsics file.
 // ---------------------------------------------------------
 
+#[allow(
+    // Calibrate orchestrates the full workflow: target
+    // construction, detection with progress reporting,
+    // solve with spinner, diagnostic, persistence, and the
+    // final summary print. Splitting hurts readability;
+    // the top-down flow is the documentation.
+    clippy::too_many_lines,
+)]
 fn run_calibrate(args: &CalibrateArgs) -> anyhow::Result<()> {
     let target = CheckerboardTarget::new(
         args.rows,
@@ -979,7 +987,38 @@ fn run_calibrate(args: &CalibrateArgs) -> anyhow::Result<()> {
         "bris calibrate: starting"
     );
 
-    let (views, stats) = detect_corners_in_directory(&args.frames, target)
+    // Detection bar: one tick per candidate frame. The
+    // total isn't known until the directory is enumerated
+    // (which the library does first), but indicatif lets us
+    // start with an unknown total and switch to a known one
+    // on the first callback. We lean on the callback's
+    // (current, total) signature to do exactly that.
+    let detect_bar = indicatif::ProgressBar::new(0).with_style(
+        indicatif::ProgressStyle::with_template(
+            "  detecting [{wide_bar}] {pos}/{len} frames • {elapsed_precise} • eta {eta}",
+        )
+        .expect("static template")
+        .progress_chars("=> "),
+    );
+    let detect_bar_for_callback = detect_bar.clone();
+    let mut on_progress = move |current: usize, total: usize| {
+        // The library calls this once before each frame
+        // (with current = 0..total) and once at the end
+        // (with current == total). Resize the bar's known
+        // length on the first call; advance position on
+        // every call.
+        if detect_bar_for_callback.length() != Some(total as u64) {
+            detect_bar_for_callback.set_length(total as u64);
+        }
+        detect_bar_for_callback.set_position(current as u64);
+    };
+    let detect_result = detect_corners_in_directory_with_progress(
+        &args.frames,
+        target,
+        &mut on_progress,
+    );
+    detect_bar.finish_and_clear();
+    let (views, stats) = detect_result
         .with_context(|| format!("detect corners in {}", args.frames.display()))?;
     info!(
         successful_views = views.len(),
@@ -996,7 +1035,19 @@ fn run_calibrate(args: &CalibrateArgs) -> anyhow::Result<()> {
         );
     }
 
-    let result = calibrate(&views).context("calibration solve")?;
+    // Solve bar: spinner only — the LM solve is one opaque
+    // call from the CLI's perspective. The spinner gives
+    // operators visible "still working" feedback during
+    // the seconds-to-tens-of-seconds it takes; the
+    // bris-calibrate solve emits its own info! lines on
+    // completion so the spinner is purely visual.
+    let solve_spinner = indicatif::ProgressBar::new_spinner().with_message(
+        "running bundle adjustment…",
+    );
+    solve_spinner.enable_steady_tick(std::time::Duration::from_millis(120));
+    let solve_result = calibrate(&views);
+    solve_spinner.finish_and_clear();
+    let result = solve_result.context("calibration solve")?;
     info!(
         rms_px = result.mean_reproj_error_px,
         fx = result.intrinsics.fx,
