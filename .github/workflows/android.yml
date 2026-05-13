@@ -1,0 +1,168 @@
+name: android
+
+on:
+  push:
+    branches: [main]
+    paths:
+      # Only run when something that affects the Android build
+      # has changed. The workspace-wide CI in ci.yml covers
+      # Rust changes that don't touch the FFI surface.
+      - "bris-android/**"
+      - "crates/bris-ffi/**"
+      - "crates/bris-vision/**"
+      - "crates/bris-streaming/**"
+      - "crates/bris-almanac/**"
+      - "crates/bris-platesolve/**"
+      - "crates/bris-nav/**"
+      - "crates/bris-nmea/**"
+      - "crates/bris-core/**"
+      - "crates/bris-calibrate/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/android.yml"
+  pull_request:
+    paths:
+      - "bris-android/**"
+      - "crates/bris-ffi/**"
+      - "crates/bris-vision/**"
+      - "crates/bris-streaming/**"
+      - "crates/bris-almanac/**"
+      - "crates/bris-platesolve/**"
+      - "crates/bris-nav/**"
+      - "crates/bris-nmea/**"
+      - "crates/bris-core/**"
+      - "crates/bris-calibrate/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/android.yml"
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  # The Rust workspace pins toolchain via rust-toolchain.toml;
+  # the dtolnay action below honours that.
+
+jobs:
+  apk:
+    name: build app-debug.apk (arm64-v8a + x86_64)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Java 17 is what AGP 8.13 needs; the GitHub-hosted
+      # ubuntu-latest image ships Temurin JDKs but doesn't
+      # always default to 17.
+      - name: set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      # Pick a known-good NDK r26d that lives on the runner
+      # image. AGP doesn't care about the exact version we
+      # build with as long as `android.ndkVersion` matches what
+      # we point it at; we override that below.
+      - name: locate Android SDK + NDK
+        id: sdk
+        run: |
+          set -euxo pipefail
+          echo "sdk_root=${ANDROID_HOME}" >> "$GITHUB_OUTPUT"
+          # Find an NDK directory on the runner. Prefer r26
+          # (latest stable as of writing); otherwise pick the
+          # newest installed.
+          ndk_root=""
+          if [[ -d "${ANDROID_HOME}/ndk" ]]; then
+            ndk_root=$(ls -d "${ANDROID_HOME}/ndk"/* | sort -V | tail -1)
+          fi
+          if [[ -z "$ndk_root" ]]; then
+            echo "no NDK found under ${ANDROID_HOME}/ndk" >&2
+            exit 1
+          fi
+          ndk_version=$(basename "$ndk_root")
+          echo "ndk_root=${ndk_root}" >> "$GITHUB_OUTPUT"
+          echo "ndk_version=${ndk_version}" >> "$GITHUB_OUTPUT"
+          echo "Using NDK ${ndk_version} at ${ndk_root}"
+
+      - name: install Android SDK platform 34
+        run: |
+          set -euxo pipefail
+          yes | sdkmanager --licenses > /dev/null
+          sdkmanager "platforms;android-34" "build-tools;34.0.0"
+
+      - name: install Rust toolchain + Android targets
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android,x86_64-linux-android
+
+      - name: install cargo-ndk
+        run: |
+          set -euxo pipefail
+          if ! command -v cargo-ndk >/dev/null; then
+            cargo install cargo-ndk --locked
+          fi
+
+      - name: cache cargo registry + git + target
+        uses: Swatinem/rust-cache@v2
+        with:
+          # Keys per-target so the host cache (used to build
+          # the bindgen cdylib) and the per-Android-target
+          # caches don't fight over a single key.
+          key: android-apk
+          workspaces: ". -> target"
+
+      - name: cache Gradle caches + wrapper
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: ${{ runner.os }}-gradle-${{ hashFiles('bris-android/**/*.gradle*', 'bris-android/gradle/wrapper/gradle-wrapper.properties') }}
+          restore-keys: |
+            ${{ runner.os }}-gradle-
+
+      # Pin the AGP-side ndkVersion to whatever the runner
+      # actually has installed. Avoids CXX1104 / CXX5106
+      # warnings firing on every build and the chance that AGP
+      # demands a specific NDK that isn't there.
+      - name: align ndkVersion with runner-installed NDK
+        run: |
+          set -euxo pipefail
+          file=bris-android/app/build.gradle.kts
+          sed -i -E 's|(ndkVersion = ")[^"]+(")|\1${{ steps.sdk.outputs.ndk_version }}\2|' "$file"
+          echo "Updated $file:"
+          grep -n "ndkVersion" "$file" || true
+
+      - name: write local.properties
+        run: |
+          cat > bris-android/local.properties <<EOF
+          sdk.dir=${{ steps.sdk.outputs.sdk_root }}
+          EOF
+          echo "Wrote bris-android/local.properties:"
+          cat bris-android/local.properties
+
+      - name: assemble debug APK
+        env:
+          ANDROID_NDK_HOME: ${{ steps.sdk.outputs.ndk_root }}
+          # JNA + the CameraX JNI libs need execstack; the
+          # runner has it, just nudge AGP not to be cute about
+          # missing tools.
+          JAVA_TOOL_OPTIONS: "-Xmx4g"
+        run: |
+          set -euxo pipefail
+          cd bris-android
+          ./gradlew :app:assembleDebug --no-daemon --stacktrace
+
+      - name: list build outputs
+        run: |
+          set -euxo pipefail
+          find bris-android/app/build/outputs/apk -type f -name '*.apk' -printf '%p  %s bytes\n'
+
+      - name: upload debug APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: bris-app-debug-${{ github.sha }}
+          path: bris-android/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
+          retention-days: 30
