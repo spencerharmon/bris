@@ -39,8 +39,6 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
-  # The Rust workspace pins toolchain via rust-toolchain.toml;
-  # the dtolnay action below honours that.
 
 jobs:
   apk:
@@ -51,45 +49,33 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # Java 17 is what AGP 8.13 needs; the GitHub-hosted
-      # ubuntu-latest image ships Temurin JDKs but doesn't
-      # always default to 17.
       - name: set up JDK 17
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: "17"
 
-      # Pick a known-good NDK r26d that lives on the runner
-      # image. AGP doesn't care about the exact version we
-      # build with as long as `android.ndkVersion` matches what
-      # we point it at; we override that below.
-      - name: locate Android SDK + NDK
-        id: sdk
-        run: |
-          set -euxo pipefail
-          echo "sdk_root=${ANDROID_HOME}" >> "$GITHUB_OUTPUT"
-          # Find an NDK directory on the runner. Prefer r26
-          # (latest stable as of writing); otherwise pick the
-          # newest installed.
-          ndk_root=""
-          if [[ -d "${ANDROID_HOME}/ndk" ]]; then
-            ndk_root=$(ls -d "${ANDROID_HOME}/ndk"/* | sort -V | tail -1)
-          fi
-          if [[ -z "$ndk_root" ]]; then
-            echo "no NDK found under ${ANDROID_HOME}/ndk" >&2
-            exit 1
-          fi
-          ndk_version=$(basename "$ndk_root")
-          echo "ndk_root=${ndk_root}" >> "$GITHUB_OUTPUT"
-          echo "ndk_version=${ndk_version}" >> "$GITHUB_OUTPUT"
-          echo "Using NDK ${ndk_version} at ${ndk_root}"
+      # The setup-android action installs cmdline-tools, accepts
+      # licenses, and exposes `sdkmanager` on PATH. We then ask
+      # it to install the platform and build-tools matching our
+      # AGP config, plus an NDK we can cross-compile against.
+      - name: set up Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          packages: >-
+            platforms;android-34
+            build-tools;34.0.0
+            ndk;26.3.11579264
 
-      - name: install Android SDK platform 34
+      - name: locate installed NDK
+        id: ndk
         run: |
           set -euxo pipefail
-          yes | sdkmanager --licenses > /dev/null
-          sdkmanager "platforms;android-34" "build-tools;34.0.0"
+          ndk_root=$(ls -d "${ANDROID_HOME}/ndk"/* | sort -V | tail -1)
+          ndk_version=$(basename "$ndk_root")
+          echo "root=${ndk_root}" >> "$GITHUB_OUTPUT"
+          echo "version=${ndk_version}" >> "$GITHUB_OUTPUT"
+          echo "Using NDK ${ndk_version} at ${ndk_root}"
 
       - name: install Rust toolchain + Android targets
         uses: dtolnay/rust-toolchain@stable
@@ -106,9 +92,6 @@ jobs:
       - name: cache cargo registry + git + target
         uses: Swatinem/rust-cache@v2
         with:
-          # Keys per-target so the host cache (used to build
-          # the bindgen cdylib) and the per-Android-target
-          # caches don't fight over a single key.
           key: android-apk
           workspaces: ". -> target"
 
@@ -122,32 +105,26 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-gradle-
 
-      # Pin the AGP-side ndkVersion to whatever the runner
-      # actually has installed. Avoids CXX1104 / CXX5106
-      # warnings firing on every build and the chance that AGP
-      # demands a specific NDK that isn't there.
-      - name: align ndkVersion with runner-installed NDK
+      # Pin AGP-side ndkVersion to whatever setup-android put
+      # under $ANDROID_HOME/ndk/. Avoids CXX1104 / CXX5106
+      # warnings firing on every build.
+      - name: align ndkVersion with installed NDK
         run: |
           set -euxo pipefail
           file=bris-android/app/build.gradle.kts
-          sed -i -E 's|(ndkVersion = ")[^"]+(")|\1${{ steps.sdk.outputs.ndk_version }}\2|' "$file"
-          echo "Updated $file:"
-          grep -n "ndkVersion" "$file" || true
+          sed -i -E 's|(ndkVersion = ")[^"]+(")|\1${{ steps.ndk.outputs.version }}\2|' "$file"
+          grep -n "ndkVersion" "$file"
 
       - name: write local.properties
         run: |
           cat > bris-android/local.properties <<EOF
-          sdk.dir=${{ steps.sdk.outputs.sdk_root }}
+          sdk.dir=${ANDROID_HOME}
           EOF
-          echo "Wrote bris-android/local.properties:"
           cat bris-android/local.properties
 
       - name: assemble debug APK
         env:
-          ANDROID_NDK_HOME: ${{ steps.sdk.outputs.ndk_root }}
-          # JNA + the CameraX JNI libs need execstack; the
-          # runner has it, just nudge AGP not to be cute about
-          # missing tools.
+          ANDROID_NDK_HOME: ${{ steps.ndk.outputs.root }}
           JAVA_TOOL_OPTIONS: "-Xmx4g"
         run: |
           set -euxo pipefail
