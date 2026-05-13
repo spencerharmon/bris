@@ -1,0 +1,38 @@
+version: "3.9"
+
+# Local dev environment for the Bris diagnostic-collection
+# subsystem. See docs/design/diagnostic_collection.md.
+#
+# Usage:
+#   BRIS_COLLECTOR_BEARER_TOKEN=$(openssl rand -hex 32) docker compose up
+#
+# The collector listens on localhost:8443. TLS is NOT terminated
+# here — for a real deployment, front this with caddy/nginx.
+
+services:
+  collector:
+    build:
+      context: .
+      dockerfile: crates/bris-collector/Dockerfile
+    image: bris-collector:dev
+    restart: unless-stopped
+    environment:
+      BRIS_COLLECTOR_DATA_ROOT: /var/lib/bris-collector
+      BRIS_COLLECTOR_BIND: 0.0.0.0:8443
+      BRIS_COLLECTOR_BEARER_TOKEN: ${BRIS_COLLECTOR_BEARER_TOKEN:?BRIS_COLLECTOR_BEARER_TOKEN must be set}
+      BRIS_COLLECTOR_MAX_SUBMISSION_BYTES: "536870912"
+      RUST_LOG: "info,bris_collector=debug"
+    volumes:
+      - collector-data:/var/lib/bris-collector
+    ports:
+      - "127.0.0.1:8443:8443"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8443/v1/healthz || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+volumes:
+  collector-data:
+    driver: local
