@@ -31,15 +31,23 @@ Thumbs.db
 *.sqlite-journal
 *.db
 
-# Mobile build artifacts (placeholders for later phases)
-android/.gradle/
-android/build/
-android/app/build/
-android/local.properties
+# Mobile build artifacts. The Bris Android shell lives under
+# bris-android/ and has its own .gitignore covering build/,
+# .gradle/, jniLibs/, and local.properties; these patterns
+# are belt-and-suspenders.
+bris-android/.gradle/
+bris-android/build/
+bris-android/app/build/
+bris-android/local.properties
+bris-android/app/src/main/jniLibs/
 ios/build/
 ios/Pods/
 ios/*.xcworkspace/xcuserdata/
 ios/*.xcodeproj/xcuserdata/
+
+# Collector dev runtime data (when running locally without
+# docker-compose's named volume).
+collector-data/
 
 # Generated UniFFI bindings
 **/generated/
@@ -58,3 +66,8 @@ crates/bris-vision/data/segmentation.onnx
 crates/bris-vision/data/segmentation_labels.json
 test_video/
 tmp/
+
+# User-provided calibration captures (working drop-zone for
+# bris-cli calibrate experiments). Curated subsets that should
+# round-trip in CI are promoted into a regression-test case.
+calibration/
