@@ -21,7 +21,14 @@ ort = { workspace = true, optional = true }
 ndarray = { workspace = true, optional = true }
 
 [features]
-default = ["segmentation"]
+# Segmentation is *not* on by default at the crate level so
+# that consumers targeting platforms without an `ort` prebuilt
+# (notably `*-linux-android`) get a buildable subset by
+# default. Workspace consumers that need the segmentation
+# horizon detector (the CLI, the streaming engine, etc.)
+# enable it explicitly via `features = ["segmentation"]` on
+# the dependency line.
+default = []
 segmentation = ["dep:ort", "dep:ndarray"]
 
 [dev-dependencies]

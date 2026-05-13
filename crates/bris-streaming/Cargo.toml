@@ -12,11 +12,11 @@ repository.workspace = true
 workspace = true
 
 [features]
-default = ["segmentation"]
-# Enable horizon detection via the pretrained semantic-
-# segmentation model. Pulls in the heavyweight ONNX runtime
-# (~50MB native lib via bris-vision's `segmentation` feature).
-# Disable for small embedded builds that don't ship the model.
+# Segmentation parallels bris-vision's flag. Off by default at
+# the crate level so the FFI build for Android (which can't
+# link ort) gets a clean subset; turned on by the CLI / capture
+# / desktop consumers via `features = ["segmentation"]`.
+default = []
 segmentation = ["bris-vision/segmentation"]
 
 [dependencies]

@@ -20,8 +20,8 @@ v4l2 = ["dep:v4l"]
 
 [dependencies]
 bris-core.workspace = true
-bris-streaming.workspace = true
-bris-vision.workspace = true
+bris-streaming = { workspace = true, features = ["segmentation"] }
+bris-vision = { workspace = true, features = ["segmentation"] }
 chrono.workspace = true
 thiserror.workspace = true
 tracing.workspace = true

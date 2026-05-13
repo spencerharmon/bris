@@ -18,11 +18,11 @@ path = "src/main.rs"
 [dependencies]
 bris-core.workspace = true
 bris-almanac.workspace = true
-bris-vision.workspace = true
+bris-vision = { workspace = true, features = ["segmentation"] }
 bris-platesolve.workspace = true
 bris-nav.workspace = true
 bris-nmea.workspace = true
-bris-streaming.workspace = true
+bris-streaming = { workspace = true, features = ["segmentation"] }
 bris-capture.workspace = true
 bris-calibrate.workspace = true
 anyhow.workspace = true
