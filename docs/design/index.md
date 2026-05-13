@@ -5,4 +5,10 @@ documents go in this directory as design questions are settled.
 
 ## Index
 
-(empty for now; populated as design work proceeds)
+- [pipeline.md](pipeline.md) — end-to-end camera-frame to fix flow.
+- [frame_scheduling.md](frame_scheduling.md) — streaming engine
+  scheduling: queues, eviction, sight window, σ-driven early
+  rejection.
+- [diagnostic_collection.md](diagnostic_collection.md) — operator-
+  initiated diagnostic submission from device to collector; the
+  one network surface in Bris.

@@ -1,0 +1,238 @@
+# AGENTS.md
+
+Guidance for AI coding agents working in this repository. Humans:
+read `readme.org`, `plan.org`, `progress.md`, and `CONTRIBUTING.md`
+first — those are the source of truth for project intent. This
+file translates those documents into conventions an agent needs
+to operate without re-deriving them every session.
+
+## Repository orientation
+
+Bris is a portable celestial-navigation system. The core is a
+Rust workspace (`crates/`); platform shells (Android, eventually
+iOS, embedded Linux appliance) wrap that core via FFI. Read
+order for a new agent session:
+
+1. `readme.org` — project concept, accuracy model, design
+   decisions.
+2. `plan.org` — phased roadmap with task-level granularity.
+   Authoritative for what's done, partial, and pending.
+3. `progress.md` — current snapshot of work in progress.
+4. `docs/design/` — architecture documents for individual
+   subsystems (pipeline, frame scheduling, diagnostic collection).
+5. `docs/protocol/pbris.md` — the `$PBRIS` diagnostic-sentence
+   contract. Versioned; treat as a stable interface.
+6. `docs/operator/` — user-facing documentation. Reflects the
+   *current* operator-visible behavior.
+
+`plan.org` line states (`DONE`, `PARTIAL`, `TODO`) are
+load-bearing. If you change a state, update `progress.md` in
+the same change.
+
+## Hard rules
+
+These rules come from `plan.org`'s "Decisions baked in" block and
+are non-negotiable without explicit operator approval:
+
+- **No telemetry, no analytics, no automatic network calls.** The
+  diagnostic-collection subsystem is the one network surface and
+  it is *explicitly* user-initiated (debug mode + per-submission
+  review). Do not add silent or scheduled network requests.
+- **Honest uncertainty everywhere.** Every measurement carries a
+  1σ contribution. Fixes carry a full position covariance. Do
+  not silently fudge, smooth, or fuse without recording the
+  resulting σ inflation.
+- **License: GPL-3.0-or-later.** `cargo deny check` enforces
+  license-compatible dependencies. Adding a dep that fails
+  `cargo deny` is a stop-the-work event; resolve before merging.
+- **`unsafe_code = "forbid"` workspace-wide.** Do not relax this
+  per-crate without a written rationale and operator approval.
+- **Pi Zero 2W (aarch64) is the minimum embedded target.** Code
+  that compiles for `x86_64-unknown-linux-gnu` but not
+  `aarch64-unknown-linux-gnu` is broken.
+
+## Workspace structure
+
+```
+crates/
+  bris-core/         pure types; angles, time scales, σ
+  bris-almanac/      ephemerides + star catalog
+  bris-vision/       image processing primitives (no I/O policy)
+  bris-platesolve/   star pattern matching
+  bris-nav/          sight reduction + fix combination
+  bris-nmea/         NMEA 0183 formatting + transport
+  bris-streaming/    continuous-operation engine (Phase 3.5)
+  bris-capture/      V4L2 capture (Linux only)
+  bris-calibrate/    lens calibration workflow
+  bris-cli/          headless reference frontend
+  bris-ffi/          UniFFI bindings layer (Phase 7 on-ramp)
+  bris-collector/    diagnostic-submission HTTP service (spike)
+
+bris-android/        Kotlin Android shell (Phase 7 on-ramp)
+docs/                design, protocol, operator
+scripts/             data import + ML training scaffolding
+test_video/          captured footage corpus (large; .gitignored
+                     for the bulk, with curated subsets promoted
+                     into per-crate tests/regression/)
+```
+
+`bris-ffi` and `bris-collector` and `bris-android/` were added
+together with the diagnostic-collection spike. Their design is
+captured in `docs/design/diagnostic_collection.md`.
+
+## Per-component conventions
+
+### Rust crates (all of `crates/`)
+
+- Toolchain pinned by `rust-toolchain.toml`. Do not bump
+  silently.
+- Edition 2021, Rust 1.94 minimum.
+- Workspace lints (`Cargo.toml` `[workspace.lints]`) are
+  authoritative: `unsafe_code = "forbid"`,
+  `missing_debug_implementations = "warn"`, `missing_docs =
+  "warn"`, `clippy::pedantic` warn-level. Do not suppress
+  per-file or per-crate without writing why in a comment.
+- Use `workspace.dependencies` for shared deps; don't add a new
+  version of an already-shared dep in a single crate.
+- Module-level docs on every public module explaining what the
+  module is for; item-level docs on public items.
+- Tests live in `src/` (`#[cfg(test)] mod tests`) for unit
+  scope, `tests/` for integration scope, and
+  `tests/regression/<scene>/case.toml` for the TOML-driven
+  scene corpus (see `crates/bris-vision/tests/regression/`).
+- Run before claiming work is done:
+  ```
+  cargo fmt --all
+  cargo clippy --workspace --all-targets --all-features -- -D warnings
+  cargo test --workspace --all-features
+  cargo deny check
+  ```
+
+### `crates/bris-streaming` — the streaming engine
+
+- `EngineConfig` / `push_frame` / `fix_stream` / `diagnostics` is
+  the **load-bearing public surface**. Phase 3.5 is DONE through
+  commit 9 (61 tests). Treat the names and signatures of these
+  as stable.
+- `EngineDiagnostics` is consumed by both the CLI and the FFI.
+  Adding fields is fine; renaming or removing requires a
+  coordinated update in `bris-ffi` and `bris-android/`.
+- Worker-thread model is single-threaded today. Do not introduce
+  parallelism without empirical justification on the Pi Zero 2W.
+
+### `crates/bris-ffi` — UniFFI bindings (spike)
+
+- **Proc-macro mode** (`uniffi = { features = ["build"] }`,
+  `#[uniffi::export]`). No separate `.udl` file.
+- Public surface lives in `src/lib.rs`. Each exported type or
+  function carries doc comments — they propagate into the
+  generated Kotlin/Swift bindings.
+- Types crossing the FFI boundary are *value types* (owned, no
+  borrows) unless they're explicitly `Arc<T>`-shared handles
+  (the `Engine` itself is the canonical example).
+- The FFI **does not duplicate** logic that exists in core
+  crates. Everything is a thin wrapper. If you find yourself
+  writing real logic in `bris-ffi`, it belongs in
+  `bris-streaming` (or the appropriate core crate) and the FFI
+  is just exposing it.
+- Cross-compile for `aarch64-linux-android` and
+  `x86_64-linux-android` (emulator). Targets are installed via
+  `rustup target add`. The Gradle build in `bris-android/`
+  invokes `cargo build --target ...` per ABI.
+
+### `crates/bris-collector` — diagnostic submission service
+
+- **Filesystem store, not a database.** Layout under
+  `<data-root>/submissions/<yyyy>/<mm>/<dd>/<ulid>/`:
+  ```
+  manifest.json   schema-versioned metadata (the searchable index)
+  media/          uploaded images / video / log files
+  pbris.log       raw $PBRIS sentence window if included
+  calibration/    if the submission is a calibration bundle
+  debug/          if debug-capture content is included
+  ```
+- A SQLite mirror (`<data-root>/index.sqlite`) is the
+  list/filter index for the review UI. Truth is the manifest on
+  disk; the SQLite mirror is rebuildable from the filesystem
+  and treated as a cache.
+- HTTP: axum. Bearer token from a config file or env var.
+  Single shared token for the spike (documented as
+  spike-grade).
+- No PII in logs. The collector logs request IDs, submission
+  IDs, and sizes — never the bearer token, never raw GPS
+  coordinates from a submission, never the contents of free-text
+  notes.
+- Submission manifests are append-only on disk. Soft-delete
+  (per `plan.org` Phase 6 / Phase 7 retention model) flips a
+  flag in the manifest and the SQLite mirror; the underlying
+  files stay for the retention window.
+
+### `bris-android/` — Kotlin app
+
+- Kotlin only. No Java sources.
+- Gradle Kotlin DSL (`*.gradle.kts`). No Groovy.
+- `minSdk = 26`, `targetSdk` = current (bump as Android
+  releases; document the bump in the changelog).
+- CameraX for capture. `STRATEGY_KEEP_ONLY_LATEST` backpressure
+  (see `docs/design/diagnostic_collection.md` for the rationale).
+- UniFFI-generated Kotlin bindings live in
+  `bris-android/app/build/generated/source/uniffi/` and are
+  produced by a Gradle task that invokes the Rust build. They
+  are **not committed** to the repository.
+- Native libraries for the bound Rust core are packaged per ABI
+  under `app/src/main/jniLibs/<abi>/libbris_ffi.so`. The
+  Gradle build orchestrates the cross-compile.
+- The "Debug mode" toggle in settings is the **only operator
+  surface for diagnostic submission**. When off, no submission
+  UI is visible anywhere in the app. When on, three contextual
+  actions appear: debug capture (rolling on-device buffer of
+  all processed frames + logs), send fix (uploads the on-device
+  retained data for a single fix), send calibration (uploads
+  the calibration session bundle). Every send action shows a
+  one-screen pre-upload review.
+
+## Commit and PR hygiene
+
+- One logical change per PR. Mixed "scaffold + behavior" PRs
+  are hard to review; split them.
+- PR description references the `plan.org` task it advances and
+  flips that task's state (or notes why it can't yet).
+- Tests are not optional. New behavior gets new tests; new
+  surfaces get integration tests; new corpus entries (in
+  `tests/regression/`) get a `case.toml` that asserts current
+  behavior (success *or* expected failure — refusal is a valid
+  assertion).
+
+## Don'ts (common agent traps)
+
+- **Don't add a dependency without checking the workspace
+  graph.** `Cargo.toml` has `[workspace.dependencies]`. Reuse,
+  don't fork.
+- **Don't introduce async without a reason.** The streaming
+  engine is sync-threaded by design. The collector is async
+  (axum requires it). `bris-ffi` is sync at the FFI boundary;
+  async happens on the Kotlin side via coroutines.
+- **Don't fuse data sources silently.** Bris's invariant is that
+  every reported value comes with a documented σ. If you find
+  yourself averaging two estimates without recording the
+  resulting σ, stop.
+- **Don't auto-rotate images.** `Frame::source_rotation` is
+  opt-in (`plan.org` Phase 2.5 has the reasoning). The capture
+  path must declare rotation explicitly; the pipeline does not
+  guess.
+- **Don't bypass the regression-test harness for "quick"
+  testing.** `tests/regression/*/case.toml` is the canonical
+  way to assert on real footage. One-off Rust tests against
+  vendored frames bit-rot quickly.
+- **Don't write to `progress.md` or `plan.org` casually.** Both
+  are operator-readable status documents. Edits should be
+  precise and reflect actual work done.
+
+## When in doubt
+
+Ask the operator. The repository is small enough and the
+operator engaged enough that a clarifying question is cheaper
+than a wrong implementation. The questions in
+`docs/design/diagnostic_collection.md` (and similar design docs)
+exist because the operator answered them; new design questions
+deserve the same treatment.

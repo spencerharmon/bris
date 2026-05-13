@@ -1370,6 +1370,187 @@ references to the regression tests that pin the behavior. See
    sentence). The persistent field log + soft-delete model is still
    pending and will land alongside the streaming engine.
 
+* Phase 6.5: Diagnostic collection (operator-initiated)
+  Bris's one network surface. Operator-initiated submission of
+  fix data, calibration sessions, and rolling debug-capture
+  buffers from the device to a self-hosted collector, so real
+  field captures can drive pipeline improvements and feed both
+  the regression-test corpus (~tests/regression/*/case.toml~)
+  and the ML-training corpus called for in Phase 2's "Train a
+  Bris-specific segmentation model" task.
+
+  Hard rule from "Decisions baked in": *no telemetry, no
+  analytics, no automatic network calls.* Diagnostic collection
+  is the **only** exception, and only because every byte that
+  leaves the device does so as the result of an explicit
+  operator action made visible in a one-screen pre-upload
+  review. Auto-submit-on-failure is permanently off the table.
+
+  Design doc: [[file:docs/design/diagnostic_collection.md][docs/design/diagnostic_collection.md]] is the
+  canonical contract — operator UX, manifest schema, on-disk
+  layout, security posture, CameraX backpressure decision,
+  retention model, and the corpus-promotion next step.
+
+** PARTIAL bris-ffi crate: UniFFI proc-macro bindings
+   *Done in the diagnostic-collection spike:* ~crates/bris-ffi~
+   added to the workspace (the previous "intentionally not in
+   the workspace yet" reservation removed). UniFFI 0.28
+   proc-macro mode, no separate UDL. Public surface:
+
+   - ~Engine~ handle wrapping ~bris_streaming::StreamingEngine~
+     (~Arc~-shared on the foreign side).
+   - ~Engine::push_frame~, ~Engine::snapshot~,
+     ~Engine::subscribe_fixes~ (callback trait, wired through
+     a named pump thread that fans out to all current
+     subscribers and notifies ~on_closed~ on engine drop).
+   - FFI value types: ~FfiEngineConfig~, ~FfiObserver~,
+     ~FfiIntrinsics~, ~FfiFrame~, ~FfiPixelFormat~,
+     ~DiagnosticSnapshot~ (with per-stage ~StageStats~),
+     ~FfiPublishedFix~, ~FfiCalibrationResult~, ~VersionInfo~,
+     ~FfiError~.
+   - Free functions: ~engine_new~, ~version~, ~run_calibration~
+     (real wrapper around ~bris-calibrate::detect_corners_in_directory~
+     + ~calibrate~).
+   - ~uniffi-bindgen~ binary behind the ~bindgen~ feature for
+     Gradle to invoke against a built ~libbris_ffi.so~.
+
+   *Pending for the session-based mobile UX*: a higher-level
+   "session" wrapper (start/stop/accept/abandon) on top of the
+   continuous publish stream. Tracked under Phase 7.
+
+** TODO bris-collector crate: HTTP submission service
+   *Done in the diagnostic-collection spike:* ~crates/bris-collector~
+   added. Stack:
+
+   - axum 0.7 + tokio multipart.
+   - Filesystem store at ~<data-root>/submissions/<yyyy>/<mm>/<dd>/<ulid>/~
+     with per-submission ~manifest.json~, ~media/~, optional
+     ~pbris.log~ / ~calibration/~ / ~debug/~ subdirectories.
+   - SQLite mirror at ~<data-root>/index.sqlite~ for the review
+     UI's list/filter; treated as a rebuildable cache.
+   - Bearer-token middleware (constant-time compare; empty
+     token disables auth for tests; binary refuses to start
+     without a token).
+   - Manifest schema versioning (~SCHEMA_VERSION = 1~);
+     manifest validates against received-file sizes; soft-
+     delete column reserved.
+   - Endpoints: ~GET /v1/healthz~, ~POST /v1/submissions~,
+     ~GET /v1/submissions~ (capped 200; spike-grade).
+   - ~Dockerfile~ + root ~docker-compose.yml~ with healthcheck.
+
+   *Pending:*
+   - Soft-delete write path + retention sweep.
+   - Per-device tokens issued on first contact (replaces the
+     shared compiled-in token).
+   - Review web UI proper.
+
+   *Done:* end-to-end integration test against the in-process
+   axum router covers healthz, full submission round-trip
+   (filesystem + index mirror), missing-bearer rejection,
+   size-mismatch rejection, schema-version rejection,
+   manifest GET, media GET (with path-traversal rejection
+   and 404-on-unknown-id assertions). 6 tests total.
+
+   *Done:* GET ~/v1/submissions/:id~ (manifest) and
+   GET ~/v1/submissions/:id/media/:filename~ (single media
+   file, content-type sniffed from extension).
+
+** PARTIAL bris-android shell: Kotlin app with debug-mode UI
+   *Done in the diagnostic-collection spike:* ~bris-android/~
+   added. Compose, CameraX, minSdk 26, Gradle Kotlin DSL.
+
+   - Single-activity Compose nav-graph: ~LiveScreen~,
+     ~SettingsScreen~, ~CalibrationScreen~,
+     ~PreUploadReviewScreen~.
+   - DataStore-backed ~Prefs~ holding the load-bearing
+     ~debug_mode~ toggle, ~debug_capture~ toggle, collector
+     base URL, and per-install device UUID.
+   - OkHttp ~Submitter~ posting multipart submissions to the
+     collector.
+   - ~EngineWrapper~ over the UniFFI bindings exposing the
+     fix stream as a Kotlin ~Flow~ and polling the engine's
+     ~snapshot~ into a ~StateFlow~.
+   - ~FrameAnalyzer~ wired to ~ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST~,
+     copying the Y plane (handling row-stride padding) into an
+     ~FfiFrame~ and forwarding to the engine.
+   - ~DebugCaptureBuffer~ persisting every processed frame +
+     the engine's per-frame ~DiagnosticSnapshot~ to
+     ~<app-files>/debug-capture/~ as P5 PGM + JSON pairs with
+     a JSONL index. LRU-evicts when total bytes exceed a
+     configurable cap (default 1 GiB).
+   - ~CoarseLocation~ helper: optional, debug-mode-gated,
+     `getLastKnown`-only (no live updates), no Google Play
+     services.
+   - ~ManifestBuilder~ producing schema-version-1 manifests
+     matching ~bris_collector::manifest::Manifest~ via
+     ~org.json.JSONObject~ (no extra JSON dep).
+   - ~PreUploadReviewScreen~ wires the buffer's snapshotted
+     entries + GPS + versions through the builder and the
+     submitter; surfaces the result via ~Toast~. Includes an
+     operator-supplied note field, attaches the rolling
+     ~pbris.log~ when present, and packages the full
+     calibration session (frames + intrinsics + target) when
+     ~kind = "calibration"~.
+   - ~CalibrationScreen~ wired to ~ImageCapture~: rows/cols/
+     square-size inputs, capture button writing JPEGs into
+     ~<app-files>/calibration/<session-ulid>/frames/~,
+     "Solve" button calling ~run_calibration~ in a background
+     coroutine and persisting ~intrinsics.json~ +
+     ~target.json~ alongside.
+   - Engine-side ~$PBRIS~ formatting via the FFI's
+     ~format_pbris~ free function; ~EngineWrapper~'s optional
+     ~pbrisSink~ feeds it into ~DebugCaptureBuffer.appendPbris~
+     when debug capture is enabled.
+   - BuildConfig fields ~BRIS_APP_VERSION~ and
+     ~BRIS_COLLECTOR_BEARER_TOKEN~ overridable via
+     ~-PbrisCollectorToken=...~ on the Gradle command line.
+   - Gradle wiring: per-ABI ~cargoBuild*~ tasks invoke
+     ~cargo ndk~ to cross-compile bris-ffi for ~arm64-v8a~
+     and ~x86_64~, ~stageJniLibs*~ stages the ~.so~ into
+     ~app/src/main/jniLibs/<abi>/~, ~uniffiBindgen~ generates
+     Kotlin bindings into the build dir, ~preBuild~ depends
+     on the chain. Generated bindings + native libs are
+     ~.gitignore~'d, produced fresh on each build.
+
+   *Pending:*
+   - Loading the calibration result from disk into the engine
+     via ~bris-calibrate::persist~ — the FFI's
+     ~run_calibration~ already writes JSON, and the Android
+     ~LiveScreen~ already reads it back into ~FfiIntrinsics~
+     when the captured resolution matches the calibrated
+     resolution. The CLI side's ~persist~ format isn't yet the
+     source of truth (Android writes its own JSON shape);
+     unifying the two is the next commit.
+   - On-device run on a real device (the spike host built
+     ~app-debug.apk~ but does not run an emulator).
+
+** TODO Corpus-promotion tooling
+   Server-side action that takes a submission ID, an operator-
+   chosen slug, and a case-kind (working / expected_failure /
+   expected_low_confidence) and emits a ~case.toml~ skeleton
+   with the submission's frames staged into
+   ~crates/bris-vision/tests/regression/<slug>/~. Closes the
+   loop from "operator notices a problem in the field" to "the
+   regression suite catches it." Out of spike scope; sketched
+   in [[file:docs/design/diagnostic_collection.md][the design doc]].
+
+** TODO Production hardening
+   Spike-grade pieces explicitly to revisit before any wider
+   distribution:
+
+   - Replace the shared bearer token compiled into the APK
+     with per-device tokens issued by the collector on first
+     contact.
+   - TLS termination in front of the collector
+     (caddy/nginx/etc. — not built into the binary; documented
+     as the deployment shape).
+   - WorkManager-backed submission queue with exponential
+     backoff and persistence across app restarts (today's
+     ~Submitter~ is synchronous, no retry).
+   - Hashed-truncated device-UUID logging in the collector
+     (today the listing endpoint returns raw UUIDs to any
+     bearer-token holder).
+
 * Phase 7: Mobile frontends
   Mobile frontends wrap the continuous core in a *session-based* UI. The
   user holds the phone, taps "Take sight," is guided through a sweep, and
@@ -1378,12 +1559,24 @@ references to the regression tests that pin the behavior. See
   is unchanged — the mobile UI is a bounded driver on top of it.
   Implemented in native languages (Kotlin / Swift), not Rust, to use
   platform-native camera, map, and share APIs idiomatically.
-** TODO UniFFI bindings in ~bris-ffi~
-   Expose the streaming session API: start/stop session, frame ingest,
-   current-best-fix subscription (lat/lon, covariance, dominant source,
-   per-source uncertainty), accept-current, abandon. Also: calibration
-   workflow, log access.
-** TODO Android shell (Kotlin)
+** PARTIAL UniFFI bindings in ~bris-ffi~
+   *Done in Phase 6.5:* the crate exists, exposes the streaming
+   engine + diagnostics + a calibration entry stub, and is
+   consumed by ~bris-android/~. See "Phase 6.5 →
+   bris-ffi crate" for the surface.
+
+   *Remaining for the session-based mobile UX*: a higher-level
+   "session" wrapper that exposes start/stop session,
+   accept-current, and abandon over the streaming engine's
+   continuous publish stream. The continuous engine is the
+   substrate; the session is a bounded driver on top.
+** PARTIAL Android shell (Kotlin)
+   *Done in Phase 6.5:* ~bris-android/~ skeleton, Compose nav
+   graph, Prefs, Submitter, Gradle UniFFI integration. Today's
+   shell is the diagnostic-collection on-ramp; the session-
+   based sight UX described below is the next phase of work
+   on the same project.
+
    - CameraX capture → byte buffers → Rust core via UniFFI.
    - Foreground service for the duration of an active session only;
      stops when the session ends.

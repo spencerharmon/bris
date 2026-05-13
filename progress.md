@@ -36,6 +36,26 @@ For the end-to-end pipeline architecture and data flow, see
 - Phase 6 (CLI) — `bris replay` subcommand exists but is **no
   longer the validation surface**; the regression-test harness is.
   Replay is kept as a manual smoke-test tool; not invested in.
+- **Phase 6.5 (diagnostic collection) — feature-complete spike,
+  Android APK building.** `crates/bris-ffi` (UniFFI proc-macro,
+  real `subscribe_fixes` pump + real `run_calibration` wrapper +
+  `format_pbris`), `crates/bris-collector` (axum + filesystem
+  store + SQLite mirror + 6 integration tests covering POST,
+  GET manifest, GET media, list, and three rejection paths),
+  and `bris-android/` (Compose, CameraX backpressure-aware
+  analyzer, EngineWrapper over the UniFFI bindings,
+  DebugCaptureBuffer persisting frames + per-frame
+  DiagnosticSnapshot + rolling pbris.log to disk,
+  ManifestBuilder, OkHttp Submitter, coarse-only GPS,
+  BuildConfig-fed bearer token + app version, calibration
+  capture screen calling the FFI solver and persisting the
+  result, operator note in the pre-upload review, persisted
+  intrinsics auto-loaded into the live engine when resolution
+  matches). `./gradlew :app:assembleDebug` produces a
+  31 MiB `app-debug.apk` containing both `arm64-v8a` and
+  `x86_64` bris-ffi shared libraries. End-to-end on a real
+  device is the next step. Design doc:
+  `docs/design/diagnostic_collection.md`.
 
 **Phase 2.5 (real-data validation): 13 regression cases** spanning
 working day, working night-with-moon, working
@@ -48,15 +68,17 @@ specific, named failure modes from the corpus.
 
 **Not started:** Phase 1.5 (time integrity), Phase 3.5
 (continuous-operation engine + day/night classifier integration),
-Phase 7 (mobile frontends), Phase 8 (validation), Phase 9
+Phase 7 (session-based mobile sight UX — distinct from the Phase
+6.5 diagnostic-collection shell), Phase 8 (validation), Phase 9
 (stretch). Phase 3 is complete except for two minor follow-ups
 (magnitude-consistency verification check, observer-location
 external prior) that are queued.
 
-**Workspace metrics:** 335 tests passing + 3 ignored
-(slow/release-only), 7 crates with active code, zero clippy
-warnings, zero `cargo fmt` diffs. Last commit: `0c68910` —
-per-star altitude extraction closes Phase 3.
+**Workspace metrics:** 473 tests passing + 4 ignored
+(slow/release-only), 9 crates with active code (added
+`bris-ffi` and `bris-collector` in the diagnostic-collection
+spike), zero clippy warnings under `--all-targets -- -D
+warnings`, zero `cargo fmt` diffs.
 
 ---
 
