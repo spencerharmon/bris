@@ -1,0 +1,59 @@
+[package]
+name = "bris-ffi"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "UniFFI bindings layer for the Bris streaming engine and calibration workflow. Consumed by the Android (Kotlin) and eventual iOS (Swift) shells."
+
+[lib]
+# UniFFI requires a cdylib for the consumer to load at runtime,
+# and an rlib so other Rust code (tests, the CLI for parity
+# checks) can link against the same surface.
+crate-type = ["cdylib", "rlib"]
+name = "bris_ffi"
+
+[features]
+# `bindgen` exposes the scaffolding `uniffi-bindgen` binary entry
+# (run via `cargo run --bin uniffi-bindgen --features bindgen`).
+# Off by default so building the cdylib for Android doesn't pull
+# in the bindgen pipeline.
+default = []
+bindgen = ["uniffi/cli"]
+
+[dependencies]
+uniffi = { version = "0.28", features = ["tokio"] }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+chrono = { workspace = true }
+
+bris-core = { workspace = true }
+# bris-vision and bris-streaming have a `segmentation` feature
+# that pulls in `ort` (ONNX Runtime). `ort` ships no prebuilt
+# binaries for `*-linux-android`, so the FFI consumes those
+# crates with default-features off (declared via direct path
+# rather than the workspace dep so the override sticks).
+# The segmentation horizon detector is unavailable in builds
+# that link this FFI; the engine falls back to gradient +
+# sky-region + night detectors. Re-enable on platforms with
+# an `ort` binary (desktop / embedded Linux) by wrapping
+# `bris-ffi` in a downstream crate that turns the feature
+# back on via `bris-vision/segmentation` etc.
+bris-vision = { path = "../bris-vision", default-features = false }
+bris-almanac = { workspace = true }
+bris-streaming = { path = "../bris-streaming", default-features = false }
+bris-calibrate = { workspace = true }
+bris-nmea = { workspace = true }
+
+[build-dependencies]
+uniffi = { version = "0.28", features = ["build"] }
+
+[[bin]]
+name = "uniffi-bindgen"
+path = "src/bin/uniffi_bindgen.rs"
+required-features = ["bindgen"]
+
+[lints]
+workspace = true

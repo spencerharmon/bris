@@ -11,9 +11,15 @@ members = [
     "crates/bris-capture",
     "crates/bris-calibrate",
     "crates/bris-cli",
+    "crates/bris-ffi",
+    "crates/bris-collector",
 ]
-# bris-ffi is intentionally not in the workspace yet. The FFI surface is
-# defined late, against a stable Rust core (see plan.org).
+# bris-ffi and bris-collector were added together with the
+# diagnostic-collection spike (see
+# docs/design/diagnostic_collection.md). bris-ffi was originally
+# planned later (against a fully stabilized core); we bring it
+# in early because the Android shell needs the streaming-session
+# API to capture and submit diagnostic data.
 
 [workspace.package]
 version = "0.0.1"
@@ -98,6 +104,8 @@ bris-nmea = { path = "crates/bris-nmea" }
 bris-streaming = { path = "crates/bris-streaming" }
 bris-capture = { path = "crates/bris-capture" }
 bris-calibrate = { path = "crates/bris-calibrate" }
+bris-ffi = { path = "crates/bris-ffi" }
+bris-collector = { path = "crates/bris-collector" }
 
 [profile.release]
 lto = "thin"
