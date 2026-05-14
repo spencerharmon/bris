@@ -12,11 +12,14 @@ import androidx.camera.core.resolutionselector.ResolutionSelector
 import androidx.camera.core.resolutionselector.ResolutionStrategy
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.Button
@@ -24,6 +27,7 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -31,53 +35,67 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.LocalLifecycleOwner
+import co.anomaly.bris.BuildConfig
 import co.anomaly.bris.Prefs
 import co.anomaly.bris.engine.CalibrationStore
 import co.anomaly.bris.engine.DebugCaptureBuffer
 import co.anomaly.bris.engine.EngineWrapper
+import co.anomaly.bris.engine.FixVerdict
 import co.anomaly.bris.engine.FrameAnalyzer
+import co.anomaly.bris.engine.SessionRecorder
+import co.anomaly.bris.engine.SessionStatus
+import co.anomaly.bris.engine.SightLog
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.SupervisorJob
 import uniffi.bris_ffi.FfiEngineConfig
 import uniffi.bris_ffi.FfiIntrinsics
 import uniffi.bris_ffi.FfiObserver
+import uniffi.bris_ffi.version
 import java.util.concurrent.Executors
 
 /**
- * Live camera preview + engine pipeline + diagnostic overlay.
+ * Live camera + engine + sight-capture session UI.
  *
- * Lifecycle: the [`EngineWrapper`] is created with a per-screen
- * `CoroutineScope` and disposed when this composable leaves the
- * composition. Camera binding uses
- * [`ProcessCameraProvider.bindToLifecycle`] tied to the
- * activity's lifecycle owner, so backgrounding the app stops
- * frame delivery automatically.
+ * Engine lifecycle (per the design discussion in
+ * `docs/design/sight_session.md`): the streaming engine is
+ * constructed once when this screen composes and lives until
+ * the screen leaves composition. There is no per-session
+ * engine reset; the engine has no notion of session.
  *
- * Backpressure: [`ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST`] —
- * see `docs/design/diagnostic_collection.md`.
+ * Capture lifecycle: independently driven by the operator's
+ * Start / Stop buttons. While the session is active the
+ * CameraX [`ImageAnalysis`] use case is bound and the engine
+ * receives frames; while idle, only the preview is bound and
+ * the engine is silent. The [`SessionRecorder`] consumes the
+ * engine's published-fix stream during a session and decides
+ * the session's outcome (sustained-green auto-accept, operator
+ * stop, or timeout).
  *
- * Camera permission is requested on first composition. While
- * permission is denied, the screen renders an explainer with
- * a "grant" button.
+ * Storage: captured fixes land in a sight-log entry under
+ * `<external-files>/sights/<session-ulid>/` (see [`SightLog`]).
+ * Operators pull entries via plain `adb pull` / MTP; the
+ * collector network path is a separate, debug-mode-gated
+ * affordance.
  *
- * Intrinsics: until the operator runs calibration, the engine
- * receives placeholder intrinsics. Per `plan.org` Phase 2.5,
- * absolute altitudes are off by the calibration factor in this
- * state — the diagnostic overlay still surfaces the engine's
- * per-stage σ, queue depths, and classifier verdict honestly,
- * which is what the spike needs for corpus capture.
+ * Backpressure: see `docs/design/diagnostic_collection.md` —
+ * `STRATEGY_KEEP_ONLY_LATEST` on CameraX, copy-out at the
+ * analyzer boundary so the engine and CameraX never compete
+ * for ownership of the same buffer.
  */
 @Composable
+@Suppress("LongMethod") // The screen wires together camera + engine + recorder + UI; further extraction would create cross-cutting helpers that obscure the lifecycle.
 fun LiveScreen(
     debugMode: Boolean,
     onOpenSettings: () -> Unit,
     onSendFix: () -> Unit,
     onOpenCalibration: () -> Unit,
+    onOpenSightLog: () -> Unit,
 ) {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
@@ -85,7 +103,7 @@ fun LiveScreen(
     var hasCameraPermission by remember {
         mutableStateOf(
             ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) ==
-                PackageManager.PERMISSION_GRANTED
+                PackageManager.PERMISSION_GRANTED,
         )
     }
 
@@ -108,27 +126,31 @@ fun LiveScreen(
         return
     }
 
-    // Debug-capture buffer is app-scoped (lives across screens
-    // and even across activity recreations) so the captured
-    // frames survive a `rotate` or backgrounding.
     val prefs = remember(context) { Prefs(context) }
     val debugCaptureEnabled by prefs.debugCaptureFlow.collectAsState(initial = false)
     val debugBuffer = remember(context) { DebugCaptureBuffer.forApp(context) }
     val calStore = remember(context) { CalibrationStore.forApp(context) }
-    // Snapshot persisted intrinsics once at composition; new
-    // calibrations require leaving + re-entering the screen.
     val persistedIntrinsics = remember(context) { calStore.latestIntrinsics() }
+    val sightLog = remember(context) { SightLog.forApp(context) }
 
-    // One engine per screen. Disposed via DisposableEffect.
-    // The $PBRIS sink only writes when debug capture is on, so
-    // operators who never enable capture pay zero disk I/O.
+    val engineScope = remember { CoroutineScope(SupervisorJob()) }
     val engine = remember {
         EngineWrapper.create(
             config = defaultEngineConfig(),
-            scope = CoroutineScope(SupervisorJob()),
+            scope = engineScope,
             pbrisSink = { line ->
                 if (debugCaptureEnabled) debugBuffer.appendPbris(line)
             },
+        )
+    }
+    val recorder = remember(engine, sightLog, prefs) {
+        SessionRecorder(
+            engine = engine,
+            sightLog = sightLog,
+            scope = engineScope,
+            deviceUuidProvider = { prefs.deviceUuid() },
+            appVersion = BuildConfig.BRIS_APP_VERSION,
+            coreVersionProvider = { version().brisFfi },
         )
     }
     DisposableEffect(engine) {
@@ -136,84 +158,48 @@ fun LiveScreen(
     }
 
     val snapshot by engine.snapshot.collectAsState()
+    val sessionStatus by recorder.status.collectAsState()
+    val captureActive = sessionStatus is SessionStatus.Capturing ||
+        sessionStatus is SessionStatus.Saving
 
     Box(modifier = Modifier.fillMaxSize()) {
-        AndroidView(
-            modifier = Modifier.fillMaxSize(),
-            factory = { ctx ->
-                val previewView = PreviewView(ctx)
-                val providerFuture = ProcessCameraProvider.getInstance(ctx)
-                providerFuture.addListener({
-                    val provider = providerFuture.get()
-                    val preview = Preview.Builder().build().also {
-                        it.setSurfaceProvider(previewView.surfaceProvider)
-                    }
-                    val analysis = ImageAnalysis.Builder()
-                        .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
-                        .setResolutionSelector(
-                            ResolutionSelector.Builder()
-                                .setResolutionStrategy(
-                                    ResolutionStrategy(
-                                        Size(1280, 720),
-                                        ResolutionStrategy.FALLBACK_RULE_CLOSEST_LOWER_THEN_HIGHER,
-                                    ),
-                                )
-                                .build(),
-                        )
-                        .build()
-                    analysis.setAnalyzer(
-                        Executors.newSingleThreadExecutor(),
-                        FrameAnalyzer(
-                            engine = engine,
-                            intrinsicsProvider = {
-                                intrinsicsForResolution(
-                                    persistedIntrinsics,
-                                    targetWidth = LIVE_VIEW_WIDTH,
-                                    targetHeight = LIVE_VIEW_HEIGHT,
-                                )
-                            },
-                            debugCaptureProvider = { debugCaptureEnabled },
-                            debugBuffer = debugBuffer,
-                        ),
-                    )
-                    provider.unbindAll()
-                    provider.bindToLifecycle(
-                        lifecycleOwner,
-                        CameraSelector.DEFAULT_BACK_CAMERA,
-                        preview,
-                        analysis,
-                    )
-                }, ContextCompat.getMainExecutor(ctx))
-                previewView
-            },
+        CameraSurface(
+            lifecycleOwner = lifecycleOwner,
+            captureActive = captureActive,
+            engine = engine,
+            persistedIntrinsics = persistedIntrinsics,
+            debugCaptureEnabled = debugCaptureEnabled,
+            debugBuffer = debugBuffer,
         )
 
         Column(
             modifier = Modifier.padding(12.dp),
             verticalArrangement = Arrangement.spacedBy(6.dp),
         ) {
-            val s = snapshot
-            if (s == null) {
-                Text("waiting for first frame…")
-            } else {
-                val calibLabel = persistedIntrinsics?.let {
-                    if (it.width == LIVE_VIEW_WIDTH && it.height == LIVE_VIEW_HEIGHT) {
-                        "calib: rms ${"%.2f".format(it.rmsPx)} px"
-                    } else {
-                        "calib mismatch (${it.width}×${it.height} on ${LIVE_VIEW_WIDTH}×${LIVE_VIEW_HEIGHT})"
-                    }
-                } ?: "calib: PLACEHOLDER (run calibration)"
-                Text(calibLabel)
-                Text("frames pushed: ${s.framesPushed}  dropped: ${s.framesDropped}")
-                Text("classifier: ${s.lastClassification ?: "—"}")
-                Text(
-                    "queues  body=${s.bodyQueueDepth}  horizon=${s.horizonQueueDepth}" +
-                        "  ring=${s.ringBufferDepth}  sights=${s.sightWindowDepth}",
-                )
-            }
+            DiagnosticOverlay(
+                sessionStatus = sessionStatus,
+                lastClassification = snapshot?.lastClassification,
+                framesPushed = snapshot?.framesPushed ?: 0u,
+                framesDropped = snapshot?.framesDropped ?: 0u,
+                bodyQueueDepth = snapshot?.bodyQueueDepth ?: 0u,
+                horizonQueueDepth = snapshot?.horizonQueueDepth ?: 0u,
+                ringBufferDepth = snapshot?.ringBufferDepth ?: 0u,
+                sightWindowDepth = snapshot?.sightWindowDepth ?: 0u,
+                persistedIntrinsics = persistedIntrinsics,
+            )
             Spacer(Modifier.height(12.dp))
-            OutlinedButton(onClick = onOpenSettings) { Text("Settings") }
-            OutlinedButton(onClick = onOpenCalibration) { Text("Calibration") }
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                if (captureActive) {
+                    Button(onClick = { recorder.stop() }) { Text("Stop capture") }
+                } else {
+                    Button(onClick = { recorder.start() }) { Text("Start capture") }
+                }
+                OutlinedButton(onClick = onOpenSightLog) { Text("Sight log") }
+            }
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                OutlinedButton(onClick = onOpenSettings) { Text("Settings") }
+                OutlinedButton(onClick = onOpenCalibration) { Text("Calibration") }
+            }
             if (debugMode) {
                 Button(onClick = onSendFix) { Text("Send fix (debug)") }
             }
@@ -222,24 +208,167 @@ fun LiveScreen(
 }
 
 /**
- * Placeholder engine config. Observer is the dev default
- * (equator/Greenwich, 2 m eye height); real callers will read
- * the operator's stored observer settings.
+ * CameraX preview that always shows the camera surface and
+ * conditionally binds the analyzer based on `captureActive`.
+ *
+ * The two use-case sets we toggle between:
+ *   * idle:      [Preview]
+ *   * capturing: [Preview, ImageAnalysis]
+ *
+ * `bindToLifecycle` is called inside a `LaunchedEffect` keyed
+ * on `captureActive` so flipping the flag triggers a rebind
+ * (CameraX requires `unbindAll` + `bindToLifecycle` to swap
+ * use cases on a live camera).
  */
-private fun defaultEngineConfig(): FfiEngineConfig = FfiEngineConfig(
-    observer = FfiObserver(
-        latitudeDeg = 0.0,
-        longitudeDeg = 0.0,
-        eyeHeightM = 2.0,
-        eyeHeightSigmaM = 0.5,
-    ),
-    stitchingWindowSeconds = 2.0,
-    sightWindowSeconds = 600.0,
-    sightWindowCapacity = 10u,
-    minFixPublicationIntervalMs = 1000u,
-    inputRingCapacity = 120u,
-    segmentationModelPath = null,
-)
+@Composable
+private fun CameraSurface(
+    lifecycleOwner: androidx.lifecycle.LifecycleOwner,
+    captureActive: Boolean,
+    engine: EngineWrapper,
+    persistedIntrinsics: CalibrationStore.PersistedIntrinsics?,
+    debugCaptureEnabled: Boolean,
+    debugBuffer: DebugCaptureBuffer,
+) {
+    val context = LocalContext.current
+    val previewView = remember(context) { PreviewView(context) }
+    val analyzerExecutor = remember { Executors.newSingleThreadExecutor() }
+
+    LaunchedEffect(captureActive, lifecycleOwner) {
+        val provider = ProcessCameraProvider.getInstance(context).get()
+        provider.unbindAll()
+        val preview = Preview.Builder().build().also {
+            it.setSurfaceProvider(previewView.surfaceProvider)
+        }
+        if (captureActive) {
+            val analysis = ImageAnalysis.Builder()
+                .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+                .setResolutionSelector(
+                    ResolutionSelector.Builder()
+                        .setResolutionStrategy(
+                            ResolutionStrategy(
+                                Size(LIVE_VIEW_WIDTH, LIVE_VIEW_HEIGHT),
+                                ResolutionStrategy.FALLBACK_RULE_CLOSEST_LOWER_THEN_HIGHER,
+                            ),
+                        )
+                        .build(),
+                )
+                .build()
+            analysis.setAnalyzer(
+                analyzerExecutor,
+                FrameAnalyzer(
+                    engine = engine,
+                    intrinsicsProvider = {
+                        intrinsicsForResolution(
+                            persistedIntrinsics,
+                            targetWidth = LIVE_VIEW_WIDTH,
+                            targetHeight = LIVE_VIEW_HEIGHT,
+                        )
+                    },
+                    debugCaptureProvider = { debugCaptureEnabled },
+                    debugBuffer = debugBuffer,
+                ),
+            )
+            provider.bindToLifecycle(
+                lifecycleOwner,
+                CameraSelector.DEFAULT_BACK_CAMERA,
+                preview,
+                analysis,
+            )
+        } else {
+            provider.bindToLifecycle(
+                lifecycleOwner,
+                CameraSelector.DEFAULT_BACK_CAMERA,
+                preview,
+            )
+        }
+    }
+
+    AndroidView(
+        modifier = Modifier.fillMaxSize(),
+        factory = { previewView },
+    )
+}
+
+/**
+ * Top-of-screen translucent panel with the engine + session
+ * diagnostics. While idle: calibration state + "Tap Start
+ * capture to begin." While capturing: elapsed seconds, last
+ * verdict color + σ_major, fix counts. While saving / saved:
+ * brief outcome message.
+ */
+@Composable
+private fun DiagnosticOverlay(
+    sessionStatus: SessionStatus,
+    lastClassification: String?,
+    framesPushed: ULong,
+    framesDropped: ULong,
+    bodyQueueDepth: UInt,
+    horizonQueueDepth: UInt,
+    ringBufferDepth: UInt,
+    sightWindowDepth: UInt,
+    persistedIntrinsics: CalibrationStore.PersistedIntrinsics?,
+) {
+    val calibLabel = persistedIntrinsics?.let {
+        if (it.width == LIVE_VIEW_WIDTH && it.height == LIVE_VIEW_HEIGHT) {
+            "calib: rms ${"%.2f".format(it.rmsPx)} px"
+        } else {
+            "calib mismatch (${it.width}×${it.height} on ${LIVE_VIEW_WIDTH}×${LIVE_VIEW_HEIGHT})"
+        }
+    } ?: "calib: PLACEHOLDER (run calibration)"
+
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(Color(0xCC000000))
+            .padding(8.dp),
+        verticalArrangement = Arrangement.spacedBy(2.dp),
+    ) {
+        Text(calibLabel, color = Color.White)
+        when (val s = sessionStatus) {
+            is SessionStatus.Idle -> {
+                Text("Idle. Tap Start capture to begin a session.", color = Color.White)
+            }
+            is SessionStatus.Capturing -> {
+                val elapsed = (System.currentTimeMillis() - s.startedAtMs) / 1000
+                val verdict = s.lastVerdict
+                val verdictColor = when (verdict) {
+                    FixVerdict.GREEN -> Color(0xFF35D673)
+                    FixVerdict.YELLOW -> Color(0xFFFFC107)
+                    FixVerdict.RED -> Color(0xFFE57373)
+                    null -> Color.LightGray
+                }
+                val sigmaText = s.lastFix?.let { "σ=${"%.2f".format(it.sigmaMajorNm)} nm" } ?: "σ=—"
+                Text(
+                    "Capturing ${elapsed}s  $sigmaText  " +
+                        "${s.nGreen}G ${s.nYellow}Y ${s.nRed}R",
+                    color = verdictColor,
+                )
+            }
+            is SessionStatus.Saving -> Text("Saving…", color = Color.White)
+            is SessionStatus.Saved -> {
+                val msg = when (val o = s.outcome) {
+                    is co.anomaly.bris.engine.SessionOutcome.Captured ->
+                        "Captured ${o.verdict.name.lowercase()} fix " +
+                            "(σ=${"%.2f".format(o.fix.sigmaMajorNm)} nm). Saved to ${s.sessionDir.name}."
+                    is co.anomaly.bris.engine.SessionOutcome.NoFix ->
+                        "No fix recorded (${o.reason})."
+                }
+                Text(msg, color = Color.White)
+            }
+            is SessionStatus.Failed -> Text("Failed: ${s.reason}", color = Color(0xFFE57373))
+        }
+        Text("classifier: ${lastClassification ?: "—"}", color = Color.White)
+        Text(
+            "frames pushed: $framesPushed  dropped: $framesDropped",
+            color = Color.White,
+        )
+        Text(
+            "queues  body=$bodyQueueDepth  horizon=$horizonQueueDepth" +
+                "  ring=$ringBufferDepth  sights=$sightWindowDepth",
+            color = Color.White,
+        )
+    }
+}
 
 /**
  * Pick intrinsics for the analyzer's resolution. Prefer
@@ -271,19 +400,6 @@ private fun intrinsicsForResolution(
 private const val LIVE_VIEW_WIDTH = 1280
 private const val LIVE_VIEW_HEIGHT = 720
 
-/**
- * Placeholder intrinsics. Until calibration is wired through
- * the FFI and a per-camera intrinsics file is loaded, this
- * returns fx = fy = 1000 (the same defaults the Rust
- * `Intrinsics::placeholder` uses), which makes absolute
- * altitudes wrong by the calibration factor but keeps the
- * pixel-space pipeline behavior honest.
- *
- * Resolution-aware: principal point is the image center.
- * Wired to the actual analyzer resolution once the analyzer
- * surfaces the chosen size; today we hard-code 1280×720 to
- * match `LiveScreen`'s `ResolutionStrategy`.
- */
 private fun placeholderIntrinsicsForCurrentResolution(): FfiIntrinsics =
     FfiIntrinsics(
         fx = 1000.0,
@@ -296,3 +412,23 @@ private fun placeholderIntrinsicsForCurrentResolution(): FfiIntrinsics =
         p1 = 0.0,
         p2 = 0.0,
     )
+
+/**
+ * Placeholder engine config. Observer is the dev default
+ * (equator/Greenwich, 2 m eye height); real callers will read
+ * the operator's stored observer settings.
+ */
+private fun defaultEngineConfig(): FfiEngineConfig = FfiEngineConfig(
+    observer = FfiObserver(
+        latitudeDeg = 0.0,
+        longitudeDeg = 0.0,
+        eyeHeightM = 2.0,
+        eyeHeightSigmaM = 0.5,
+    ),
+    stitchingWindowSeconds = 2.0,
+    sightWindowSeconds = 600.0,
+    sightWindowCapacity = 10u,
+    minFixPublicationIntervalMs = 1000u,
+    inputRingCapacity = 120u,
+    segmentationModelPath = null,
+)

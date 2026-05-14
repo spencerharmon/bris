@@ -102,6 +102,18 @@ class EngineWrapper private constructor(
         rust.pushFrame(frame)
     }
 
+    /**
+     * Look up a previously-pushed frame by its engine-assigned
+     * ID. Returns null when the frame has been evicted from
+     * the ring buffer.
+     *
+     * Used by the session recorder to copy contributing-frame
+     * pixel bytes out of the engine into a sight-log entry,
+     * after a fix publishes and before the sight window ages
+     * past those frames.
+     */
+    fun frameById(id: ULong): FfiFrame? = rust.frameById(id)
+
     override fun close() {
         // Cancel the polling coroutine. The Rust engine stays
         // alive as long as `rust` holds a reference; UniFFI
