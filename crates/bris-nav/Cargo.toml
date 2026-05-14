@@ -1,6 +1,7 @@
 [package]
 name = "bris-nav"
 description = "Sight reduction, multi-sight fix computation, uncertainty propagation, continuous-operation engine."
+publish = false
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

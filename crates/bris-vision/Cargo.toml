@@ -1,6 +1,7 @@
 [package]
 name = "bris-vision"
 description = "Image processing, lens calibration, horizon detection, body centroiding, and stitching."
+publish = false
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

@@ -1,6 +1,7 @@
 [package]
 name = "bris-platesolve"
 description = "Geometric-hash plate solving against the embedded star catalog."
+publish = false
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

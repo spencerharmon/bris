@@ -1,6 +1,7 @@
 [package]
 name = "bris-streaming"
 description = "Continuous-operation streaming engine: orchestrates classification, body and horizon detection, plate solving, sight assembly, and fix publication from a stream of camera frames."
+publish = false
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

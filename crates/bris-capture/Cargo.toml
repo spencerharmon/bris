@@ -1,6 +1,7 @@
 [package]
 name = "bris-capture"
 description = "Camera capture for the Bris streaming engine: V4L2 frame ingest, pixel-format conversion to grayscale u16, mid-exposure timestamping."
+publish = false
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

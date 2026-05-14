@@ -1,6 +1,7 @@
 [package]
 name = "bris-calibrate"
 description = "Lens calibration for Bris: chessboard corner detection, intrinsics solve via Zhang's method, persistence, quality reporting."
+publish = false
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

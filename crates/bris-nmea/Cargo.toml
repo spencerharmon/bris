@@ -1,6 +1,7 @@
 [package]
 name = "bris-nmea"
 description = "NMEA 0183 sentence formatting and transports (TCP/UDP/serial)."
+publish = false
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
