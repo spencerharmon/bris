@@ -224,19 +224,40 @@ jobs:
           } > release-body.md
           cat release-body.md
 
+      - name: purge previous assets from nightly release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euxo pipefail
+          # softprops/action-gh-release@v2 *appends* assets to
+          # an existing release rather than replacing them.
+          # Without this purge step the rolling \`nightly\`
+          # release accumulates one SHA-named APK per push and
+          # never garbage-collects. Delete every existing asset
+          # before the publish step uploads the current build.
+          if gh release view nightly \
+                -R "${{ github.repository }}" >/dev/null 2>&1; then
+            gh release view nightly \
+                -R "${{ github.repository }}" \
+                --json assets --jq '.assets[].name' \
+              | while IFS= read -r name; do
+                  [ -n "$name" ] || continue
+                  gh release delete-asset nightly "$name" \
+                    -R "${{ github.repository }}" --yes
+                done
+          fi
+
       - name: publish or update nightly pre-release
         uses: softprops/action-gh-release@v2
         with:
           # Rolling tag: same tag updated on every push to
-          # main. softprops/action-gh-release overwrites the
-          # release in place when the tag already exists.
+          # main. The preceding purge step ensures we end up
+          # with exactly the two assets we just uploaded
+          # (bris-app-debug-<sha>.apk and
+          # bris-app-debug-latest.apk).
           tag_name: nightly
           name: nightly
           prerelease: true
-          # Overwrite the asset set so old SHA-named APKs from
-          # prior builds don't pile up on the rolling release.
-          # The stable `bris-app-debug-latest.apk` always
-          # points at the most-recent build.
           files: |
             release/bris-app-debug-${{ steps.rename.outputs.short }}.apk
             release/bris-app-debug-latest.apk
