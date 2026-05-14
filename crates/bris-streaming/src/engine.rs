@@ -408,7 +408,7 @@ impl StreamingEngine {
             // garbage-collect dead subscribers; for the
             // mpsc design "channel closed = no consumer
             // listening" is the documented end-of-stream.
-            if self.fix_tx.send(*published).is_err() {
+            if self.fix_tx.send(published.clone()).is_err() {
                 debug!("Stage E: fix-stream consumer disconnected; published fix dropped");
             }
         }
@@ -477,6 +477,31 @@ impl StreamingEngine {
     #[must_use]
     pub fn config(&self) -> &EngineConfig {
         &self.config
+    }
+
+    /// Look up a frame in the engine's ring buffer by its
+    /// engine-assigned [`FrameId`] (encoded as `u64` for the
+    /// FFI boundary).
+    ///
+    /// Returns `None` when the frame has been evicted — which
+    /// happens when no record currently in the body or horizon
+    /// queues references it AND no sight in the active sight
+    /// window references it. Foreign callers (the mobile
+    /// session-recorder) must therefore call this *promptly*
+    /// after a fix publishes, while its contributing frames
+    /// are still alive in the ring; once the sight window ages
+    /// past those frames they are gone.
+    ///
+    /// Returns a clone of the underlying [`Frame`] (rather than
+    /// a borrow) so the caller can hold it across the FFI
+    /// without keeping the engine's state mutex locked.
+    #[must_use]
+    pub fn frame_by_id(&self, id: u64) -> Option<Frame> {
+        let state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        state
+            .storage
+            .frame(crate::pipeline::FrameId(id))
+            .map(|rf| rf.frame.clone())
     }
 
     /// Test-only hook: synthesize a published fix and emit it on
@@ -603,6 +628,7 @@ mod tests {
             oldest_sight_age_seconds: 30.0,
             dominant_source: DominantSource::None,
             timestamp: Tt::from_julian_date(JD_J2000),
+            contributing_frame_ids: Vec::new(),
         }
     }
 
@@ -624,6 +650,23 @@ mod tests {
         engine.push_frame(dummy_frame()).unwrap();
         engine.push_frame(dummy_frame()).unwrap();
         assert_eq!(engine.diagnostics().frames_pushed, 2);
+    }
+
+    #[test]
+    fn frame_by_id_returns_pushed_frame_and_none_for_unknown() {
+        // First pushed frame gets id 0; lookup by id 0 must
+        // return a Frame with the same dimensions we pushed.
+        // Lookup by an id that was never assigned must return
+        // None rather than the most recent or any other frame.
+        let engine = StreamingEngine::new(EngineConfig::new(Observer::default_dev()));
+        engine.push_frame(dummy_frame()).unwrap();
+        let got = engine.frame_by_id(0).expect("frame 0 must be reachable");
+        assert_eq!(got.width(), 4);
+        assert_eq!(got.height(), 3);
+        assert!(
+            engine.frame_by_id(9999).is_none(),
+            "unknown frame_id must return None, not the most-recent frame",
+        );
     }
 
     #[test]

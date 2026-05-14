@@ -102,6 +102,7 @@ mod tests {
             oldest_sight_age_seconds: 60.0,
             dominant_source: DominantSource::Horizon,
             timestamp: Tt::from_julian_date(JD_J2000),
+            contributing_frame_ids: Vec::new(),
         }
     }
 

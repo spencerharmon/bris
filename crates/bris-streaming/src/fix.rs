@@ -15,7 +15,7 @@ use bris_core::time::Tt;
 use bris_nav::Fix;
 
 /// One fix emitted by the engine, with engine-level diagnostics.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct PublishedFix {
     /// Position solution (lat/lon + uncertainty ellipse + sight
     /// count) from [`bris_nav::multi_sight_fix`]. The ellipse is
@@ -56,6 +56,21 @@ pub struct PublishedFix {
     /// window. The fix itself is "current as of" this instant
     /// (modulo the publication-rate cap).
     pub timestamp: Tt,
+
+    /// Engine-assigned IDs of every frame that contributed to
+    /// this fix — i.e. every frame referenced by a sight
+    /// currently in the active sight window. Each sight
+    /// contributes one or two frames: its body frame and (when
+    /// different) its horizon frame; same-frame fixes only
+    /// contribute one. IDs are de-duplicated and ordered by
+    /// first occurrence in the window's iteration order.
+    ///
+    /// Foreign callers (the mobile session-recorder) use these
+    /// to copy the exact pixel bytes that produced a fix out of
+    /// the engine's ring buffer via
+    /// [`crate::StreamingEngine::frame_by_id`] before the
+    /// frames evict naturally as the sight window ages.
+    pub contributing_frame_ids: Vec<u64>,
 }
 
 /// Per-sight σ source attribution.
@@ -144,7 +159,7 @@ impl PublishedFix {
     /// - `dominant_source`: enum → `&'static str` via
     ///   [`DominantSource::label`].
     #[must_use]
-    pub fn to_pbris_fix_summary(self) -> bris_nmea::FixSummary {
+    pub fn to_pbris_fix_summary(&self) -> bris_nmea::FixSummary {
         let n_sights = u32::try_from(self.n_sights).unwrap_or(u32::MAX);
         let age = self.oldest_sight_age_seconds;
         let oldest_sight_age_s = if !age.is_finite() || age < 0.0 {
@@ -190,6 +205,7 @@ mod tests {
             oldest_sight_age_seconds: age,
             dominant_source: dominant,
             timestamp: Tt::from_julian_date(JD_J2000),
+            contributing_frame_ids: Vec::new(),
         }
     }
 

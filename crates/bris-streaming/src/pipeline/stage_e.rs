@@ -195,6 +195,17 @@ pub(crate) struct Sight {
     /// emits all stars from a frame on a single Stage E run
     /// and never re-emits them.
     pub source_frame_id: FrameId,
+    /// `FrameId` of the horizon record this sight was paired
+    /// with. Equal to `source_frame_id` for same-frame fixes
+    /// (the common case); different for cross-frame stitched
+    /// pairs. For night plate-solve sights without an
+    /// explicitly-paired horizon record (the horizon line is
+    /// passed in as a value), equal to `source_frame_id`.
+    ///
+    /// Surfaced via [`crate::PublishedFix::contributing_frame_ids`]
+    /// so foreign callers can retrieve the exact frames that
+    /// produced a fix.
+    pub horizon_frame_id: FrameId,
 }
 
 /// Active sight window with cap + age eviction + change
@@ -529,6 +540,7 @@ fn reduce_to_sight(
                 body: SightBody::SolarSystem(body),
                 azimuth_rad: apparent.direction.azimuth,
                 source_frame_id: c.body.frame_id,
+                horizon_frame_id: c.horizon.frame_id,
             }])
         }
         BodyDetection::IdentifiedStars(result) => {
@@ -545,6 +557,7 @@ fn reduce_to_sight(
                     observer,
                     cfg.per_star_sigma,
                     c.body.frame_id,
+                    c.horizon.frame_id,
                     c.body_tt,
                 ) {
                     Ok(sight) => out.push(sight),
@@ -580,6 +593,7 @@ fn expand_identified_star(
     observer: Observer,
     per_star_sigma: Sigma,
     source_frame_id: FrameId,
+    horizon_frame_id: FrameId,
     anchor_tt: Tt,
 ) -> Result<Sight, ReduceError> {
     // Look up the catalog record for the apparent place.
@@ -614,6 +628,7 @@ fn expand_identified_star(
         body: SightBody::Star { hr: ident.hr },
         azimuth_rad: apparent.direction.azimuth,
         source_frame_id,
+        horizon_frame_id,
     })
 }
 
@@ -659,6 +674,23 @@ fn try_publish(window: &SightWindow, now_tt: Option<Tt>) -> Option<PublishedFix>
         .iter()
         .map(|s| time_gap_seconds(anchor, s.anchor_tt))
         .fold(0.0_f64, f64::max);
+    // Collect every frame ID referenced by a sight in the
+    // window. Each sight contributes its body frame and (when
+    // different) its horizon frame; same-frame sights only
+    // contribute one. Order is preserved (body-first, horizon-
+    // second per sight); duplicates are removed while keeping
+    // the first occurrence so the foreign caller sees a stable
+    // frame ordering across publications.
+    let mut seen = std::collections::BTreeSet::new();
+    let mut contributing_frame_ids: Vec<u64> = Vec::with_capacity(window.len() * 2);
+    for s in window.iter() {
+        if seen.insert(s.source_frame_id) {
+            contributing_frame_ids.push(s.source_frame_id.0);
+        }
+        if s.horizon_frame_id != s.source_frame_id && seen.insert(s.horizon_frame_id) {
+            contributing_frame_ids.push(s.horizon_frame_id.0);
+        }
+    }
     Some(PublishedFix {
         fix,
         n_sights: window.len(),
@@ -668,6 +700,7 @@ fn try_publish(window: &SightWindow, now_tt: Option<Tt>) -> Option<PublishedFix>
         // computed (TODO 8 wires it through to $PBRIS).
         dominant_source: DominantSource::None,
         timestamp: anchor,
+        contributing_frame_ids,
     })
 }
 
@@ -744,6 +777,7 @@ mod tests {
             body: SightBody::SolarSystem(SolarSystemBody::Sun),
             azimuth_rad,
             source_frame_id: frame_id,
+            horizon_frame_id: frame_id,
         }
     }
 
@@ -849,6 +883,67 @@ mod tests {
             (published.azimuth_spread_rad - std::f64::consts::FRAC_PI_2).abs() < 1e-9,
             "expected 90° spread"
         );
+    }
+
+    #[test]
+    fn try_publish_collects_one_contributing_frame_id_per_same_frame_sight() {
+        // Each dummy_sight has source_frame_id == horizon_frame_id
+        // (constructed by the test helper); a window of two
+        // distinct dummy sights should produce exactly two
+        // contributing frame IDs.
+        let mut w = SightWindow::default();
+        w.try_insert(dummy_sight(0.001, 0.0, 0.0), 5);
+        w.try_insert(dummy_sight(0.001, std::f64::consts::FRAC_PI_2, 0.0), 5);
+        let published = try_publish(&w, Some(Tt::from_julian_date(JD_J2000)))
+            .expect("two diverse sights must yield a fix");
+        assert_eq!(
+            published.contributing_frame_ids.len(),
+            2,
+            "two same-frame sights should contribute exactly two frame IDs, got {:?}",
+            published.contributing_frame_ids,
+        );
+        // Ensure de-duplication: re-insert one of the sights
+        // (same frame_id derivation) and the count must not
+        // grow.
+        w.try_insert(dummy_sight(0.001, 0.0, 0.0), 5);
+        let republished = try_publish(&w, Some(Tt::from_julian_date(JD_J2000))).unwrap();
+        assert_eq!(
+            republished.contributing_frame_ids.len(),
+            2,
+            "re-inserting a sight from the same frame should not duplicate its frame_id"
+        );
+    }
+
+    #[test]
+    fn try_publish_collects_both_frames_for_cross_frame_sight() {
+        // Synthesize a cross-frame sight by hand-constructing
+        // a Sight with distinct source_frame_id and
+        // horizon_frame_id, then publishing alongside a
+        // distinct same-frame sight. Expected: 3 unique frame
+        // IDs (cross-frame contributes 2; same-frame
+        // contributes 1).
+        let cross_sight = Sight {
+            lop: dummy_lop(0.5, 0.1, 0.0),
+            anchor_tt: Tt::from_julian_date(JD_J2000),
+            altitude_sigma_rad: 0.001,
+            body: SightBody::SolarSystem(SolarSystemBody::Sun),
+            azimuth_rad: 0.0,
+            source_frame_id: FrameId(1000),
+            horizon_frame_id: FrameId(1001),
+        };
+        let mut w = SightWindow::default();
+        w.try_insert(cross_sight, 5);
+        w.try_insert(dummy_sight(0.001, std::f64::consts::FRAC_PI_2, 0.0), 5);
+        let published = try_publish(&w, Some(Tt::from_julian_date(JD_J2000)))
+            .expect("two diverse sights must yield a fix");
+        assert_eq!(
+            published.contributing_frame_ids.len(),
+            3,
+            "cross-frame + same-frame should give three frame IDs, got {:?}",
+            published.contributing_frame_ids,
+        );
+        assert!(published.contributing_frame_ids.contains(&1000));
+        assert!(published.contributing_frame_ids.contains(&1001));
     }
 
     #[test]
