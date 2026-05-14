@@ -477,6 +477,16 @@ pub struct FfiPublishedFix {
     pub dominant_source: String,
     /// TT Julian Date of the most recent contributing sight.
     pub timestamp_tt_jd: f64,
+    /// Engine-assigned IDs of every frame that contributed to
+    /// this fix. Foreign callers (the Android session-recorder)
+    /// pass each ID to [`Engine::frame_by_id`] to retrieve the
+    /// pixel bytes that produced the fix, then write them
+    /// alongside the manifest into a sight-log entry.
+    ///
+    /// Frames live in the engine's ring buffer only as long as
+    /// some sight in the active window references them; copy
+    /// promptly after receiving the fix.
+    pub contributing_frame_ids: Vec<u64>,
 }
 
 /// Foreign callback invoked once per published fix.
@@ -575,6 +585,80 @@ impl Engine {
         let mut subs = self.subscribers.lock().expect("subscribers mutex poisoned");
         subs.push(subscriber);
     }
+
+    /// Look up a frame in the engine's ring buffer by its
+    /// engine-assigned ID.
+    ///
+    /// Returns `None` when the frame has been evicted (no
+    /// record currently in the body or horizon queue references
+    /// it AND no sight in the active sight window references
+    /// it). Foreign callers must invoke this *promptly* after a
+    /// fix publishes, while its
+    /// [`FfiPublishedFix::contributing_frame_ids`] are still
+    /// alive in the ring; once the sight window ages past
+    /// those frames they are gone.
+    ///
+    /// The returned [`FfiFrame`] is a deep copy of the engine's
+    /// internal frame: 16-bit grayscale pixels widened across
+    /// the FFI boundary as little-endian bytes, exactly the
+    /// inverse of the [`Engine::push_frame`] format mapping for
+    /// [`FfiPixelFormat::Gray16Le`]. Foreign callers wanting
+    /// to persist these frames as PGM (the regression-test
+    /// format) should down-shift each `u16` to `u8` and write
+    /// a P5 header.
+    #[must_use]
+    pub fn frame_by_id(&self, id: u64) -> Option<FfiFrame> {
+        self.inner.frame_by_id(id).map(frame_to_ffi)
+    }
+}
+
+/// Convert a [`bris_vision::Frame`] back to an [`FfiFrame`].
+///
+/// Pixels are encoded as little-endian `u16` bytes
+/// ([`FfiPixelFormat::Gray16Le`]) so no precision is lost
+/// across the boundary. The intrinsics, capture time, and
+/// exposure are mirrored verbatim.
+///
+/// Used by [`Engine::frame_by_id`] to surface a
+/// `bris_streaming::StreamingEngine`-owned frame to the
+/// foreign caller. Symmetric with `convert_frame` (the
+/// FfiFrame → Frame direction).
+fn frame_to_ffi(frame: Frame) -> FfiFrame {
+    // Convert TT JD → Unix milliseconds via the same
+    // approximation `format_pbris` uses (TT − UTC ≈ 69.184 s).
+    // For frames recently pushed to the engine via the FFI
+    // (Unix-ms in, TT out) this round-trips to within a few
+    // ms.
+    const TT_MINUS_UTC_APPROX_SECS: f64 = 69.184;
+    let pixels_u16 = frame.pixels();
+    let mut pixels = Vec::with_capacity(pixels_u16.len() * 2);
+    for px in pixels_u16 {
+        pixels.extend_from_slice(&px.to_le_bytes());
+    }
+    let intr = frame.intrinsics;
+    let utc_jd = frame.capture_tt.julian_date() - TT_MINUS_UTC_APPROX_SECS / 86_400.0;
+    let utc_unix_s = (utc_jd - 2_440_587.5) * 86_400.0;
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let captured_unix_ms = (utc_unix_s * 1000.0) as i64;
+    FfiFrame {
+        width: frame.width(),
+        height: frame.height(),
+        format: FfiPixelFormat::Gray16Le,
+        pixels,
+        captured_unix_ms,
+        exposure_us: frame.exposure_us,
+        intrinsics: FfiIntrinsics {
+            fx: intr.fx,
+            fy: intr.fy,
+            cx: intr.cx,
+            cy: intr.cy,
+            k1: intr.k1,
+            k2: intr.k2,
+            k3: intr.k3,
+            p1: intr.p1,
+            p2: intr.p2,
+        },
+    }
 }
 
 /// Construct a new engine.
@@ -669,6 +753,7 @@ fn published_fix_to_ffi(p: &PublishedFix) -> FfiPublishedFix {
         oldest_sight_age_seconds: p.oldest_sight_age_seconds,
         dominant_source: p.dominant_source.label().to_owned(),
         timestamp_tt_jd: p.timestamp.julian_date(),
+        contributing_frame_ids: p.contributing_frame_ids.clone(),
     }
 }
 
