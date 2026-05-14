@@ -16,6 +16,10 @@ import co.anomaly.bris.ui.CalibrationScreen
 import co.anomaly.bris.ui.LiveScreen
 import co.anomaly.bris.ui.PreUploadReviewScreen
 import co.anomaly.bris.ui.SettingsScreen
+import co.anomaly.bris.ui.SightLogDetailScreen
+import co.anomaly.bris.ui.SightLogScreen
+import java.net.URLDecoder
+import java.net.URLEncoder
 
 /**
  * Single-activity entry point. Compose nav-graph holds the four
@@ -48,6 +52,7 @@ class MainActivity : ComponentActivity() {
                                 onOpenSettings = { nav.navigate("settings") },
                                 onSendFix = { nav.navigate("review/fix") },
                                 onOpenCalibration = { nav.navigate("calibration") },
+                                onOpenSightLog = { nav.navigate("sight-log") },
                             )
                         }
                         composable("settings") {
@@ -75,6 +80,24 @@ class MainActivity : ComponentActivity() {
                                     // currently logs and dismisses.
                                     nav.popBackStack()
                                 },
+                            )
+                        }
+                        composable("sight-log") {
+                            SightLogScreen(
+                                onBack = { nav.popBackStack() },
+                                onOpen = { dirName ->
+                                    val encoded = URLEncoder.encode(dirName, "UTF-8")
+                                    nav.navigate("sight-log/$encoded")
+                                },
+                            )
+                        }
+                        composable("sight-log/{dir}") { backStack ->
+                            val raw = backStack.arguments?.getString("dir") ?: return@composable
+                            val dirName = URLDecoder.decode(raw, "UTF-8")
+                            SightLogDetailScreen(
+                                dirName = dirName,
+                                onBack = { nav.popBackStack() },
+                                onDeleted = { nav.popBackStack() },
                             )
                         }
                     }
