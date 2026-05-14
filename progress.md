@@ -39,7 +39,8 @@ For the end-to-end pipeline architecture and data flow, see
 - **Phase 6.5 (diagnostic collection) — feature-complete spike,
   Android APK building.** `crates/bris-ffi` (UniFFI proc-macro,
   real `subscribe_fixes` pump + real `run_calibration` wrapper +
-  `format_pbris`), `crates/bris-collector` (axum + filesystem
+  `format_pbris` + `frame_by_id`),
+  `crates/bris-collector` (axum + filesystem
   store + SQLite mirror + 6 integration tests covering POST,
   GET manifest, GET media, list, and three rejection paths),
   and `bris-android/` (Compose, CameraX backpressure-aware
@@ -51,11 +52,29 @@ For the end-to-end pipeline architecture and data flow, see
   capture screen calling the FFI solver and persisting the
   result, operator note in the pre-upload review, persisted
   intrinsics auto-loaded into the live engine when resolution
-  matches). `./gradlew :app:assembleDebug` produces a
-  31 MiB `app-debug.apk` containing both `arm64-v8a` and
-  `x86_64` bris-ffi shared libraries. End-to-end on a real
-  device is the next step. Design doc:
+  matches). `./gradlew :app:assembleDebug` (in CI; local
+  Android tooling is intentionally absent — see AGENTS.md
+  "Where work runs") produces a debug APK published to the
+  rolling `nightly` GitHub Release. End-to-end on a real
+  device verified through the YUV-buffer-underflow fix
+  (commit a9894ef). Design doc:
   `docs/design/diagnostic_collection.md`.
+- **Phase 7 (mobile sight-capture session) — developer-iteration
+  spike.** `crates/bris-streaming` exposes per-fix
+  contributing-frame IDs + `frame_by_id` so the mobile
+  recorder can copy the exact pixel bytes that produced a
+  fix. `bris-android` adds Start / Stop session lifecycle
+  on the live screen, a `SessionRecorder` that scores fixes
+  by threshold (target 1.0 nm / hard 5.0 nm / sustained-green
+  3 s / timeout 5 min), end-to-end sight log writing to
+  `<external-files>/sights/<session-ulid>/` (manifest +
+  contributing-frame PGMs + per-frame JSON snapshots +
+  pbris.log), plus list + detail review screens with
+  delete-images-only and soft-delete affordances. Design
+  doc: `docs/design/sight_session.md`. Operator-facing
+  threshold settings UI, frame thumbnails, map preview, and
+  the foreground service for backgrounding survival are all
+  tracked follow-ups.
 
 **Phase 2.5 (real-data validation): 13 regression cases** spanning
 working day, working night-with-moon, working
@@ -74,7 +93,7 @@ Phase 7 (session-based mobile sight UX — distinct from the Phase
 (magnitude-consistency verification check, observer-location
 external prior) that are queued.
 
-**Workspace metrics:** 473 tests passing + 4 ignored
+**Workspace metrics:** 476 tests passing + 4 ignored
 (slow/release-only), 9 crates with active code (added
 `bris-ffi` and `bris-collector` in the diagnostic-collection
 spike), zero clippy warnings under `--all-targets -- -D

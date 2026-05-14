@@ -1133,6 +1133,29 @@ references to the regression tests that pin the behavior. See
 
    See "Test strategy" in the design doc.
 
+** DONE Per-fix contributing-frame IDs + frame_by_id
+   The mobile sight-capture session needs to copy out the
+   exact frames a published fix referenced, before they evict
+   from the engine's ring buffer. Engine surface added in the
+   sight-capture spike (see [[file:docs/design/sight_session.md][docs/design/sight_session.md]]):
+
+   - ~Sight~ gains ~horizon_frame_id~ alongside the existing
+     ~source_frame_id~. Same-frame sights set both equal;
+     cross-frame stitched sights set them distinctly.
+   - ~PublishedFix~ gains ~contributing_frame_ids: Vec<u64>~,
+     populated by ~try_publish~ walking the active sight
+     window and de-duplicating frame IDs while preserving
+     first-occurrence order.
+   - ~StreamingEngine::frame_by_id(u64) -> Option<Frame>~
+     looks up a frame in the engine's ring buffer and clones
+     it across. Returns None when the frame has been evicted
+     (no record in body or horizon queue references it AND
+     no sight in the active window references it).
+
+   The engine remains session-agnostic: these are accessor
+   APIs the mobile shell uses, not state changes on the
+   engine itself.
+
 ** TODO Sweep guidance (mobile only)
    On phone frontends, render a minimal overlay showing
    horizon detection status and current body candidates. No
@@ -1588,28 +1611,53 @@ references to the regression tests that pin the behavior. See
    - Foreground only; no background camera access on iOS without
      compelling justification.
    - Same NMEA defaults as Android.
-** TODO Sight session UX
-   - "Take sight" button starts the session.
-   - On-screen sweep guidance: a minimal overlay showing horizon
-     detection status, "sweep slower / faster" feedback, and current
-     candidate bodies (count, not selection — selection stays automatic).
-   - Live uncertainty indicator: numeric 1σ value (e.g. "1.8 nm") with
-     red/yellow/green color coding. The number is always shown; the
-     color reflects whether it meets the current accept threshold.
-     - Red: above hard threshold. Never accepted, neither manually nor
-       automatically.
-     - Yellow: between hard and accept thresholds.
-     - Green: at or below accept threshold.
-   - Dominant-source label always visible so the user understands what
-     is currently limiting the fix (e.g. "horizon: hazy", "low altitude
-     body", "need more sweeps").
-   - Auto-accept after N seconds of sustained green (default 3 s,
-     configurable).
-   - Session timeout (default 5 min, configurable). On timeout: if the
-     best fix achieved during the session was green or yellow, accept it
-     and surface that it was the timeout-best rather than a clean accept;
-     if only red was ever achieved, end the session with no fix and
-     explain why.
+** PARTIAL Sight session UX
+   *Done in the sight-capture spike (commits e815b46 .. 9c46333):*
+   developer-iteration version of the start/stop session loop.
+   See [[file:docs/design/sight_session.md][docs/design/sight_session.md]] for the design rationale
+   and on-disk layout.
+
+   - Engine + FFI surface: ~PublishedFix.contributing_frame_ids~,
+     ~StreamingEngine::frame_by_id~, ~Engine.frameById~ on
+     the FFI. The engine has no notion of session; per-fix
+     contributing frame IDs let the mobile recorder copy the
+     exact bytes out before the sight window ages past them.
+   - Mobile lifecycle: engine constructed once when LiveScreen
+     composes; CameraX ImageAnalysis bound only while a
+     session is active. Start / Stop buttons drive the session.
+   - SessionRecorder scores fixes against thresholds (defaults
+     baked into ~SessionThresholds~ Kotlin: target σ 1.0 nm,
+     hard σ 5.0 nm, sustained-green 3 s, timeout 5 min).
+   - End conditions: sustained green → auto-accept; operator
+     Stop → accept best non-red or record no-fix; timeout →
+     same accept-best-non-red semantics.
+   - On end: contributing-frame bytes pulled from the engine,
+     written to ~<external-files>/sights/<session-ulid>/~ as
+     P5 PGM frames + per-frame JSON snapshots + ~pbris.log~ +
+     manifest.json (schema-v1, submission_kind = "fix" so the
+     same downstream tooling consumes both on-device entries
+     and collector-received submissions).
+   - Diagnostic overlay grows a session-status block: idle /
+     capturing (elapsed seconds + verdict color + σ + G/Y/R
+     counts) / saving / saved / failed.
+
+   *Pending:*
+   - Operator-facing settings UI for the threshold values.
+   - Sweep-guidance overlay (slower / faster / current
+     candidate-body count) — needs streaming-engine
+     diagnostics for sweep rate and per-frame body-detection
+     activity. Engine-side groundwork tracked under Phase 3.5.
+   - Foreground service for the session lifetime so
+     backgrounding survives. Today's developer-iteration
+     version aborts on background under DisposableEffect
+     cleanup, which is acceptable for the operator-developer
+     use case.
+   - Auto-accept toast / haptic / share-sheet hand-off after
+     a session captures.
+
+   *Original full-fidelity Phase 7 spec (still TODO; some
+   subsumed by the spike, the rest captured here for the
+   eventual production-UX iteration):*
    - Late-session hint: when the timeout is approaching (e.g. last 30 s)
      and no green has been achieved, prompt with the actual best-so-far
      number, e.g. "Unable to reach 0.5 nm in current conditions.
@@ -1640,7 +1688,15 @@ references to the regression tests that pin the behavior. See
 ** TODO Mobile calibration UX
    Guided checkerboard capture or "point at a clear night sky"
    star-field auto-calibration. Persists per-device intrinsics.
-** TODO Sight log review
+** PARTIAL Sight log review
+   *Done in the sight-capture spike:* list + detail screens at
+   ~bris-android~'s ~SightLogScreen~ + ~SightLogDetailScreen~.
+   List shows captured-at + verdict band + one-line summary,
+   tap to open. Detail dumps the manifest + a media listing
+   (capped at 50 entries) + delete-images-only and
+   delete-entry (soft-delete to ~.trash/~) affordances.
+
+   *Pending (production UX):*
    List of past accepted fixes, each row showing timestamp, position,
    numeric 1σ uncertainty, and color-coded by whether that fix met its
    session's accept threshold (green), was a yellow accept (manual or

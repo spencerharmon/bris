@@ -12,3 +12,7 @@ documents go in this directory as design questions are settled.
 - [diagnostic_collection.md](diagnostic_collection.md) — operator-
   initiated diagnostic submission from device to collector; the
   one network surface in Bris.
+- [sight_session.md](sight_session.md) — mobile-only sight-capture
+  session UX: Start/Stop on top of the continuous engine,
+  contributing-frame retrieval, on-device sight log under
+  `<external-files>/sights/`.
