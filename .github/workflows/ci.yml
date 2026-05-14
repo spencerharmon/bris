@@ -15,8 +15,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: "1.94"
           components: rustfmt
       - run: cargo fmt --all --check
 
@@ -25,11 +26,17 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: "1.94"
           components: clippy
       - uses: Swatinem/rust-cache@v2
-      - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+      # `--all-features` would turn on the segmentation feature
+      # in workspace consumers that don't currently opt in (the
+      # FFI is intentionally segmentation-off for Android-target
+      # compatibility); the explicit list mirrors what each
+      # crate's Cargo.toml already enables.
+      - run: cargo clippy --workspace --all-targets -- -D warnings
 
   test:
     name: test ${{ matrix.target }}
@@ -44,22 +51,56 @@ jobs:
             target: aarch64-apple-darwin
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.94"
       - uses: Swatinem/rust-cache@v2
-      - run: cargo test --workspace --all-features
+      - run: cargo test --workspace
 
   cross-build:
     name: cross-build aarch64-linux-gnu (Pi Zero 2W class)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: "1.94"
           targets: aarch64-unknown-linux-gnu
       - uses: Swatinem/rust-cache@v2
-      - name: install cross
-        run: cargo install cross --locked
-      - run: cross build --workspace --target aarch64-unknown-linux-gnu --release
+      - name: install cross-compile toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
+      - name: configure cross-compile linker
+        run: |
+          mkdir -p .cargo
+          cat >> .cargo/config.toml <<'EOF'
+
+          [target.aarch64-unknown-linux-gnu]
+          linker = "aarch64-linux-gnu-gcc"
+          EOF
+      # Cross-build everything that doesn't currently link a
+      # native lib that has no aarch64-linux-gnu prebuilt. That
+      # excludes bris-cli (depends on segmentation -> ort), and
+      # bris-capture (Linux-only V4L2 + transitive on the
+      # streaming engine's segmentation feature). Everything
+      # else — including bris-ffi, bris-collector, and the
+      # streaming engine itself with default features — must
+      # cross-build cleanly so the Pi Zero 2W deployment story
+      # holds. ort/bris-cli's aarch64 story is tracked
+      # separately under Phase 6.
+      - run: |
+          cargo build --release --target aarch64-unknown-linux-gnu \
+            -p bris-core \
+            -p bris-almanac \
+            -p bris-vision \
+            -p bris-platesolve \
+            -p bris-nav \
+            -p bris-nmea \
+            -p bris-streaming \
+            -p bris-calibrate \
+            -p bris-ffi \
+            -p bris-collector
 
   deny:
     name: cargo-deny
