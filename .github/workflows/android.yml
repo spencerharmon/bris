@@ -78,8 +78,17 @@ jobs:
           echo "Using NDK ${ndk_version} at ${ndk_root}"
 
       - name: install Rust toolchain + Android targets
-        uses: dtolnay/rust-toolchain@stable
+        # Channel matches `rust-toolchain.toml` so the targets
+        # we install land on the same toolchain rustup will
+        # auto-activate inside the Gradle Exec tasks. Using
+        # `stable` here installs them on a *different* toolchain
+        # (1.94.x but identified differently), and rustup's
+        # auto-switch back to the pinned channel inside Gradle
+        # would find no Android target std and fail with
+        # `error[E0463]: can't find crate for 'core'`.
+        uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: "1.94"
           targets: aarch64-linux-android,x86_64-linux-android
 
       - name: install cargo-ndk
