@@ -52,6 +52,15 @@ class FrameAnalyzer(
                 val snap = engine.snapshot.value
                 debugBuffer.appendFrame(ffiFrame, snap)
             }
+        } catch (t: Throwable) {
+            // CameraX runs the analyzer on a background thread.
+            // An uncaught exception here would propagate up
+            // through the executor and crash the activity. The
+            // streaming engine already tolerates dropped frames;
+            // logging and dropping is strictly better than
+            // taking down the app for a recoverable per-frame
+            // hiccup.
+            android.util.Log.w(TAG, "analyze: dropping frame due to ${t.javaClass.simpleName}: ${t.message}")
         } finally {
             image.close()
         }
@@ -59,6 +68,10 @@ class FrameAnalyzer(
 
     /** How many frames have been forwarded since construction. */
     fun framesForwarded(): Long = frameCount.get()
+
+    private companion object {
+        private const val TAG = "FrameAnalyzer"
+    }
 }
 
 /**
@@ -67,6 +80,20 @@ class FrameAnalyzer(
  *
  * The Y plane may be padded with row-stride bytes greater than
  * width; we copy row-by-row to produce a tightly-packed buffer.
+ *
+ * Important: the Y plane buffer's `remaining()` is
+ * `(height - 1) * rowStride + width`, **not** `height *
+ * rowStride`. The last row contains only `width` bytes; the
+ * trailing `rowStride - width` padding of that row is not
+ * actually present in the buffer. Reading `rowStride` bytes
+ * for every row including the last one therefore overruns the
+ * buffer with a `BufferUnderflowException` (observed on
+ * sdm660-class devices). The loop below special-cases the
+ * final row and reads only `width` bytes for it. The
+ * pixel-stride normalization is then identical to the
+ * non-final rows since the final row has no per-pixel stride
+ * padding to skip past width either.
+ *
  * The captured timestamp is converted from CameraX's nanosecond
  * domain (uptime) to wall-clock milliseconds; the engine's
  * dual-clock handling (Phase 1.5) is the authoritative model
@@ -81,18 +108,36 @@ private fun Image.toFfiFrame(intrinsics: FfiIntrinsics): FfiFrame {
     val h = height
     val src = yPlane.buffer
     val dst = ByteArray(w * h)
+
     if (pixelStride == 1 && rowStride == w) {
-        src.get(dst)
+        // Tight packing. The buffer's remaining() should equal
+        // w * h exactly in this case but cap defensively.
+        val available = src.remaining()
+        val toRead = minOf(dst.size, available)
+        src.get(dst, 0, toRead)
     } else {
-        // Slow path: stride normalization.
-        val rowBuf = ByteArray(rowStride)
+        // Stride normalization. Each row except the last is
+        // `rowStride` bytes in the source buffer; the last row
+        // is only `width * pixelStride` bytes (no trailing
+        // row-padding for the last row).
+        val fullRowBytes = rowStride
+        val lastRowBytes = (w - 1) * pixelStride + 1
+        val rowBuf = ByteArray(fullRowBytes)
         for (row in 0 until h) {
             src.position(row * rowStride)
-            src.get(rowBuf, 0, rowStride)
+            val bytesThisRow = if (row == h - 1) lastRowBytes else fullRowBytes
+            // Defensive cap: never read more than the buffer's
+            // remaining bytes. On any honest device this never
+            // truncates; on a misbehaving HAL it converts a
+            // crash into a partially-filled frame.
+            val toRead = minOf(bytesThisRow, src.remaining())
+            src.get(rowBuf, 0, toRead)
             if (pixelStride == 1) {
-                System.arraycopy(rowBuf, 0, dst, row * w, w)
+                val copy = minOf(w, toRead)
+                System.arraycopy(rowBuf, 0, dst, row * w, copy)
             } else {
-                for (col in 0 until w) {
+                val maxCol = minOf(w, (toRead + pixelStride - 1) / pixelStride)
+                for (col in 0 until maxCol) {
                     dst[row * w + col] = rowBuf[col * pixelStride]
                 }
             }
