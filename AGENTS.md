@@ -50,6 +50,15 @@ are non-negotiable without explicit operator approval:
 - **Pi Zero 2W (aarch64) is the minimum embedded target.** Code
   that compiles for `x86_64-unknown-linux-gnu` but not
   `aarch64-unknown-linux-gnu` is broken.
+- **Android builds run in CI only.** Do not install the Android
+  SDK / NDK / `cargo-ndk` / Android target stdlibs locally and
+  do not attempt `./gradlew :app:assembleDebug` on the dev
+  workstation. The Android tooling footprint (~2.7 GiB system
+  + ~300 MiB rustup targets + ~600 MiB transient build dirs)
+  is large enough that the operator has chosen to keep it off
+  the workstation entirely. CI is authoritative for APK
+  production; the rolling `nightly` GitHub release publishes
+  every push to `main`. See "Where work runs" below.
 
 ## Workspace structure
 
@@ -190,6 +199,77 @@ captured in `docs/design/diagnostic_collection.md`.
   retained data for a single fix), send calibration (uploads
   the calibration session bundle). Every send action shows a
   one-screen pre-upload review.
+
+## Where work runs
+
+The workstation is for **Rust**. Anything Android-side is
+authored locally in source files but **built only in CI**.
+
+| Task | Local | CI |
+|------|-------|----|
+| Edit Rust source / tests | yes | — |
+| `cargo check` / `cargo test` / `cargo clippy` / `cargo fmt` | yes | also runs |
+| `cargo deny check` | yes (if installed) | runs |
+| Cross-compile bris-ffi for Android (`cargo ndk …`) | **no** | runs |
+| Generate UniFFI Kotlin bindings | **no** | runs |
+| Edit Kotlin source under `bris-android/` | yes | — |
+| `./gradlew :app:assembleDebug` | **no** | runs |
+| `./gradlew :app:uniffiBindgen` | **no** | runs |
+| Inspect / install the resulting APK | yes (`adb install`) | publishes |
+
+This is a deliberate constraint. The Android tooling footprint
+(~2.7 GiB system packages + ~300 MiB rustup target stdlibs +
+several hundred MiB of transient Gradle / cargo build dirs)
+adds up to ~3-4 GiB of disk for tooling that the
+diagnostic-collection spike needs only to produce the APK.
+Producing the APK is what CI is for.
+
+### Practical workflow for Android-touching changes
+
+1. Edit Kotlin (and/or Rust) locally.
+2. Run `cargo check --workspace` and `cargo clippy --workspace
+   --all-targets -- -D warnings` to catch FFI surface
+   regressions and lint issues.
+3. Commit and push.
+4. The `android` workflow at
+   `.github/workflows/android.yml` cross-builds
+   `bris-ffi` for both Android ABIs, generates UniFFI Kotlin
+   bindings, runs `./gradlew :app:assembleDebug`, uploads the
+   APK as a workflow artifact, and republishes the rolling
+   `nightly` GitHub Release.
+5. Install via `adb install` from the artifact or, more
+   conveniently, the stable URL:
+   `https://github.com/spencerharmon/bris/releases/download/nightly/bris-app-debug-latest.apk`.
+
+### When you really do need a local Android build
+
+If a CI feedback loop is too slow for a particular debugging
+session — for instance, chasing a JNA crash that only repros on
+device — the operator may temporarily install the Android
+toolchain. **Don't do this in a normal session.** Treat it as
+a one-off, and remove the tools (~3.5 GiB) when done:
+
+```sh
+# install (operator-approved one-off)
+sudo pacman -S android-ndk android-sdk-build-tools \
+                android-platform android-sdk-cmdline-tools-latest
+rustup target add aarch64-linux-android x86_64-linux-android
+cargo install cargo-ndk
+
+# … your Android-debugging session …
+
+# tear down (back to baseline)
+sudo pacman -R android-ndk android-sdk-build-tools \
+                android-platform android-sdk-cmdline-tools-latest
+rustup target remove aarch64-linux-android x86_64-linux-android
+cargo uninstall cargo-ndk
+rm -rf ~/.android-sdk-bris ~/.android-sdk-overlay ~/.bris-build
+rm -f bris-android/local.properties
+```
+
+If you find yourself needing a local Android build *often*,
+the right fix is making CI faster (build cache, smaller
+artifacts), not making the operator's workstation bigger.
 
 ## Commit and PR hygiene
 
