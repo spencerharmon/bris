@@ -107,6 +107,12 @@ dependencies {
     implementation("androidx.navigation:navigation-compose:2.8.4")
     implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.8.7")
     implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.8.7")
+    // Provides the modern androidx.lifecycle.compose.LocalLifecycleOwner
+    // (the androidx.compose.ui.platform.LocalLifecycleOwner is
+    // deprecated and known to return null on certain
+    // Compose-BOM + lifecycle-runtime version pairings,
+    // crashing CameraX's bindToLifecycle on real devices).
+    implementation("androidx.lifecycle:lifecycle-runtime-compose:2.8.7")
     implementation("androidx.datastore:datastore-preferences:1.1.1")
 
     // CameraX
