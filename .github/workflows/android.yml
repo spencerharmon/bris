@@ -40,6 +40,13 @@ on:
 env:
   CARGO_TERM_COLOR: always
 
+# `release-nightly` needs to write to the repo's releases.
+# The `apk` job does not need write access; the explicit
+# `permissions` block at the workflow level is the union, and
+# is the minimum needed for the publish step.
+permissions:
+  contents: write
+
 jobs:
   apk:
     name: build app-debug.apk (arm64-v8a + x86_64)
@@ -152,3 +159,86 @@ jobs:
           path: bris-android/app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
           retention-days: 30
+
+  release-nightly:
+    name: publish rolling nightly pre-release
+    # Only on push-to-main. PRs and workflow_dispatch don't
+    # publish releases.
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: apk
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: download apk artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: bris-app-debug-${{ github.sha }}
+          path: artifact
+
+      - name: rename apk with short sha
+        id: rename
+        run: |
+          set -euxo pipefail
+          short=$(echo "${{ github.sha }}" | cut -c1-7)
+          mkdir -p release
+          cp "artifact/app-debug.apk" "release/bris-app-debug-${short}.apk"
+          ls -la release
+          echo "short=${short}" >> "$GITHUB_OUTPUT"
+          # Also stage a stable filename so a long-lived "always
+          # grab the latest" URL works without knowing the SHA.
+          cp "artifact/app-debug.apk" "release/bris-app-debug-latest.apk"
+
+      - name: compose release body
+        id: body
+        run: |
+          set -euxo pipefail
+          subject=$(git log -1 --pretty=%s "${{ github.sha }}")
+          now_utc=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+          {
+            echo "Rolling pre-release built from \`main\`."
+            echo
+            echo "- Commit: \`${{ github.sha }}\`"
+            echo "- Subject: ${subject}"
+            echo "- Built: ${now_utc}"
+            echo
+            echo "## Install"
+            echo
+            echo '```sh'
+            echo "adb install bris-app-debug-${{ steps.rename.outputs.short }}.apk"
+            echo '```'
+            echo
+            echo "Debug-keystore signed; \`Allow from unknown sources\` is required"
+            echo "for non-adb installs."
+            echo
+            echo "## Permanent stable URL"
+            echo
+            echo "The latest nightly is always at:"
+            echo
+            echo "    https://github.com/spencerharmon/bris/releases/download/nightly/bris-app-debug-latest.apk"
+            echo
+            echo "Per-build URL (this build):"
+            echo
+            echo "    https://github.com/spencerharmon/bris/releases/download/nightly/bris-app-debug-${{ steps.rename.outputs.short }}.apk"
+          } > release-body.md
+          cat release-body.md
+
+      - name: publish or update nightly pre-release
+        uses: softprops/action-gh-release@v2
+        with:
+          # Rolling tag: same tag updated on every push to
+          # main. softprops/action-gh-release overwrites the
+          # release in place when the tag already exists.
+          tag_name: nightly
+          name: nightly
+          prerelease: true
+          # Overwrite the asset set so old SHA-named APKs from
+          # prior builds don't pile up on the rolling release.
+          # The stable `bris-app-debug-latest.apk` always
+          # points at the most-recent build.
+          files: |
+            release/bris-app-debug-${{ steps.rename.outputs.short }}.apk
+            release/bris-app-debug-latest.apk
+          body_path: release-body.md
+          make_latest: false
