@@ -47,8 +47,14 @@ jobs:
         include:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
-          - os: macos-latest
-            target: aarch64-apple-darwin
+          # macOS coverage is desirable for Phase 7's iOS shell
+          # but is currently broken (rustup proxy resolution
+          # picks up rustup-init instead of cargo on
+          # macos-15-arm64). Re-enable when the macOS shell work
+          # gets attention; the segmentation feature also needs
+          # ort macOS prebuilts validated then.
+          # - os: macos-latest
+          #   target: aarch64-apple-darwin
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@master
@@ -108,3 +114,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          # Match rust-toolchain.toml so the action's container
+          # has the right toolchain installed before cargo-deny
+          # runs (otherwise rustup tries to install
+          # `1.94-x86_64-unknown-linux-musl` and fails).
+          rust-version: "1.94"

@@ -167,6 +167,10 @@ pub fn detect_corners_in_directory(
 /// # Errors
 ///
 /// See [`DetectError`].
+// Body is 102 lines; the per-frame loop has enough error
+// branches that splitting it across helpers would harm
+// readability more than the line count helps. Tracked.
+#[allow(clippy::too_many_lines)]
 pub fn detect_corners_in_directory_with_progress(
     directory: &Path,
     target: CheckerboardTarget,
