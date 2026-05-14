@@ -58,9 +58,9 @@ pub enum TimestampError {
 impl From<TimeError> for TimestampError {
     fn from(e: TimeError) -> Self {
         match e {
-            TimeError::BeforeLeapTable => {
-                Self::AnchorBeforeLeapTable(DateTime::<Utc>::from_timestamp(0, 0).unwrap_or_default())
-            }
+            TimeError::BeforeLeapTable => Self::AnchorBeforeLeapTable(
+                DateTime::<Utc>::from_timestamp(0, 0).unwrap_or_default(),
+            ),
             // `InvalidDate` would only occur on a corrupt
             // leap-second table, which we don't propagate
             // separately — the only actionable condition for
@@ -136,16 +136,14 @@ impl MonotonicAnchor {
     /// anchor — shouldn't happen with `CLOCK_MONOTONIC` but
     /// guarded so a driver bug doesn't panic.
     #[must_use]
-    pub fn buffer_timestamp_to_utc(
-        &self,
-        buffer_monotonic: Duration,
-    ) -> Option<DateTime<Utc>> {
+    pub fn buffer_timestamp_to_utc(&self, buffer_monotonic: Duration) -> Option<DateTime<Utc>> {
         let delta = buffer_monotonic.checked_sub(self.monotonic_anchor)?;
         // chrono::Duration only takes i64 nanoseconds; that
         // overflows above ~292 years, well beyond the lifetime
         // of any capture session.
         let delta_ns = i64::try_from(delta.as_nanos()).ok()?;
-        self.utc_anchor.checked_add_signed(chrono::Duration::nanoseconds(delta_ns))
+        self.utc_anchor
+            .checked_add_signed(chrono::Duration::nanoseconds(delta_ns))
     }
 }
 
@@ -226,9 +224,7 @@ mod tests {
         let utc_anchor = utc(2024, 6, 15, 12, 0, 0);
         let mono_anchor = Duration::from_secs(100);
         let a = MonotonicAnchor::new(mono_anchor, utc_anchor);
-        let mapped = a
-            .buffer_timestamp_to_utc(Duration::from_secs(105))
-            .unwrap();
+        let mapped = a.buffer_timestamp_to_utc(Duration::from_secs(105)).unwrap();
         assert_eq!(mapped, utc_anchor + chrono::Duration::seconds(5));
     }
 
@@ -240,9 +236,7 @@ mod tests {
         let utc_anchor = utc(2024, 6, 15, 12, 0, 0);
         let mono_anchor = Duration::from_secs(100);
         let a = MonotonicAnchor::new(mono_anchor, utc_anchor);
-        assert!(a
-            .buffer_timestamp_to_utc(Duration::from_secs(50))
-            .is_none());
+        assert!(a.buffer_timestamp_to_utc(Duration::from_secs(50)).is_none());
     }
 
     #[test]
@@ -289,6 +283,9 @@ mod tests {
         // UTC anchor should be reasonably current.
         let now = Utc::now();
         let delta = (now - a.utc_anchor).num_seconds().abs();
-        assert!(delta < 5, "UTC anchor is {delta} s from Utc::now() — suspicious");
+        assert!(
+            delta < 5,
+            "UTC anchor is {delta} s from Utc::now() — suspicious"
+        );
     }
 }

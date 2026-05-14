@@ -376,8 +376,7 @@ fn main() -> anyhow::Result<()> {
         .init();
 
     let cli = Cli::parse();
-    let raw_config = config::load_config(cli.config.as_deref())
-        .context("load configuration")?;
+    let raw_config = config::load_config(cli.config.as_deref()).context("load configuration")?;
     match cli.command {
         Command::Replay(args) => run_replay(&args),
         Command::Capture(args) => run_capture(&args, &raw_config),
@@ -686,8 +685,7 @@ fn run_capture(args: &CaptureArgs, raw_config: &config::RawConfig) -> anyhow::Re
         exposure_us: resolved.exposure_us,
     };
     let intrinsics = Intrinsics::placeholder(resolved.width, resolved.height);
-    let capture =
-        V4l2Capture::open(v4l_config, intrinsics).context("open V4L2 device")?;
+    let capture = V4l2Capture::open(v4l_config, intrinsics).context("open V4L2 device")?;
     info!(
         device = %resolved.device.display(),
         width = resolved.width,
@@ -812,8 +810,7 @@ fn run_serve(args: &ServeArgs, raw_config: &config::RawConfig) -> anyhow::Result
         resolved.width,
         resolved.height,
     )?;
-    let capture =
-        V4l2Capture::open(v4l_config, intrinsics).context("open V4L2 device")?;
+    let capture = V4l2Capture::open(v4l_config, intrinsics).context("open V4L2 device")?;
     info!(
         device = %resolved.device.display(),
         width = resolved.width,
@@ -967,17 +964,13 @@ fn load_intrinsics(
     clippy::too_many_lines,
 )]
 fn run_calibrate(args: &CalibrateArgs) -> anyhow::Result<()> {
-    let target = CheckerboardTarget::new(
-        args.rows,
-        args.cols,
-        args.square_size_mm / 1000.0,
-    )
-    .with_context(|| {
-        format!(
-            "invalid checkerboard target ({}×{} inner corners, {} mm squares)",
-            args.rows, args.cols, args.square_size_mm
-        )
-    })?;
+    let target = CheckerboardTarget::new(args.rows, args.cols, args.square_size_mm / 1000.0)
+        .with_context(|| {
+            format!(
+                "invalid checkerboard target ({}×{} inner corners, {} mm squares)",
+                args.rows, args.cols, args.square_size_mm
+            )
+        })?;
 
     info!(
         frames = %args.frames.display(),
@@ -1012,14 +1005,11 @@ fn run_calibrate(args: &CalibrateArgs) -> anyhow::Result<()> {
         }
         detect_bar_for_callback.set_position(current as u64);
     };
-    let detect_result = detect_corners_in_directory_with_progress(
-        &args.frames,
-        target,
-        &mut on_progress,
-    );
+    let detect_result =
+        detect_corners_in_directory_with_progress(&args.frames, target, &mut on_progress);
     detect_bar.finish_and_clear();
-    let (views, stats) = detect_result
-        .with_context(|| format!("detect corners in {}", args.frames.display()))?;
+    let (views, stats) =
+        detect_result.with_context(|| format!("detect corners in {}", args.frames.display()))?;
     info!(
         successful_views = views.len(),
         skipped_no_board = stats.skipped_no_board,
@@ -1041,9 +1031,8 @@ fn run_calibrate(args: &CalibrateArgs) -> anyhow::Result<()> {
     // the seconds-to-tens-of-seconds it takes; the
     // bris-calibrate solve emits its own info! lines on
     // completion so the spinner is purely visual.
-    let solve_spinner = indicatif::ProgressBar::new_spinner().with_message(
-        "running bundle adjustment…",
-    );
+    let solve_spinner =
+        indicatif::ProgressBar::new_spinner().with_message("running bundle adjustment…");
     solve_spinner.enable_steady_tick(std::time::Duration::from_millis(120));
     let solve_result = calibrate(&views);
     solve_spinner.finish_and_clear();
@@ -1108,10 +1097,19 @@ fn print_diagnosis(d: &bris_calibrate::Diagnosis) {
         return;
     }
     eprintln!();
-    eprintln!("Diagnosis: {} ({} issue{})", d.overall.label(), d.issues.len(),
-        if d.issues.len() == 1 { "" } else { "s" });
+    eprintln!(
+        "Diagnosis: {} ({} issue{})",
+        d.overall.label(),
+        d.issues.len(),
+        if d.issues.len() == 1 { "" } else { "s" }
+    );
     for issue in &d.issues {
-        eprintln!("  [{}] {}: {}", issue.level.label(), issue.code, issue.message);
+        eprintln!(
+            "  [{}] {}: {}",
+            issue.level.label(),
+            issue.code,
+            issue.message
+        );
         eprintln!("       → {}", issue.remediation);
     }
 }

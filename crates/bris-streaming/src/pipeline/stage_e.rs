@@ -91,10 +91,10 @@
 //! 3. `multi_sight_fix` returns Ok (≥ 2 sights with non-singular
 //!    azimuth diversity).
 
+use super::queue::{BodyRecord, FrameId, HorizonRecord, Storage};
 use crate::config::EngineConfig;
 use crate::fix::{DominantSource, PublishedFix};
 use crate::pipeline::BodyDetection;
-use super::queue::{BodyRecord, FrameId, HorizonRecord, Storage};
 use bris_almanac::{body_apparent_place, ApparentPlace, Observer, SolarSystemBody};
 use bris_core::time::Tt;
 use bris_core::{Sigma, Uncertain};
@@ -227,10 +227,7 @@ impl SightWindow {
             .iter()
             .enumerate()
             .map(|(i, s)| (i, s.altitude_sigma_rad))
-            .max_by(|a, b| {
-                a.1.partial_cmp(&b.1)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            })
+            .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
             .expect("window is non-empty (sights.len() == capacity > 0)");
         if sight.altitude_sigma_rad < worst_sigma {
             self.sights[worst_idx] = sight;
@@ -268,7 +265,9 @@ impl SightWindow {
     /// `source_frame_id`. Used by Stage E to dedup: a body
     /// record produces at most one sight in the window.
     pub(crate) fn contains_source(&self, source_frame_id: FrameId) -> bool {
-        self.sights.iter().any(|s| s.source_frame_id == source_frame_id)
+        self.sights
+            .iter()
+            .any(|s| s.source_frame_id == source_frame_id)
     }
 
     /// Snapshot the per-publication change counters and
@@ -330,7 +329,13 @@ pub(crate) fn run(
     let now_tt = candidates
         .iter()
         .map(|c| c.body_tt)
-        .reduce(|a, b| if a.julian_date() >= b.julian_date() { a } else { b })
+        .reduce(|a, b| {
+            if a.julian_date() >= b.julian_date() {
+                a
+            } else {
+                b
+            }
+        })
         .or_else(|| window.iter().map(|s| s.anchor_tt).next());
     let mut inserted = 0_usize;
     for cand in candidates {
@@ -375,9 +380,7 @@ pub(crate) fn run(
         Some(t) => t.elapsed() >= Duration::from_millis(cfg.min_fix_publication_interval_ms),
     };
     if !throttle_elapsed {
-        debug!(
-            "Stage E: skipping publication (throttle window not yet elapsed)",
-        );
+        debug!("Stage E: skipping publication (throttle window not yet elapsed)",);
         return out;
     }
     out.published = try_publish(window, now_tt);
@@ -522,10 +525,7 @@ fn reduce_to_sight(
             Ok(vec![Sight {
                 lop,
                 anchor_tt: c.body_tt,
-                altitude_sigma_rad: observed
-                    .sigma
-                    .combine(apparent.altitude_sigma)
-                    .value(),
+                altitude_sigma_rad: observed.sigma.combine(apparent.altitude_sigma).value(),
                 body: SightBody::SolarSystem(body),
                 azimuth_rad: apparent.direction.azimuth,
                 source_frame_id: c.body.frame_id,
@@ -562,9 +562,9 @@ fn reduce_to_sight(
             // error; just nothing to emit.
             Ok(Vec::new())
         }
-        BodyDetection::None => unreachable!(
-            "BodyDetection::None records are filtered out at queue admission",
-        ),
+        BodyDetection::None => {
+            unreachable!("BodyDetection::None records are filtered out at queue admission",)
+        }
     }
 }
 
@@ -590,15 +590,10 @@ fn expand_identified_star(
     // Observed altitude via the platesolve crate's helper:
     // takes catalog vec → attitude-rotated camera ray →
     // horizon-relative altitude.
-    let observed_altitude = bris_platesolve::star_altitude(
-        ident,
-        attitude,
-        intrinsics,
-        horizon,
-        per_star_sigma,
-    )
-    .map_err(ReduceError::Measure)?
-    .altitude;
+    let observed_altitude =
+        bris_platesolve::star_altitude(ident, attitude, intrinsics, horizon, per_star_sigma)
+            .map_err(ReduceError::Measure)?
+            .altitude;
 
     let computed = Uncertain::new(apparent.direction.altitude, apparent.altitude_sigma);
     let lop = line_of_position(
@@ -779,7 +774,8 @@ mod tests {
         // The replacement should have removed one of the
         // σ=0.01 sights, not added a fourth.
         assert!(
-            w.iter().any(|s| (s.altitude_sigma_rad - 0.001).abs() < 1e-12),
+            w.iter()
+                .any(|s| (s.altitude_sigma_rad - 0.001).abs() < 1e-12),
             "the new better-σ sight should be present"
         );
     }
@@ -845,10 +841,7 @@ mod tests {
     fn try_publish_succeeds_for_two_sights_with_diversity() {
         let mut w = SightWindow::default();
         w.try_insert(dummy_sight(0.001, 0.0, 0.0), 5);
-        w.try_insert(
-            dummy_sight(0.001, std::f64::consts::FRAC_PI_2, 0.0),
-            5,
-        );
+        w.try_insert(dummy_sight(0.001, std::f64::consts::FRAC_PI_2, 0.0), 5);
         let now = Some(Tt::from_julian_date(JD_J2000));
         let published = try_publish(&w, now).expect("two diverse sights must yield a fix");
         assert_eq!(published.n_sights, 2);

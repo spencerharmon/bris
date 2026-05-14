@@ -111,11 +111,7 @@ mod tests {
 
     #[test]
     fn output_contains_all_five_sentences_in_order() {
-        let s = format_fix_as_nmea(
-            &sample_fix(),
-            sample_utc(),
-            QualityThresholds::default(),
-        );
+        let s = format_fix_as_nmea(&sample_fix(), sample_utc(), QualityThresholds::default());
         let gll = s.find("$GPGLL").expect("missing $GPGLL");
         let rmc = s.find("$GPRMC").expect("missing $GPRMC");
         let gga = s.find("$GPGGA").expect("missing $GPGGA");
@@ -129,11 +125,7 @@ mod tests {
 
     #[test]
     fn each_sentence_terminates_with_crlf() {
-        let s = format_fix_as_nmea(
-            &sample_fix(),
-            sample_utc(),
-            QualityThresholds::default(),
-        );
+        let s = format_fix_as_nmea(&sample_fix(), sample_utc(), QualityThresholds::default());
         // Five sentences = five \r\n.
         let crlf_count = s.matches("\r\n").count();
         assert_eq!(crlf_count, 5, "expected 5 \\r\\n terminators in:\n{s}");
@@ -141,11 +133,7 @@ mod tests {
 
     #[test]
     fn pbris_fix_includes_engine_summary_fields() {
-        let s = format_fix_as_nmea(
-            &sample_fix(),
-            sample_utc(),
-            QualityThresholds::default(),
-        );
+        let s = format_fix_as_nmea(&sample_fix(), sample_utc(), QualityThresholds::default());
         // n_sights=3, azimuth_spread π/2 ≈ 90°, dominant=horizon.
         assert!(s.contains(",3,"), "missing n_sights=3 in:\n{s}");
         assert!(s.contains(",90.00,"), "missing 90° spread in:\n{s}");

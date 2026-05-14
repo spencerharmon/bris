@@ -109,10 +109,23 @@ pub fn yuyv_to_grayscale_u16(
     height: u32,
 ) -> Result<Vec<u16>, FormatError> {
     if !width.is_multiple_of(2) {
-        return Err(FormatError::OddWidth { format: "YUYV", width });
+        return Err(FormatError::OddWidth {
+            format: "YUYV",
+            width,
+        });
     }
-    let pixel_count = (width as usize)
-        .checked_mul(height as usize)
+    let pixel_count =
+        (width as usize)
+            .checked_mul(height as usize)
+            .ok_or(FormatError::BufferSizeMismatch {
+                format: "YUYV",
+                width,
+                height,
+                expected: usize::MAX,
+                actual: bytes.len(),
+            })?;
+    let expected = pixel_count
+        .checked_mul(2)
         .ok_or(FormatError::BufferSizeMismatch {
             format: "YUYV",
             width,
@@ -120,13 +133,6 @@ pub fn yuyv_to_grayscale_u16(
             expected: usize::MAX,
             actual: bytes.len(),
         })?;
-    let expected = pixel_count.checked_mul(2).ok_or(FormatError::BufferSizeMismatch {
-        format: "YUYV",
-        width,
-        height,
-        expected: usize::MAX,
-        actual: bytes.len(),
-    })?;
     if bytes.len() != expected {
         return Err(FormatError::BufferSizeMismatch {
             format: "YUYV",
@@ -253,7 +259,14 @@ mod tests {
         // Frame constructor; this test just confirms the
         // converter doesn't panic on them.)
         let err = yuyv_to_grayscale_u16(&[0; 4], 0, 0).unwrap_err();
-        assert!(matches!(err, FormatError::BufferSizeMismatch { expected: 0, actual: 4, .. }));
+        assert!(matches!(
+            err,
+            FormatError::BufferSizeMismatch {
+                expected: 0,
+                actual: 4,
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -265,7 +278,10 @@ mod tests {
         assert!(
             matches!(
                 err,
-                FormatError::OddWidth { format: "YUYV", width: 3 }
+                FormatError::OddWidth {
+                    format: "YUYV",
+                    width: 3
+                }
             ),
             "expected OddWidth, got {err:?}"
         );

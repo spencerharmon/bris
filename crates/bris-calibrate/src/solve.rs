@@ -135,8 +135,7 @@ pub fn calibrate(views: &[DetectedView]) -> Result<CalibrationResult, SolveError
         .set_input(dataset)
         .map_err(|e| SolveError::Solver(format!("set_input: {e}")))?;
     debug!(views = views.len(), "bris-calibrate: starting solve");
-    run_planar(&mut session)
-        .map_err(|e| SolveError::Solver(format!("run_calibration: {e}")))?;
+    run_planar(&mut session).map_err(|e| SolveError::Solver(format!("run_calibration: {e}")))?;
     let export = session
         .export()
         .map_err(|e| SolveError::Solver(format!("export: {e}")))?;

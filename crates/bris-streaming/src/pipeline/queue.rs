@@ -409,9 +409,13 @@ impl Storage {
             .collect();
         // Newest capture time in the ring (the rolling
         // stitching-window anchor for condition 3).
-        let newest_tt: Option<Tt> = self.ring.iter().map(|f| f.frame_tt).reduce(
-            |a, b| if a.julian_date() >= b.julian_date() { a } else { b },
-        );
+        let newest_tt: Option<Tt> = self.ring.iter().map(|f| f.frame_tt).reduce(|a, b| {
+            if a.julian_date() >= b.julian_date() {
+                a
+            } else {
+                b
+            }
+        });
 
         let before = self.ring.len();
         let mut keep = Vec::with_capacity(self.ring.len());
@@ -654,13 +658,21 @@ mod tests {
         storage.admit_frame(FrameId(0), f0.capture_tt, f0);
         storage.admit_frame(FrameId(1), f1.capture_tt, f1);
         storage.admit_frame(FrameId(2), f2.capture_tt, f2);
-        storage.admit_records(FrameId(1), f1_tt, day_centroid(0.5), HorizonStageOutcome::None);
+        storage.admit_records(
+            FrameId(1),
+            f1_tt,
+            day_centroid(0.5),
+            HorizonStageOutcome::None,
+        );
         assert_eq!(storage.ring_len(), 3);
         let evicted = storage.evict(2.0);
         assert_eq!(evicted, 1, "only f0 should be evictable");
         assert!(storage.frame(FrameId(0)).is_none());
         assert!(storage.frame(FrameId(1)).is_some(), "f1 has record");
-        assert!(storage.frame(FrameId(2)).is_some(), "f2 is newest, recency-protected");
+        assert!(
+            storage.frame(FrameId(2)).is_some(),
+            "f2 is newest, recency-protected"
+        );
     }
 
     #[test]
@@ -677,7 +689,12 @@ mod tests {
         storage.admit_frame(FrameId(0), f0.capture_tt, f0);
         storage.admit_frame(FrameId(1), f1.capture_tt, f1);
         storage.admit_frame(FrameId(2), f2.capture_tt, f2);
-        storage.admit_records(FrameId(0), f0_tt, day_centroid(0.5), HorizonStageOutcome::None);
+        storage.admit_records(
+            FrameId(0),
+            f0_tt,
+            day_centroid(0.5),
+            HorizonStageOutcome::None,
+        );
         let evicted = storage.evict(2.5);
         assert_eq!(evicted, 0, "all three frames must be retained");
     }
@@ -699,12 +716,20 @@ mod tests {
         storage.admit_frame(FrameId(0), f0.capture_tt, f0);
         storage.admit_frame(FrameId(1), f1.capture_tt, f1);
         storage.admit_frame(FrameId(2), f2.capture_tt, f2);
-        storage.admit_records(FrameId(0), f0_tt, day_centroid(0.5), HorizonStageOutcome::None);
+        storage.admit_records(
+            FrameId(0),
+            f0_tt,
+            day_centroid(0.5),
+            HorizonStageOutcome::None,
+        );
         let evicted = storage.evict(0.5);
         assert_eq!(evicted, 1);
         assert!(storage.frame(FrameId(0)).is_some(), "f0 record-protected");
         assert!(storage.frame(FrameId(1)).is_none(), "f1 unprotected");
-        assert!(storage.frame(FrameId(2)).is_some(), "f2 newest, recency-protected");
+        assert!(
+            storage.frame(FrameId(2)).is_some(),
+            "f2 newest, recency-protected"
+        );
     }
 
     #[test]
@@ -726,7 +751,10 @@ mod tests {
             );
         }
         assert_eq!(storage.ring_len(), 2);
-        assert!(storage.frame(FrameId(0)).is_none(), "oldest evicted by capacity");
+        assert!(
+            storage.frame(FrameId(0)).is_none(),
+            "oldest evicted by capacity"
+        );
         assert!(storage.frame(FrameId(1)).is_some());
         assert!(storage.frame(FrameId(2)).is_some());
         // Body queue should have dropped the record sourced
@@ -746,7 +774,12 @@ mod tests {
         let f = dummy_frame(0.0);
         let tt = f.capture_tt;
         storage.admit_frame(FrameId(0), tt, f);
-        storage.admit_records(FrameId(0), tt, BodyDetection::None, HorizonStageOutcome::None);
+        storage.admit_records(
+            FrameId(0),
+            tt,
+            BodyDetection::None,
+            HorizonStageOutcome::None,
+        );
         assert_eq!(storage.body_queue_len(), 0);
         assert_eq!(storage.horizon_queue_len(), 0);
     }
@@ -774,9 +807,19 @@ mod tests {
         let f1 = dummy_frame(1.0);
         let tt1 = f1.capture_tt;
         storage.admit_frame(FrameId(0), tt0, f0);
-        storage.admit_records(FrameId(0), tt0, BodyDetection::Night(few_peaks), HorizonStageOutcome::None);
+        storage.admit_records(
+            FrameId(0),
+            tt0,
+            BodyDetection::Night(few_peaks),
+            HorizonStageOutcome::None,
+        );
         storage.admit_frame(FrameId(1), tt1, f1);
-        storage.admit_records(FrameId(1), tt1, BodyDetection::Night(many_peaks), HorizonStageOutcome::None);
+        storage.admit_records(
+            FrameId(1),
+            tt1,
+            BodyDetection::Night(many_peaks),
+            HorizonStageOutcome::None,
+        );
         let order: Vec<u64> = storage.body_records().map(|r| r.frame_id.0).collect();
         assert_eq!(
             order,
@@ -810,6 +853,9 @@ mod tests {
         let neg = SigmaKey::from_f64(-1.0);
         assert!((neg.value() - 0.0).abs() < f64::EPSILON);
         let normal = SigmaKey::from_f64(0.5);
-        assert!(normal < nan, "normal σ should sort before NaN-promoted-to-inf");
+        assert!(
+            normal < nan,
+            "normal σ should sort before NaN-promoted-to-inf"
+        );
     }
 }

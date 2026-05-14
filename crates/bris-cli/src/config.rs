@@ -169,10 +169,10 @@ pub(crate) fn load_config(path: Option<&Path>) -> Result<RawConfig> {
         // empty.
         return Ok(RawConfig::default());
     }
-    let text = std::fs::read_to_string(&p)
-        .with_context(|| format!("read config file {}", p.display()))?;
-    let cfg: RawConfig = toml::from_str(&text)
-        .with_context(|| format!("parse config file {}", p.display()))?;
+    let text =
+        std::fs::read_to_string(&p).with_context(|| format!("read config file {}", p.display()))?;
+    let cfg: RawConfig =
+        toml::from_str(&text).with_context(|| format!("parse config file {}", p.display()))?;
     Ok(cfg)
 }
 
@@ -239,7 +239,9 @@ impl ResolvedServeConfig {
         let device = cli_device
             .or_else(|| camera.and_then(|c| c.device.clone()))
             .unwrap_or_else(|| PathBuf::from("/dev/video0"));
-        let width = cli_width.or_else(|| camera.and_then(|c| c.width)).unwrap_or(640);
+        let width = cli_width
+            .or_else(|| camera.and_then(|c| c.width))
+            .unwrap_or(640);
         let height = cli_height
             .or_else(|| camera.and_then(|c| c.height))
             .unwrap_or(480);
@@ -307,7 +309,9 @@ impl ResolvedCaptureConfig {
         let device = cli_device
             .or_else(|| camera.and_then(|c| c.device.clone()))
             .unwrap_or_else(|| PathBuf::from("/dev/video0"));
-        let width = cli_width.or_else(|| camera.and_then(|c| c.width)).unwrap_or(640);
+        let width = cli_width
+            .or_else(|| camera.and_then(|c| c.width))
+            .unwrap_or(640);
         let height = cli_height
             .or_else(|| camera.and_then(|c| c.height))
             .unwrap_or(480);
@@ -381,8 +385,7 @@ latitudo = 47.6  # typo
 ";
         let err = toml::from_str::<RawConfig>(text).unwrap_err();
         assert!(
-            err.to_string().contains("latitudo")
-                || err.to_string().contains("unknown field"),
+            err.to_string().contains("latitudo") || err.to_string().contains("unknown field"),
             "expected unknown-field error, got: {err}"
         );
     }
@@ -439,7 +442,17 @@ device = "/dev/video2"
     fn resolve_serve_errors_on_missing_required_lat() {
         let file = RawConfig::default();
         let err = ResolvedServeConfig::resolve(
-            &file, None, None, None, None, None, Some(0.0), None, false, None, None,
+            &file,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(0.0),
+            None,
+            false,
+            None,
+            None,
         )
         .unwrap_err();
         assert!(err.to_string().contains("latitude"), "got: {err}");
@@ -462,8 +475,7 @@ addr = "10.0.0.1:10110"
         let resolved = ResolvedServeConfig::resolve(
             &file, None, None, None, None, None, None, None,
             true, // --nmea-stdout adds a second sink
-            None,
-            None,
+            None, None,
         )
         .unwrap();
         assert_eq!(resolved.nmea_sinks.len(), 2);
@@ -477,9 +489,7 @@ addr = "10.0.0.1:10110"
         // the default path, which is tested by relying on
         // the dev environment not having ~/.config/bris/config.toml
         // — verified manually.)
-        let bogus = std::path::PathBuf::from(
-            "/definitely/does/not/exist/bris-config-test.toml",
-        );
+        let bogus = std::path::PathBuf::from("/definitely/does/not/exist/bris-config-test.toml");
         let err = load_config(Some(&bogus)).unwrap_err();
         assert!(
             err.to_string().contains("does not exist"),

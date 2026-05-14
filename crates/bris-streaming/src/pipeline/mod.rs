@@ -62,8 +62,8 @@ use bris_almanac::{body_apparent_place, Observer, SolarSystemBody};
 use bris_core::time::Tt;
 use bris_core::Sigma;
 use bris_vision::{
-    centroid_saturated_body_in_mask, classify, detect_peaks, detect_peaks_above_horizon,
-    Centroid, Classification, Condition, Frame, HorizonLine, Peak, SaturatedBodyConfig,
+    centroid_saturated_body_in_mask, classify, detect_peaks, detect_peaks_above_horizon, Centroid,
+    Classification, Condition, Frame, HorizonLine, Peak, SaturatedBodyConfig,
 };
 use tracing::{debug, trace, warn};
 
@@ -266,12 +266,9 @@ fn detect_night_peaks(
     horizon: Option<HorizonLine>,
 ) -> BodyDetection {
     let peaks = match horizon {
-        Some(line) => detect_peaks_above_horizon(
-            frame,
-            cfg.peak_cfg,
-            line,
-            cfg.peak_horizon_margin_px,
-        ),
+        Some(line) => {
+            detect_peaks_above_horizon(frame, cfg.peak_cfg, line, cfg.peak_horizon_margin_px)
+        }
         None => detect_peaks(frame, cfg.peak_cfg),
     };
     if peaks.is_empty() {
@@ -305,9 +302,9 @@ fn detect_twilight(
         // (it only returns Day or None); IdentifiedStars
         // certainly can't (Stage D hasn't run yet). Fall
         // through to night for any non-Day variant.
-        BodyDetection::None
-        | BodyDetection::Night(_)
-        | BodyDetection::IdentifiedStars(_) => detect_night_peaks(frame, cfg, horizon),
+        BodyDetection::None | BodyDetection::Night(_) | BodyDetection::IdentifiedStars(_) => {
+            detect_night_peaks(frame, cfg, horizon)
+        }
     }
 }
 
@@ -471,16 +468,8 @@ mod tests {
         match outcome.body {
             BodyDetection::Day(c) => {
                 // Centroid should land near the frame center.
-                assert!(
-                    (c.x - 64.0).abs() < 1.0,
-                    "centroid x off-center: {}",
-                    c.x
-                );
-                assert!(
-                    (c.y - 64.0).abs() < 1.0,
-                    "centroid y off-center: {}",
-                    c.y
-                );
+                assert!((c.x - 64.0).abs() < 1.0, "centroid x off-center: {}", c.x);
+                assert!((c.y - 64.0).abs() < 1.0, "centroid y off-center: {}", c.y);
             }
             other => panic!("expected Day centroid, got {other:?}"),
         }
@@ -514,7 +503,12 @@ mod tests {
         // If the enum gains a new variant, this test (and the
         // engine's stage-counter logic) need to be updated in
         // lockstep.
-        for variant in [Condition::Day, Condition::Night, Condition::Twilight, Condition::Unusable] {
+        for variant in [
+            Condition::Day,
+            Condition::Night,
+            Condition::Twilight,
+            Condition::Unusable,
+        ] {
             let _matches_known_variant = matches!(
                 variant,
                 Condition::Day | Condition::Night | Condition::Twilight | Condition::Unusable

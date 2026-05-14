@@ -181,11 +181,7 @@ fn try_sky_region(
     }
 }
 
-fn try_night(
-    frame: &Frame,
-    cfg: &EngineConfig,
-    best: &mut Option<(HorizonDetector, HorizonLine)>,
-) {
+fn try_night(frame: &Frame, cfg: &EngineConfig, best: &mut Option<(HorizonDetector, HorizonLine)>) {
     match detect_horizon_night(frame, cfg.night_horizon_cfg) {
         Ok(line) => {
             trace!(

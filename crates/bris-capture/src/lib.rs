@@ -78,7 +78,7 @@ pub mod time;
 mod v4l2;
 
 pub use error::CaptureError;
-pub use format::{yuyv_to_grayscale_u16, widen_u8_to_u16, FormatError};
+pub use format::{widen_u8_to_u16, yuyv_to_grayscale_u16, FormatError};
 pub use time::{buffer_to_mid_exposure_tt, MonotonicAnchor, TimestampError};
 #[cfg(feature = "v4l2")]
 pub use v4l2::{

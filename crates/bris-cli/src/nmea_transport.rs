@@ -116,8 +116,8 @@ impl TcpServerSink {
     /// Returns an `io::Error` if the bind fails (port in
     /// use, permission denied for low ports, etc.).
     pub(crate) fn bind(addr: SocketAddr) -> Result<Self> {
-        let listener = TcpListener::bind(addr)
-            .with_context(|| format!("bind TCP NMEA listener on {addr}"))?;
+        let listener =
+            TcpListener::bind(addr).with_context(|| format!("bind TCP NMEA listener on {addr}"))?;
         listener
             .set_nonblocking(true)
             .context("set_nonblocking on TCP listener")?;
@@ -155,7 +155,10 @@ impl TcpServerSink {
                         warn!(error = %e, "TCP NMEA server: set_write_timeout failed; dropping client");
                         continue;
                     }
-                    clients.lock().unwrap_or_else(std::sync::PoisonError::into_inner).push(stream);
+                    clients
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .push(stream);
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                     // No pending connection; sleep briefly and re-poll

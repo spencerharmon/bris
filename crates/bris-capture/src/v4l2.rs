@@ -144,10 +144,7 @@ impl V4l2Capture {
     /// - [`CaptureError::UnsupportedResolution`] if the
     ///   camera lists YUYV but doesn't support the requested
     ///   width/height for it.
-    pub fn open(
-        config: V4l2Config,
-        intrinsics: Intrinsics,
-    ) -> Result<Self, CaptureError> {
+    pub fn open(config: V4l2Config, intrinsics: Intrinsics) -> Result<Self, CaptureError> {
         info!(
             device = %config.device_path.display(),
             width = config.width,
@@ -426,12 +423,12 @@ fn convert_to_frame(
     ctx: &ConvertContext,
 ) -> Result<Frame, CaptureError> {
     let pixels = yuyv_to_grayscale_u16(bytes, ctx.width, ctx.height)?;
-    let buffer_utc = ctx
-        .anchor
-        .buffer_timestamp_to_utc(buffer_monotonic)
-        .ok_or(CaptureError::Timestamp(
-            crate::time::TimestampError::NonFinite,
-        ))?;
+    let buffer_utc =
+        ctx.anchor
+            .buffer_timestamp_to_utc(buffer_monotonic)
+            .ok_or(CaptureError::Timestamp(
+                crate::time::TimestampError::NonFinite,
+            ))?;
     let tt = buffer_to_mid_exposure_tt(buffer_utc, ctx.exposure_us)?;
     let frame = Frame::new(
         ctx.width,

@@ -570,5 +570,4 @@ mod tests {
         assert!(s.contains(",300,"), "expected oldest_age=300 in {s}");
         assert!(s.contains(",horizon*"), "expected dominant=horizon in {s}");
     }
-
 }

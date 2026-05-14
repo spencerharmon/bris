@@ -169,9 +169,9 @@ impl PublishedFix {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bris_core::time::{Tt, JD_J2000};
     use bris_core::{Latitude, Longitude};
     use bris_nav::Fix;
-    use bris_core::time::{Tt, JD_J2000};
 
     fn dummy_published(n_sights: usize, age: f64, dominant: DominantSource) -> PublishedFix {
         PublishedFix {

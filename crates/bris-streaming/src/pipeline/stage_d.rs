@@ -93,14 +93,11 @@ pub(crate) fn run(
     // pass &[Peak] to plate_solve and reassemble afterwards.
     let peaks = match body {
         BodyDetection::Night(peaks) => std::mem::take(peaks),
-        BodyDetection::Day(_)
-        | BodyDetection::IdentifiedStars(_)
-        | BodyDetection::None => return StageDOutcome::Skipped,
+        BodyDetection::Day(_) | BodyDetection::IdentifiedStars(_) | BodyDetection::None => {
+            return StageDOutcome::Skipped
+        }
     };
-    trace!(
-        peak_count = peaks.len(),
-        "Stage D: attempting plate solve"
-    );
+    trace!(peak_count = peaks.len(), "Stage D: attempting plate solve");
     match plate_solve(&peaks, &frame.intrinsics, db, cfg) {
         Ok(result) => {
             trace!(
@@ -167,7 +164,12 @@ mod tests {
             mean_intensity: 50_000.0,
             position_sigma_px: bris_core::Sigma::new(0.5).unwrap(),
         });
-        let outcome = run(&mut body, &dummy_frame(), Some(&db), PlateSolveConfig::default());
+        let outcome = run(
+            &mut body,
+            &dummy_frame(),
+            Some(&db),
+            PlateSolveConfig::default(),
+        );
         assert_eq!(outcome, StageDOutcome::Skipped);
         assert!(matches!(body, BodyDetection::Day(_)));
     }
@@ -200,7 +202,11 @@ mod tests {
         assert_eq!(outcome, StageDOutcome::NoMatch);
         match body {
             BodyDetection::Night(restored) => {
-                assert_eq!(restored.len(), peaks.len(), "peaks must be restored on no-match");
+                assert_eq!(
+                    restored.len(),
+                    peaks.len(),
+                    "peaks must be restored on no-match"
+                );
             }
             other => panic!("expected Night to be restored, got {other:?}"),
         }

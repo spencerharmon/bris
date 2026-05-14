@@ -142,9 +142,7 @@ fn update_stage_counters(
     } else {
         state.stages[STAGE_B].entered += 1;
         match &outcome.body {
-            BodyDetection::Day(_)
-            | BodyDetection::Night(_)
-            | BodyDetection::IdentifiedStars(_) => {
+            BodyDetection::Day(_) | BodyDetection::Night(_) | BodyDetection::IdentifiedStars(_) => {
                 state.stages[STAGE_B].produced += 1;
             }
             BodyDetection::None => {
@@ -319,11 +317,7 @@ impl StreamingEngine {
         // Run Stages A + B + C synchronously. Pass the
         // hysteresis state by mutable reference so it advances
         // by exactly one observation per frame.
-        let mut outcome = process_frame(
-            &frame,
-            &self.config,
-            &mut state.classifier_hysteresis,
-        );
+        let mut outcome = process_frame(&frame, &self.config, &mut state.classifier_hysteresis);
         let frame_tt = outcome.frame_tt;
 
         // ---- Stage D: plate solving (night/twilight only) ----
@@ -346,11 +340,7 @@ impl StreamingEngine {
         // ~10-30 s in release) and re-run Stage D on this very
         // frame. Subsequent frames will use the cached DB
         // lock-free.
-        let stage_d_outcome = match (
-            stage_d_outcome,
-            &outcome.body,
-            self.plate_db.get(),
-        ) {
+        let stage_d_outcome = match (stage_d_outcome, &outcome.body, self.plate_db.get()) {
             (StageDOutcome::Skipped, BodyDetection::Night(_), None) => {
                 info!(
                     "Stage D: lazy plate-solver build triggered by first night frame \
@@ -383,13 +373,13 @@ impl StreamingEngine {
         // the body detection (which carries a Vec<Peak> in
         // the night case and shouldn't be cloned).
         update_stage_counters(&mut state, &outcome, stage_d_outcome);
-        let StageOutcome {
-            body, horizon, ..
-        } = outcome;
+        let StageOutcome { body, horizon, .. } = outcome;
         // Move `frame` into the ring buffer; the records into
         // their queues.
         state.storage.admit_frame(frame_id, frame_tt, frame);
-        state.storage.admit_records(frame_id, frame_tt, body, horizon);
+        state
+            .storage
+            .admit_records(frame_id, frame_tt, body, horizon);
         let evicted = state.storage.evict(self.config.stitching_window_seconds);
 
         // ---- Stage E: pair selection + sight window + fix ----
@@ -419,9 +409,7 @@ impl StreamingEngine {
             // mpsc design "channel closed = no consumer
             // listening" is the documented end-of-stream.
             if self.fix_tx.send(*published).is_err() {
-                debug!(
-                    "Stage E: fix-stream consumer disconnected; published fix dropped"
-                );
+                debug!("Stage E: fix-stream consumer disconnected; published fix dropped");
             }
         }
 
@@ -639,7 +627,8 @@ mod tests {
     }
 
     #[test]
-    fn push_frame_drives_stage_a_and_records_classification() {        // After pushing one frame, Stage A's counters should be
+    fn push_frame_drives_stage_a_and_records_classification() {
+        // After pushing one frame, Stage A's counters should be
         // (entered=1, produced=1) and last_classification should
         // be populated. This is the integration test that
         // verifies push_frame actually invokes the pipeline,
@@ -647,7 +636,10 @@ mod tests {
         let engine = StreamingEngine::new(EngineConfig::new(Observer::default_dev()));
         engine.push_frame(dummy_frame()).unwrap();
         let diag = engine.diagnostics();
-        assert_eq!(diag.stages[0].entered, 1, "Stage A should have entered once");
+        assert_eq!(
+            diag.stages[0].entered, 1,
+            "Stage A should have entered once"
+        );
         assert_eq!(
             diag.stages[0].produced, 1,
             "Stage A always produces (classifier is total)"
@@ -737,10 +729,7 @@ mod tests {
     /// Build a synthetic frame containing both a saturated
     /// bright disk (body) and a sharp horizontal sky/sea
     /// boundary (horizon) at the supplied TT.
-    #[allow(
-        clippy::cast_sign_loss,
-        clippy::cast_possible_truncation,
-    )]
+    #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
     fn body_plus_horizon_frame(tt: bris_core::time::Tt) -> Frame {
         let w = 128_u32;
         let h = 128_u32;
@@ -771,15 +760,7 @@ mod tests {
                 }
             }
         }
-        Frame::new(
-            w,
-            h,
-            pixels,
-            tt,
-            1000,
-            Intrinsics::placeholder(w, h),
-        )
-        .unwrap()
+        Frame::new(w, h, pixels, tt, 1000, Intrinsics::placeholder(w, h)).unwrap()
     }
 
     #[test]
@@ -847,14 +828,15 @@ mod tests {
         let t0 = bris_core::time::Tt::from_julian_date(bris_core::time::JD_J2000);
         engine.push_frame(body_plus_horizon_frame(t0)).unwrap();
         // No fix yet (only 1 sight, LSQ needs ≥ 2).
-        assert!(rx.try_recv().unwrap().is_none(), "no fix expected after 1 push");
+        assert!(
+            rx.try_recv().unwrap().is_none(),
+            "no fix expected after 1 push"
+        );
 
         // Second push: 1 hour later in TT (1/24 days).
         // Sun is still well above horizon; azimuth has moved
         // ~15°. Both reduce_to_sight calls succeed.
-        let t1 = bris_core::time::Tt::from_julian_date(
-            bris_core::time::JD_J2000 + 1.0 / 24.0,
-        );
+        let t1 = bris_core::time::Tt::from_julian_date(bris_core::time::JD_J2000 + 1.0 / 24.0);
         engine.push_frame(body_plus_horizon_frame(t1)).unwrap();
         let diag = engine.diagnostics();
         assert_eq!(
@@ -865,14 +847,11 @@ mod tests {
         // A fix should have been published. The exact
         // numerical content is meaningless (synthetic data)
         // but the channel must have received something.
-        let published = rx
-            .try_recv()
-            .expect("fix channel still open")
-            .expect(
-                "expected a PublishedFix on the channel after two diverse-azimuth pushes \
+        let published = rx.try_recv().expect("fix channel still open").expect(
+            "expected a PublishedFix on the channel after two diverse-azimuth pushes \
                  (if this fails, check that the test's two TTs give the Sun ≥ a few \
                  degrees of azimuth diversity — the multi_sight_fix singularity threshold)",
-            );
+        );
         assert_eq!(published.n_sights, 2);
         assert!(
             published.azimuth_spread_rad > 0.0,
@@ -889,7 +868,7 @@ mod tests {
     #[allow(
         clippy::cast_possible_truncation,
         clippy::cast_sign_loss,
-        clippy::cast_possible_wrap,
+        clippy::cast_possible_wrap
     )]
     fn night_peak_frame(tt: bris_core::time::Tt, n_peaks: u32) -> Frame {
         let w = 128_u32;
@@ -910,15 +889,7 @@ mod tests {
                 }
             }
         }
-        Frame::new(
-            w,
-            h,
-            pixels,
-            tt,
-            1000,
-            Intrinsics::placeholder(w, h),
-        )
-        .unwrap()
+        Frame::new(w, h, pixels, tt, 1000, Intrinsics::placeholder(w, h)).unwrap()
     }
 
     #[test]
@@ -949,9 +920,7 @@ mod tests {
         // Push a night frame at a TT when the Sun is below
         // horizon at Greenwich (so the classifier reports
         // Night, not Twilight).
-        let tt = bris_core::time::Tt::from_julian_date(
-            bris_core::time::JD_J2000 + 0.5,
-        );
+        let tt = bris_core::time::Tt::from_julian_date(bris_core::time::JD_J2000 + 0.5);
         engine.push_frame(night_peak_frame(tt, 8)).unwrap();
         // Post-condition: lazy build fired.
         assert!(
@@ -1023,10 +992,10 @@ mod tests {
         let engine = StreamingEngine::new(cfg);
         let bright = u16::MAX / 2; // image evidence: Day
         let dark = 50_u16; // image evidence: Night
-        // Use J2000 noon: Sun is up at Greenwich, so the
-        // almanac evidence is Day. Image-bright = Day
-        // agreement; image-dark with high-Sun = disagreement
-        // → conservative pick = Twilight.
+                           // Use J2000 noon: Sun is up at Greenwich, so the
+                           // almanac evidence is Day. Image-bright = Day
+                           // agreement; image-dark with high-Sun = disagreement
+                           // → conservative pick = Twilight.
         let tt0 = bris_core::time::Tt::from_julian_date(bris_core::time::JD_J2000);
         for _ in 0..10 {
             engine.push_frame(uniform_frame(tt0, bright)).unwrap();
@@ -1084,9 +1053,7 @@ mod tests {
         // at most 5 should ever be in the ring.
         let base = bris_core::time::JD_J2000;
         for i in 0..50_u32 {
-            let tt = bris_core::time::Tt::from_julian_date(
-                base + f64::from(i) * 0.1 / 86_400.0,
-            );
+            let tt = bris_core::time::Tt::from_julian_date(base + f64::from(i) * 0.1 / 86_400.0);
             engine.push_frame(dummy_frame_at(tt)).unwrap();
             assert!(
                 engine.diagnostics().ring_buffer_depth <= 5,
@@ -1134,9 +1101,7 @@ mod tests {
         let base = bris_core::time::JD_J2000;
         // 10 frames at 1-second spacing.
         for i in 0..10_u32 {
-            let tt = bris_core::time::Tt::from_julian_date(
-                base + f64::from(i) / 86_400.0,
-            );
+            let tt = bris_core::time::Tt::from_julian_date(base + f64::from(i) / 86_400.0);
             engine.push_frame(dummy_frame_at(tt)).unwrap();
         }
         // After 10 frames at t=0..9 with a 2-second stitching
@@ -1197,9 +1162,7 @@ mod tests {
         let base = bris_core::time::JD_J2000;
         // 5 frames in reverse TT order.
         for i in (0..5_u32).rev() {
-            let tt = bris_core::time::Tt::from_julian_date(
-                base + f64::from(i) / 86_400.0,
-            );
+            let tt = bris_core::time::Tt::from_julian_date(base + f64::from(i) / 86_400.0);
             engine.push_frame(dummy_frame_at(tt)).unwrap();
         }
         let diag = engine.diagnostics();
@@ -1248,14 +1211,14 @@ mod tests {
         let engine = StreamingEngine::new(cfg);
         let rx = engine.fix_stream().unwrap();
         engine
-            .push_frame(body_plus_horizon_frame(bris_core::time::Tt::from_julian_date(
-                bris_core::time::JD_J2000,
-            )))
+            .push_frame(body_plus_horizon_frame(
+                bris_core::time::Tt::from_julian_date(bris_core::time::JD_J2000),
+            ))
             .unwrap();
         engine
-            .push_frame(body_plus_horizon_frame(bris_core::time::Tt::from_julian_date(
-                bris_core::time::JD_J2000 + 1.0 / 24.0,
-            )))
+            .push_frame(body_plus_horizon_frame(
+                bris_core::time::Tt::from_julian_date(bris_core::time::JD_J2000 + 1.0 / 24.0),
+            ))
             .unwrap();
         let published = rx
             .try_recv()

@@ -180,9 +180,12 @@ pub fn detect_corners_in_directory_with_progress(
         .filter_map(Result::ok)
         .map(|e| e.path())
         .filter(|p| {
-            p.extension()
-                .and_then(|s| s.to_str())
-                .is_some_and(|ext| matches!(ext.to_ascii_lowercase().as_str(), "png" | "jpg" | "jpeg" | "ppm" | "pgm"))
+            p.extension().and_then(|s| s.to_str()).is_some_and(|ext| {
+                matches!(
+                    ext.to_ascii_lowercase().as_str(),
+                    "png" | "jpg" | "jpeg" | "ppm" | "pgm"
+                )
+            })
         })
         .collect();
     paths.sort();
@@ -391,7 +394,8 @@ mod tests {
     #[test]
     fn empty_directory_errors_with_no_images() {
         let dir = tempfile::tempdir().unwrap();
-        let err = detect_corners_in_directory(dir.path(), CheckerboardTarget::default()).unwrap_err();
+        let err =
+            detect_corners_in_directory(dir.path(), CheckerboardTarget::default()).unwrap_err();
         assert!(matches!(err, DetectError::NoImages(_)));
     }
 
