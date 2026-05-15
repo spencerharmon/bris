@@ -15,6 +15,7 @@ pub mod measure;
 pub mod night_horizon;
 pub mod panorama;
 pub mod peak;
+pub mod pyramid;
 pub mod ray;
 #[cfg(feature = "segmentation")]
 pub mod segment;
@@ -48,6 +49,7 @@ pub use night_horizon::{
 };
 pub use panorama::{panorama_altitude, panorama_altitude_with_detector, FrameRoles, PanoramaError};
 pub use peak::{detect_peaks, detect_peaks_above_horizon, Peak, PeakConfig};
+pub use pyramid::{FramePyramid, PyramidError, PyramidLevel};
 pub use ray::{altitude_from_rays, AltitudeMeasurement, BodyRay, CameraRay, HorizonRay};
 #[cfg(feature = "segmentation")]
 pub use segment::{
