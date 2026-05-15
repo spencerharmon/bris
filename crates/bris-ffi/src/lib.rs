@@ -227,6 +227,27 @@ pub struct FfiEngineConfig {
     /// Optional path to an ONNX segmentation model for the
     /// last-resort horizon detector. `None` disables it.
     pub segmentation_model_path: Option<String>,
+
+    /// Optional analysis resolution for Stage C (horizon
+    /// detection). When `Some((w, h))`, the engine downsamples
+    /// each pushed frame to `(w, h)` before running every
+    /// horizon detector. `None` (default) preserves the
+    /// historical "every detector sees the source frame"
+    /// behavior.
+    ///
+    /// `(w, h)` must preserve the source frame's aspect ratio
+    /// and not exceed the source dimensions; mismatches
+    /// degrade to source resolution rather than failing.
+    /// See the engine-side
+    /// [`bris_streaming::EngineConfig::horizon_analysis_size`]
+    /// for the underlying contract.
+    pub horizon_analysis_width: Option<u32>,
+    /// Companion to `horizon_analysis_width`; both must be set
+    /// together. UniFFI doesn't expose tuple types as cleanly
+    /// as paired optional scalars, so we expose the two
+    /// dimensions as separate fields and combine them
+    /// engine-side.
+    pub horizon_analysis_height: Option<u32>,
 }
 
 impl FfiEngineConfig {
@@ -239,6 +260,20 @@ impl FfiEngineConfig {
         cfg.min_fix_publication_interval_ms = self.min_fix_publication_interval_ms;
         cfg.input_ring_capacity = self.input_ring_capacity as usize;
         cfg.segmentation_model_path = self.segmentation_model_path.map(Into::into);
+        cfg.horizon_analysis_size = match (
+            self.horizon_analysis_width,
+            self.horizon_analysis_height,
+        ) {
+            (Some(w), Some(h)) => Some((w, h)),
+            (None, None) => None,
+            _ => {
+                return Err(FfiError::InvalidArgument {
+                    detail:
+                        "horizon_analysis_width and horizon_analysis_height must be set together"
+                            .to_owned(),
+                });
+            }
+        };
         Ok(cfg)
     }
 }
@@ -404,6 +439,14 @@ pub struct DiagnosticSnapshot {
     /// TT Julian Date of the most recent published fix, or
     /// `None`.
     pub last_published_fix_tt_jd: Option<f64>,
+    /// Width of the resolution Stage C ran at on the most
+    /// recent processed frame. `None` until the first frame.
+    /// Equals the source frame's width unless an analysis
+    /// resolution was configured and the pyramid level
+    /// successfully delivered it.
+    pub last_horizon_analysis_width: Option<u32>,
+    /// Companion to `last_horizon_analysis_width`.
+    pub last_horizon_analysis_height: Option<u32>,
 }
 
 impl From<&EngineDiagnostics> for DiagnosticSnapshot {
@@ -445,6 +488,8 @@ impl From<&EngineDiagnostics> for DiagnosticSnapshot {
             last_published_fix_tt_jd: d
                 .last_published_fix_tt
                 .map(bris_core::time::Tt::julian_date),
+            last_horizon_analysis_width: d.last_horizon_analysis_size.map(|(w, _)| w),
+            last_horizon_analysis_height: d.last_horizon_analysis_size.map(|(_, h)| h),
         }
     }
 }

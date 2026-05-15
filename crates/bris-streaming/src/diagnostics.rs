@@ -64,6 +64,15 @@ pub struct EngineDiagnostics {
     /// Capture timestamp (TT) of the most recent published fix.
     /// `None` until the first publication.
     pub last_published_fix_tt: Option<Tt>,
+
+    /// Resolution `(width, height)` at which Stage C (horizon
+    /// detection) ran on the most recent processed frame.
+    /// Equals the source frame's resolution unless
+    /// [`crate::EngineConfig::horizon_analysis_size`] was set
+    /// to a smaller resolution and the pyramid level was
+    /// successfully computed. `None` until the first frame
+    /// has completed Stage C.
+    pub last_horizon_analysis_size: Option<(u32, u32)>,
 }
 
 /// Per-stage processing statistics.

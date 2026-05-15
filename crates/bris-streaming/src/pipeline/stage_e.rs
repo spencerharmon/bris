@@ -511,7 +511,7 @@ fn reduce_to_sight(
     let ring_frame = storage
         .frame(c.body.frame_id)
         .ok_or(ReduceError::FrameEvicted)?;
-    let intrinsics = ring_frame.frame.intrinsics;
+    let intrinsics = ring_frame.frame().intrinsics;
     let jd_ut1 = c.body.frame_tt.julian_date();
 
     match &c.body.detection {
