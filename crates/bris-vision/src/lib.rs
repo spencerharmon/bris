@@ -15,6 +15,7 @@ pub mod measure;
 pub mod night_horizon;
 pub mod panorama;
 pub mod peak;
+pub mod ray;
 #[cfg(feature = "segmentation")]
 pub mod segment;
 pub mod track;
@@ -47,6 +48,7 @@ pub use night_horizon::{
 };
 pub use panorama::{panorama_altitude, panorama_altitude_with_detector, FrameRoles, PanoramaError};
 pub use peak::{detect_peaks, detect_peaks_above_horizon, Peak, PeakConfig};
+pub use ray::{altitude_from_rays, AltitudeMeasurement, BodyRay, CameraRay, HorizonRay};
 #[cfg(feature = "segmentation")]
 pub use segment::{
     detect_horizon_via_segmentation, detect_horizon_via_segmentation_with_column_mask, load_model,
