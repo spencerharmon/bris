@@ -86,10 +86,15 @@ For the end-to-end pipeline architecture and data flow, see
   `FramePyramid` (lazy-cached per-stage downsamples + scaled
   intrinsics). Step 3b (engine + Storage uses pyramids;
   horizon detector consumes a pyramid level via a config
-  knob) and step 4 (camera-space stitching in `panorama` for
-  cross-resolution composition) are scoped in plan.org
-  Phase 2 → "Per-stage resolution architecture" with the
-  next-commit shape spelled out. Lens selection in
+  knob) and step 4 (camera-space stitching primitive
+  `track_rotation` via Kabsch over ray pairs) landed. The
+  three deferred follow-ups all landed too: extraction of
+  the duplicated Kabsch + 3×3 SVD into a new shared
+  `bris-math` workspace crate; RANSAC over ray pairs in
+  `track_rotation` (`TrackConfig.ransac_inlier_rad`,
+  default 0.003 rad); and `panorama_altitude_via_rotation`
+  for cross-resolution stitching at the panorama
+  composition layer. Lens selection in
   `bris-android` (telephoto-sensor selection per
   `readme.org`'s "use a long focal length" guidance) is
   tracked under Phase 7 and is independently
@@ -112,7 +117,7 @@ Phase 7 (session-based mobile sight UX — distinct from the Phase
 (magnitude-consistency verification check, observer-location
 external prior) that are queued.
 
-**Workspace metrics:** 498 tests passing + 4 ignored
+**Workspace metrics:** 504 tests passing + 4 ignored
 (slow/release-only), 9 crates with active code (added
 `bris-ffi` and `bris-collector` in the diagnostic-collection
 spike), zero clippy warnings under `--all-targets -- -D

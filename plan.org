@@ -698,25 +698,44 @@ references to the regression tests that pin the behavior. See
       pixel-rigid ~track~, then converts each matched
       (a_pixel, b_pixel) pair to a unit-ray pair via that
       frame's intrinsics and feeds the Kabsch solver.
-    - ~bris_vision::kabsch~ duplicates the Jacobi-SVD Kabsch
-      implementation from ~bris-platesolve~ (the dependency
-      direction prevents direct sharing). The two copies
-      should be kept in lockstep; eventual cleanup is to
-      extract Kabsch and the 3×3 SVD into a shared lower
-      layer (a ~bris-math~ crate or under ~bris-core~).
+    - *(DONE; commit 13ec89e)* The duplicated Jacobi-SVD
+      Kabsch implementation in ~bris-vision::kabsch~ and
+      ~bris-platesolve::kabsch~ has been extracted into a new
+      shared workspace crate ~bris-math~. Both consumers now
+      depend on ~bris-math = { workspace = true }~ and use
+      ~bris_math::kabsch::{kabsch_rotation, rotate_vec,
+      KabschError}~. ~bris-platesolve~'s public surface still
+      re-exports the three names for backwards compat with
+      external consumers; ~bris-vision~ uses ~bris_math::kabsch~
+      directly.
     - The existing pixel-rigid ~track~ stays for same-
       resolution same-camera fast paths where the camera-
       space round-trip is unnecessary work.
 
-    Two follow-ups remain in plan.org Phase 2 stitching
-    territory (not part of step 4):
-    - ~panorama_altitude~ integration with track_rotation
-      (so the panorama pipeline can compose horizon-detected-
-      at-low-res with body-centroided-at-high-res).
-    - RANSAC over the camera-space ray pairs (today
-      ~track_rotation~ feeds every match to Kabsch directly;
-      noise-rejection via RANSAC would tighten the residual
-      on real-world frames).
+    All three deferred follow-ups have landed:
+    - *(DONE; commit 13ec89e)* Extract Kabsch + 3×3 SVD into
+      shared ~bris-math~ workspace crate.
+    - *(DONE; commit b595604)* RANSAC over the camera-space ray
+      pairs in ~track_rotation~. ~TrackConfig.ransac_inlier_rad~
+      (default 0.003 rad ≈ 10 arcmin) controls the per-pair
+      angular inlier threshold. The Kabsch fit is wrapped in a
+      3-pair sample-and-score consensus loop; only the largest
+      inlier set is refit. ~RotationBetweenFrames.inlier_count~
+      now meaningfully reports survivors (was always equal to
+      ~candidate_count~).
+    - *(DONE; commit 250aff1)*
+      ~panorama::panorama_altitude_via_rotation~ +
+      ~panorama_altitude_via_rotation_with_detector~ — the
+      camera-space sibling of ~panorama_altitude~. Builds the
+      cross-frame chain via ~track_rotation~ and the final
+      altitude via ~altitude_from_rays~. Each adjacent pair
+      runs at its own intrinsics, so a chain spanning a
+      low-resolution horizon detection and a high-resolution
+      body centroid is now natively supported.
+      ~PanoramaError~ gains ~DegenerateHorizonRay~ for the
+      (unrealistic) case where the horizon line passes
+      through the principal point and won't lift to a plane
+      normal.
 
 * Phase 2.5: Real-data validation against captured footage
   The user has captured a substantial test corpus (see ~progress.md~
