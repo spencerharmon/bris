@@ -116,12 +116,12 @@ pub struct RotationBetweenFrames {
     /// Rotation matrix R such that `ray_b ≈ R · ray_a`.
     /// 3×3 in row-major order.
     pub matrix: [f64; 9],
-    /// Number of feature-matched ray pairs that contributed to
-    /// the Kabsch fit.
+    /// Number of feature-matched ray pairs that survived
+    /// RANSAC outlier rejection and contributed to the final
+    /// Kabsch fit.
     pub inlier_count: u32,
-    /// Number of feature matches considered (some may have
-    /// been rejected as RANSAC outliers when the ransac path
-    /// is added; today every match feeds Kabsch directly).
+    /// Total number of feature matches considered (the input
+    /// to the RANSAC pass, before outlier rejection).
     pub candidate_count: u32,
     /// RMS great-circle residual `acos(dot(R · ray_a, ray_b))`
     /// over the inlier ray pairs, radians.
@@ -168,6 +168,15 @@ pub struct TrackConfig {
     pub ransac_iterations: u32,
     /// RANSAC inlier threshold (pixels). Default 2.0.
     pub ransac_inlier_px: f64,
+    /// RANSAC inlier threshold for camera-space ray fitting
+    /// (radians). Used by [`track_rotation`] when classifying
+    /// per-pair angular residuals against a candidate Kabsch
+    /// rotation. Default 0.003 rad (~10.3 arcmin), chosen to
+    /// admit honest NCC quantization noise (~1 px ÷ f for
+    /// typical f ≈ 1000 px ⇒ ~0.001 rad per pair, with some
+    /// headroom for correlated patches) while still rejecting
+    /// gross mismatches.
+    pub ransac_inlier_rad: f64,
     /// Minimum inlier count to accept a transform. Default 8.
     pub min_inliers: u32,
 }
@@ -181,6 +190,7 @@ impl Default for TrackConfig {
             search_radius_px: 30,
             ransac_iterations: 200,
             ransac_inlier_px: 2.0,
+            ransac_inlier_rad: 0.003,
             min_inliers: 8,
         }
     }
@@ -499,32 +509,140 @@ pub fn track_rotation(
         rays_b.push([rx, ry, rz]);
     }
 
-    let matrix = kabsch::kabsch_rotation(&rays_a, &rays_b).map_err(|_| {
-        // Kabsch refused; treat as low-confidence so the
-        // caller's error path is consistent with the pixel-
-        // rigid track().
-        TrackError::LowConfidence(0, candidate_count, cfg.min_inliers)
-    })?;
-
-    // Per-pair angular residual: angle between (R · ray_a) and
-    // ray_b. Sum of squares averaged → RMS.
-    let mut sq_sum = 0.0_f64;
-    for (a, b) in rays_a.iter().zip(rays_b.iter()) {
-        let mapped = kabsch::rotate_vec(&matrix, *a);
-        let dot = (mapped[0] * b[0] + mapped[1] * b[1] + mapped[2] * b[2]).clamp(-1.0, 1.0);
-        let theta = dot.acos();
-        sq_sum += theta * theta;
+    let matrix;
+    let inlier_count;
+    let rms_residual_rad;
+    match ransac_rotation(
+        &rays_a,
+        &rays_b,
+        cfg.ransac_iterations,
+        cfg.ransac_inlier_rad,
+        cfg.min_inliers,
+    ) {
+        Some(fit) => {
+            matrix = fit.matrix;
+            inlier_count = fit.inlier_count;
+            rms_residual_rad = fit.rms_residual_rad;
+        }
+        None => {
+            return Err(TrackError::LowConfidence(
+                0,
+                candidate_count,
+                cfg.min_inliers,
+            ));
+        }
     }
-    let rms_residual_rad = (sq_sum / matched.len() as f64).sqrt();
 
     let rotation_sigma = Sigma::new(rms_residual_rad).unwrap_or(Sigma::ZERO);
 
     Ok(RotationBetweenFrames {
         matrix,
-        inlier_count: candidate_count,
+        inlier_count,
         candidate_count,
         rms_residual_rad,
         rotation_sigma,
+    })
+}
+
+/// Fit result from [`ransac_rotation`].
+struct RotationFit {
+    matrix: [f64; 9],
+    inlier_count: u32,
+    rms_residual_rad: f64,
+}
+
+/// RANSAC over camera-space ray pairs: sample 3 pairs, fit
+/// Kabsch, score every pair by angular residual against the
+/// inlier threshold, refit Kabsch over the best inlier set.
+///
+/// Returns `None` when no candidate hypothesis admits at least
+/// `min_inliers` pairs, or when the final inlier-set Kabsch
+/// refuses (e.g. the inliers are colinear).
+fn ransac_rotation(
+    rays_a: &[[f64; 3]],
+    rays_b: &[[f64; 3]],
+    iterations: u32,
+    inlier_rad: f64,
+    min_inliers: u32,
+) -> Option<RotationFit> {
+    debug_assert_eq!(rays_a.len(), rays_b.len());
+    let n = rays_a.len();
+    if n < 3 {
+        return None;
+    }
+
+    // Seed PRNG deterministically from the data so identical
+    // inputs produce identical fits across runs.
+    let mut seed: u64 = 0xA5A5_5A5A_C3C3_3C3C;
+    for (a, b) in rays_a.iter().zip(rays_b.iter()) {
+        for v in a.iter().chain(b.iter()) {
+            seed ^= v.to_bits().wrapping_mul(0x9E37_79B9_7F4A_7C15);
+            seed = seed.rotate_left(13);
+        }
+    }
+
+    let mut best_inliers: Vec<usize> = Vec::new();
+
+    for _ in 0..iterations {
+        // Sample 3 distinct indices.
+        let i = next_idx(&mut seed, n);
+        let mut j = next_idx(&mut seed, n);
+        if j == i {
+            j = (j + 1) % n;
+        }
+        let mut k = next_idx(&mut seed, n);
+        if k == i || k == j {
+            k = (k + 2) % n;
+            if k == i || k == j {
+                k = (k + 1) % n;
+            }
+        }
+        if k == i || k == j {
+            continue;
+        }
+
+        let sample_a = [rays_a[i], rays_a[j], rays_a[k]];
+        let sample_b = [rays_b[i], rays_b[j], rays_b[k]];
+        let Ok(matrix) = kabsch::kabsch_rotation(&sample_a, &sample_b) else {
+            continue;
+        };
+
+        let mut inliers: Vec<usize> = Vec::new();
+        for (idx, (a, b)) in rays_a.iter().zip(rays_b.iter()).enumerate() {
+            let mapped = kabsch::rotate_vec(&matrix, *a);
+            let dot = (mapped[0] * b[0] + mapped[1] * b[1] + mapped[2] * b[2]).clamp(-1.0, 1.0);
+            let theta = dot.acos();
+            if theta <= inlier_rad {
+                inliers.push(idx);
+            }
+        }
+        if inliers.len() > best_inliers.len() {
+            best_inliers = inliers;
+        }
+    }
+
+    if (best_inliers.len() as u32) < min_inliers {
+        return None;
+    }
+
+    // Refit Kabsch over the best inlier set.
+    let in_a: Vec<[f64; 3]> = best_inliers.iter().map(|&i| rays_a[i]).collect();
+    let in_b: Vec<[f64; 3]> = best_inliers.iter().map(|&i| rays_b[i]).collect();
+    let matrix = kabsch::kabsch_rotation(&in_a, &in_b).ok()?;
+
+    let mut sq_sum = 0.0_f64;
+    for (a, b) in in_a.iter().zip(in_b.iter()) {
+        let mapped = kabsch::rotate_vec(&matrix, *a);
+        let dot = (mapped[0] * b[0] + mapped[1] * b[1] + mapped[2] * b[2]).clamp(-1.0, 1.0);
+        let theta = dot.acos();
+        sq_sum += theta * theta;
+    }
+    let rms_residual_rad = (sq_sum / in_a.len() as f64).sqrt();
+
+    Some(RotationFit {
+        matrix,
+        inlier_count: best_inliers.len() as u32,
+        rms_residual_rad,
     })
 }
 
@@ -1004,5 +1122,94 @@ mod tests {
         };
         let err = track_rotation(&blank, &blank, cfg).unwrap_err();
         assert!(matches!(err, TrackError::InsufficientCorners(_, _)));
+    }
+
+    #[test]
+    fn ransac_rotation_rejects_gross_outliers() {
+        // Build 10 ray pairs that all agree on a small rotation
+        // about the y-axis (theta ≈ 0.02 rad), then corrupt 3
+        // of them with rays that point in arbitrary directions.
+        // RANSAC must converge on the inlier set and report a
+        // rotation close to the true one.
+        let theta = 0.02_f64;
+        let (sin_t, cos_t) = theta.sin_cos();
+        // Rotation about y-axis (row-major): R · v
+        let r_true: [f64; 9] = [cos_t, 0.0, sin_t, 0.0, 1.0, 0.0, -sin_t, 0.0, cos_t];
+
+        // 10 distinct rays in frame A.
+        let rays_a: Vec<[f64; 3]> = (0..10)
+            .map(|i| {
+                let f = f64::from(i);
+                let v = [0.1 + 0.05 * f, -0.2 + 0.04 * f, 1.0];
+                let len = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
+                [v[0] / len, v[1] / len, v[2] / len]
+            })
+            .collect();
+        // True frame B rays = R · A.
+        let mut rays_b: Vec<[f64; 3]> = rays_a
+            .iter()
+            .map(|a| kabsch::rotate_vec(&r_true, *a))
+            .collect();
+        // Corrupt indices 2, 5, 7 with junk rays (way off).
+        for &i in &[2usize, 5, 7] {
+            // Push them well outside the inlier_rad cone.
+            let bad = [0.6_f64, 0.7, 0.4];
+            let len = (bad[0] * bad[0] + bad[1] * bad[1] + bad[2] * bad[2]).sqrt();
+            rays_b[i] = [bad[0] / len, bad[1] / len, bad[2] / len];
+        }
+
+        let fit = ransac_rotation(&rays_a, &rays_b, 200, 0.005, 6)
+            .expect("RANSAC should find an inlier set of 7");
+        assert_eq!(
+            fit.inlier_count, 7,
+            "expected 7 inliers (10 - 3 outliers), got {}",
+            fit.inlier_count
+        );
+        // RMS residual over inliers should be tiny (clean
+        // synthetic data, no NCC quantization).
+        assert!(
+            fit.rms_residual_rad < 1e-4,
+            "residual {} should be near 0 for clean inliers",
+            fit.rms_residual_rad
+        );
+        // Recovered rotation: applying it to ray_a[0] should
+        // closely match the true r_true · ray_a[0].
+        let mapped = kabsch::rotate_vec(&fit.matrix, rays_a[0]);
+        let truth = kabsch::rotate_vec(&r_true, rays_a[0]);
+        for axis in 0..3 {
+            assert!(
+                (mapped[axis] - truth[axis]).abs() < 1e-4,
+                "component {axis}: {} vs truth {}",
+                mapped[axis],
+                truth[axis]
+            );
+        }
+    }
+
+    #[test]
+    fn ransac_rotation_returns_none_when_inliers_below_threshold() {
+        // 4 rays all agree, 6 are random noise; min_inliers=6
+        // means the largest consensus set (4) falls short.
+        let rays_a: Vec<[f64; 3]> = (0..10)
+            .map(|i| {
+                let f = f64::from(i);
+                let v = [0.1 + 0.03 * f, 0.2 - 0.02 * f, 1.0];
+                let len = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
+                [v[0] / len, v[1] / len, v[2] / len]
+            })
+            .collect();
+        let mut rays_b = rays_a.clone(); // first 4 perfectly aligned (identity)
+        for (i, b) in rays_b.iter_mut().enumerate().skip(4) {
+            // Decorrelate the rest; each gets its own random-ish direction.
+            let f = f64::from(u32::try_from(i).unwrap());
+            let bad = [0.5 + 0.1 * f, -0.3 + 0.07 * f, 0.4 - 0.02 * f];
+            let len = (bad[0] * bad[0] + bad[1] * bad[1] + bad[2] * bad[2]).sqrt();
+            *b = [bad[0] / len, bad[1] / len, bad[2] / len];
+        }
+        let result = ransac_rotation(&rays_a, &rays_b, 200, 0.005, 6);
+        assert!(
+            result.is_none(),
+            "should return None when no consensus reaches min_inliers"
+        );
     }
 }
