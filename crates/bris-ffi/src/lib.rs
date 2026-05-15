@@ -260,20 +260,18 @@ impl FfiEngineConfig {
         cfg.min_fix_publication_interval_ms = self.min_fix_publication_interval_ms;
         cfg.input_ring_capacity = self.input_ring_capacity as usize;
         cfg.segmentation_model_path = self.segmentation_model_path.map(Into::into);
-        cfg.horizon_analysis_size = match (
-            self.horizon_analysis_width,
-            self.horizon_analysis_height,
-        ) {
-            (Some(w), Some(h)) => Some((w, h)),
-            (None, None) => None,
-            _ => {
-                return Err(FfiError::InvalidArgument {
+        cfg.horizon_analysis_size =
+            match (self.horizon_analysis_width, self.horizon_analysis_height) {
+                (Some(w), Some(h)) => Some((w, h)),
+                (None, None) => None,
+                _ => {
+                    return Err(FfiError::InvalidArgument {
                     detail:
                         "horizon_analysis_width and horizon_analysis_height must be set together"
                             .to_owned(),
                 });
-            }
-        };
+                }
+            };
         Ok(cfg)
     }
 }

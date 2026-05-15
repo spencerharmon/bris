@@ -46,9 +46,9 @@
 )]
 
 use crate::frame::Frame;
-use crate::kabsch;
 use crate::lens::pixel_ray_direction;
 use bris_core::Sigma;
+use bris_math::kabsch;
 
 /// A detected corner in a frame.
 #[derive(Debug, Clone, Copy)]

@@ -10,7 +10,6 @@ pub mod frame;
 pub mod fusion;
 pub mod horizon;
 pub mod io;
-pub mod kabsch;
 pub mod lens;
 pub mod measure;
 pub mod night_horizon;

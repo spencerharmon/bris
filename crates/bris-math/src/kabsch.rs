@@ -1,57 +1,27 @@
 //! Kabsch algorithm: closed-form least-squares rotation matrix
 //! mapping one set of unit vectors onto another.
 //!
-//! Used by the camera-space stitcher
-//! (`bris_vision::track::track_rotation`) to recover the
-//! rotation between two camera frames from N feature-matched
-//! ray pairs.
+//! Used by:
 //!
-//! # Why this lives here as well as in bris-platesolve
+//! - `bris-platesolve` to compute camera attitude from N
+//!   identified-star pairs (catalog-frame unit vector ↔
+//!   camera-frame ray). With N ≥ 3 non-collinear pairs the
+//!   solution is unique; with N = 4 (the minimum useful for
+//!   plate solving) it's over-determined in the right way to
+//!   be robust to small per-star errors.
+//! - `bris-vision::track::track_rotation` for camera-space
+//!   stitching: feature-matched pixel pairs lifted to ray
+//!   pairs via each frame's intrinsics, then Kabsch-fitted
+//!   into a rotation that maps frame A's rays onto frame B's.
 //!
-//! `bris-platesolve` has its own copy of this same algorithm
-//! (it uses Kabsch to recover camera attitude from N identified-
-//! star pairs). The dependency graph runs platesolve → vision,
-//! so vision can't reach into platesolve to share the
-//! implementation. Rather than restructure the workspace into a
-//! `bris-math` crate today, we maintain two copies. They should
-//! be kept in lockstep when bug-fixed; long-term cleanup is to
-//! extract Kabsch (and the small 3×3 SVD it depends on) into a
-//! shared lower layer.
-
-#![allow(
-    // Numerical / linear-algebra code routinely uses single-letter
-    // variable names (i, j, k for indices; u, v, s for SVD).
-    // Mirrors the suppression on the platesolve copy.
-    clippy::many_single_char_names,
-    clippy::similar_names,
-    // Loop indices into arrays of paired indices are clearer with
-    // the numeric form than with iter().enumerate() in this code.
-    clippy::needless_range_loop,
-)]
-//!
-//! # Why this lives here as well as in bris-platesolve
-//!
-//! `bris-platesolve` has its own copy of this same algorithm
-//! (it uses Kabsch to recover camera attitude from N identified-
-//! star pairs). The dependency graph runs platesolve → vision,
-//! so vision can't reach into platesolve to share the
-//! implementation. Rather than restructure the workspace into a
-//! `bris-math` crate today, we maintain two copies. They should
-//! be kept in lockstep when bug-fixed; long-term cleanup is to
-//! extract Kabsch (and the small 3×3 SVD it depends on) into a
-//! shared lower layer.
-//!
-//! Used by the plate solver to compute camera attitude from N
-//! identified-star pairs (catalog-frame unit vector ↔ camera-frame
-//! ray). With N ≥ 3 non-collinear pairs the solution is unique;
-//! with N = 4 (the minimum useful for plate solving) it's
-//! over-determined in the right way to be robust to small per-
-//! star errors.
+//! Both consumers used to ship local copies of this file; the
+//! `bris-math` extraction lets them share. Bug-fixes here
+//! propagate to both call sites.
 //!
 //! # Algorithm
 //!
-//! Given paired unit vectors `a_i` (catalog frame) and `b_i`
-//! (camera frame):
+//! Given paired unit vectors `a_i` (frame A) and `b_i`
+//! (frame B):
 //!
 //! 1. Compute the cross-correlation matrix `H = sum(a_i^T · b_i)`
 //!    (3×3).
@@ -60,8 +30,8 @@
 //!    case.
 //! 4. Rotation: `R = V · diag(1, 1, d) · U^T`.
 //!
-//! `R` is the rotation that, applied to a catalog vector, gives
-//! the corresponding camera-frame vector: `b ≈ R · a`.
+//! `R` is the rotation that, applied to a frame-A vector, gives
+//! the corresponding frame-B vector: `b ≈ R · a`.
 //!
 //! # Implementation
 //!
@@ -70,6 +40,16 @@
 //! iterations for 3×3 matrices; total cost dominated by the
 //! constant-overhead matrix multiplications. No external linear-
 //! algebra dependency.
+
+#![allow(
+    // Numerical / linear-algebra code routinely uses single-letter
+    // variable names (i, j, k for indices; u, v, s for SVD).
+    clippy::many_single_char_names,
+    clippy::similar_names,
+    // Loop indices into arrays of paired indices are clearer with
+    // the numeric form than with iter().enumerate() in this code.
+    clippy::needless_range_loop,
+)]
 
 use std::fmt;
 
