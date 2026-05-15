@@ -2,12 +2,13 @@ package co.anomaly.bris.ui
 
 import android.Manifest
 import android.content.pm.PackageManager
-import android.util.Size
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.Preview
+import androidx.camera.core.UseCaseGroup
+import androidx.camera.core.ViewPort
 import androidx.camera.core.resolutionselector.ResolutionSelector
 import androidx.camera.core.resolutionselector.ResolutionStrategy
 import androidx.camera.lifecycle.ProcessCameraProvider
@@ -44,6 +45,7 @@ import androidx.lifecycle.compose.LocalLifecycleOwner
 import co.anomaly.bris.BuildConfig
 import co.anomaly.bris.Prefs
 import co.anomaly.bris.engine.CalibrationStore
+import co.anomaly.bris.engine.CameraConstants
 import co.anomaly.bris.engine.DebugCaptureBuffer
 import co.anomaly.bris.engine.EngineWrapper
 import co.anomaly.bris.engine.FixVerdict
@@ -239,6 +241,17 @@ private fun CameraSurface(
         val preview = Preview.Builder().build().also {
             it.setSurfaceProvider(previewView.surfaceProvider)
         }
+        // Pin every use case to the same crop rectangle. Without
+        // a shared ViewPort, PreviewView shows the full sensor
+        // crop while ImageAnalysis sees a different one — the
+        // operator would line up the horizon visually but the
+        // analyzer would be analyzing a different frame.
+        val viewport = ViewPort.Builder(
+            android.util.Rational(CameraConstants.WIDTH, CameraConstants.HEIGHT),
+            preview.targetRotation,
+        )
+            .setScaleType(ViewPort.FIT)
+            .build()
         if (captureActive) {
             val analysis = ImageAnalysis.Builder()
                 .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
@@ -246,7 +259,7 @@ private fun CameraSurface(
                     ResolutionSelector.Builder()
                         .setResolutionStrategy(
                             ResolutionStrategy(
-                                Size(LIVE_VIEW_WIDTH, LIVE_VIEW_HEIGHT),
+                                CameraConstants.SIZE,
                                 ResolutionStrategy.FALLBACK_RULE_CLOSEST_LOWER_THEN_HIGHER,
                             ),
                         )
@@ -260,25 +273,33 @@ private fun CameraSurface(
                     intrinsicsProvider = {
                         intrinsicsForResolution(
                             persistedIntrinsics,
-                            targetWidth = LIVE_VIEW_WIDTH,
-                            targetHeight = LIVE_VIEW_HEIGHT,
+                            targetWidth = CameraConstants.WIDTH,
+                            targetHeight = CameraConstants.HEIGHT,
                         )
                     },
                     debugCaptureProvider = { debugCaptureEnabled },
                     debugBuffer = debugBuffer,
                 ),
             )
+            val group = UseCaseGroup.Builder()
+                .setViewPort(viewport)
+                .addUseCase(preview)
+                .addUseCase(analysis)
+                .build()
             provider.bindToLifecycle(
                 lifecycleOwner,
                 CameraSelector.DEFAULT_BACK_CAMERA,
-                preview,
-                analysis,
+                group,
             )
         } else {
+            val group = UseCaseGroup.Builder()
+                .setViewPort(viewport)
+                .addUseCase(preview)
+                .build()
             provider.bindToLifecycle(
                 lifecycleOwner,
                 CameraSelector.DEFAULT_BACK_CAMERA,
-                preview,
+                group,
             )
         }
     }
@@ -309,10 +330,10 @@ private fun DiagnosticOverlay(
     persistedIntrinsics: CalibrationStore.PersistedIntrinsics?,
 ) {
     val calibLabel = persistedIntrinsics?.let {
-        if (it.width == LIVE_VIEW_WIDTH && it.height == LIVE_VIEW_HEIGHT) {
+        if (it.width == CameraConstants.WIDTH && it.height == CameraConstants.HEIGHT) {
             "calib: rms ${"%.2f".format(it.rmsPx)} px"
         } else {
-            "calib mismatch (${it.width}×${it.height} on ${LIVE_VIEW_WIDTH}×${LIVE_VIEW_HEIGHT})"
+            "calib mismatch (${it.width}×${it.height} on ${CameraConstants.WIDTH}×${CameraConstants.HEIGHT})"
         }
     } ?: "calib: PLACEHOLDER (run calibration)"
 
@@ -396,9 +417,6 @@ private fun intrinsicsForResolution(
     }
     return placeholderIntrinsicsForCurrentResolution()
 }
-
-private const val LIVE_VIEW_WIDTH = 1280
-private const val LIVE_VIEW_HEIGHT = 720
 
 private fun placeholderIntrinsicsForCurrentResolution(): FfiIntrinsics =
     FfiIntrinsics(

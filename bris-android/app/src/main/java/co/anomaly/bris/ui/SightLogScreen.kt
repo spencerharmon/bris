@@ -20,7 +20,11 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
+import co.anomaly.bris.engine.Exporter
 import co.anomaly.bris.engine.SightLog
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import org.json.JSONObject
 import java.io.File
 import java.text.SimpleDateFormat
@@ -113,6 +117,8 @@ fun SightLogDetailScreen(
 ) {
     val context = LocalContext.current
     val sightLog = remember(context) { SightLog.forApp(context) }
+    val exporter = remember(context) { Exporter.forApp(context) }
+    val scope = androidx.compose.runtime.rememberCoroutineScope()
     val sessionDir = remember(context, dirName) { File(sightLog.list().firstOrNull { it.name == dirName }?.absolutePath ?: "/dev/null") }
     var manifestJson by remember { mutableStateOf<String?>(null) }
     var mediaFiles by remember { mutableStateOf<List<File>>(emptyList()) }
@@ -169,6 +175,22 @@ fun SightLogDetailScreen(
             modifier = Modifier.padding(top = 16.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
+            Button(onClick = {
+                // Mirror the entry into <external-files>/exports/
+                // for adb-pull / MTP transfer. The original
+                // <external-files>/sights/<id>/ directory is also
+                // pullable, but the exports/ tree groups every
+                // kind (fix, calibration, debug capture) under a
+                // single directory the operator can sync wholesale.
+                scope.launch {
+                    val dest = withContext(Dispatchers.IO) {
+                        exporter.exportSightEntry(sessionDir)
+                    }
+                    statusText = "Saved bundle to ${dest.absolutePath}"
+                }
+            }) {
+                Text("Save bundle for transfer")
+            }
             OutlinedButton(onClick = {
                 val n = sightLog.deleteImages(sessionDir)
                 statusText = "Deleted $n image file(s); manifest + diagnostics retained."

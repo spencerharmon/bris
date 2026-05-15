@@ -24,6 +24,7 @@ import co.anomaly.bris.BuildConfig
 import co.anomaly.bris.Prefs
 import co.anomaly.bris.engine.CalibrationStore
 import co.anomaly.bris.engine.DebugCaptureBuffer
+import co.anomaly.bris.engine.Exporter
 import co.anomaly.bris.location.CoarseLocation
 import co.anomaly.bris.upload.ManifestBuilder
 import co.anomaly.bris.upload.MediaPart
@@ -243,6 +244,36 @@ fun PreUploadReviewScreen(
                 }
             },
         ) { Text("Send") }
+        Button(
+            // "Save to phone" mirrors the on-device data into
+            // <external-files>/exports/ for adb-pull / MTP
+            // transfer. Available regardless of debug mode
+            // because saving to local storage doesn't transmit
+            // anything off-device. Send-to-collector stays
+            // gated on debug mode (collector is the network
+            // surface; per AGENTS.md the diagnostic-collection
+            // UI is only shown in debug mode).
+            onClick = {
+                scope.launch {
+                    val exporter = Exporter.forApp(context)
+                    val dest = withContext(Dispatchers.IO) {
+                        when (kind) {
+                            "calibration" -> {
+                                val sess = CalibrationStore.forApp(context).latestSession()
+                                sess?.let { exporter.exportCalibrationSession(it) }
+                            }
+                            "debug_capture", "fix" -> {
+                                exporter.exportDebugCapture(debugBuffer, MAX_FRAMES_PER_SUBMISSION)
+                            }
+                            else -> null
+                        }
+                    }
+                    val msg = dest?.let { "Saved to ${it.absolutePath}" }
+                        ?: "Nothing to save (no source data found)."
+                    Toast.makeText(context, msg, Toast.LENGTH_LONG).show()
+                }
+            },
+        ) { Text("Save to phone") }
         OutlinedButton(onClick = onBack) { Text("Cancel") }
     }
 }
