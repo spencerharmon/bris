@@ -848,6 +848,64 @@ fn unix_ms_to_tt(ms: i64) -> Result<bris_core::time::Tt, FfiError> {
 /// timestamp via the embedded leap-second table. Sentences
 /// produced from the same fix are stable byte-for-byte across
 /// calls; the formatter has no hidden state.
+/// Scale intrinsics from the resolution they were calibrated
+/// against to a target runtime resolution.
+///
+/// Convenience wrapper around `bris_vision::Intrinsics::scaled_to`
+/// surfaced over the FFI so the foreign side can derive
+/// per-resolution intrinsics from a single calibrated set
+/// without reimplementing the math.
+///
+/// Behaviour: see `bris_vision::Intrinsics::scaled_to`. Same
+/// aspect-ratio constraint, same dimensionless-distortion
+/// invariant, same caveats about ISP-side warps invalidating
+/// the assumption.
+///
+/// # Errors
+///
+/// Returns [`FfiError::InvalidArgument`] for zero dimensions
+/// or aspect-ratio mismatch. The message includes both
+/// resolutions so the operator can see what was attempted.
+#[uniffi::export]
+pub fn scale_intrinsics(
+    intrinsics: FfiIntrinsics,
+    from_width: u32,
+    from_height: u32,
+    to_width: u32,
+    to_height: u32,
+) -> Result<FfiIntrinsics, FfiError> {
+    let core = intrinsics.into_core()?;
+    let scaled = core
+        .scaled_to(from_width, from_height, to_width, to_height)
+        .map_err(|e| FfiError::InvalidArgument {
+            detail: format!("scale_intrinsics: {e}"),
+        })?;
+    Ok(FfiIntrinsics {
+        fx: scaled.fx,
+        fy: scaled.fy,
+        cx: scaled.cx,
+        cy: scaled.cy,
+        k1: scaled.k1,
+        k2: scaled.k2,
+        k3: scaled.k3,
+        p1: scaled.p1,
+        p2: scaled.p2,
+    })
+}
+
+/// Format a published fix as the `$PBRIS,FIX` sentence.
+///
+/// Returns a single-element list today; reserved as a list so
+/// future engine-level diagnostics that ride on additional
+/// `$PBRIS` subtypes (UNC / TIME / SIGHT / ERR) can be appended
+/// without changing the FFI signature. Consumers (the Android
+/// debug-capture buffer; the future on-screen NMEA preview)
+/// concatenate with `\n` to produce the rolling log.
+///
+/// The sentence's UTC timestamp comes from the fix's TT
+/// timestamp via the embedded leap-second table. Sentences
+/// produced from the same fix are stable byte-for-byte across
+/// calls; the formatter has no hidden state.
 #[uniffi::export]
 #[must_use]
 pub fn format_pbris(fix: FfiPublishedFix) -> Vec<String> {

@@ -27,7 +27,7 @@ pub use condition::{
     classify, AstronomicalEvidence, Classification, Condition, ConditionConfig, ImageEvidence,
     TwilightBand,
 };
-pub use frame::{rotate_pixels, Frame, FrameError, Intrinsics, Rotation};
+pub use frame::{rotate_pixels, Frame, FrameError, Intrinsics, IntrinsicsScaleError, Rotation};
 pub use fusion::{fuse_altitudes, FrameMeasurement, FusionConfig, FusionError};
 pub use horizon::{
     body_column_mask, detect_horizon, detect_horizon_via_sky_region,

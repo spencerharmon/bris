@@ -223,6 +223,149 @@ impl Intrinsics {
             p2: 0.0,
         }
     }
+
+    /// Scale these intrinsics from the resolution they were
+    /// calibrated against (`from_width × from_height`) to a
+    /// target runtime resolution (`to_width × to_height`).
+    ///
+    /// The transformation is:
+    ///
+    /// ```text
+    /// fx_to = fx_from · (to_width  / from_width )
+    /// fy_to = fy_from · (to_height / from_height)
+    /// cx_to = cx_from · (to_width  / from_width )
+    /// cy_to = cy_from · (to_height / from_height)
+    /// ```
+    ///
+    /// Distortion coefficients (k1, k2, k3, p1, p2) are
+    /// dimensionless ratios in normalized image-plane
+    /// coordinates and **do not change** under uniform image
+    /// scaling. The same numbers carry across.
+    ///
+    /// # When this is correct
+    ///
+    /// The scaling is exact under **uniform aspect-preserving
+    /// downsample** from the calibrated resolution to the
+    /// target. That is: `to_width / from_width ==
+    /// to_height / from_height` (equivalent: same aspect
+    /// ratio).
+    ///
+    /// Concretely on Android, this matches the case where
+    /// `CameraX`'s `ResolutionSelector` delivers a resolution
+    /// that's a clean integer downsample of the camera's
+    /// native sensor resolution at the same aspect ratio.
+    /// For 16:9 capture this is the typical case.
+    ///
+    /// # When this is wrong (callers should re-calibrate)
+    ///
+    /// - Non-uniform scaling (different x and y ratios). The
+    ///   downsample stretched / squashed the image, which a
+    ///   calibration solved at the source resolution can't
+    ///   account for. Returns
+    ///   [`IntrinsicsScaleError::AspectRatioMismatch`].
+    /// - Crop-then-downsample paths where the active image
+    ///   region within the sensor changed between calibration
+    ///   and runtime. Outside the scope of this method; the
+    ///   caller must recalibrate at the runtime resolution.
+    /// - ISP-side warp / EIS / lens-correction at the resize
+    ///   step. The vendor pipeline applies an unmodeled
+    ///   transformation; intrinsics aren't recoverable by
+    ///   pure scaling. Same fix.
+    ///
+    /// The diagnostic surface (engine-side: a flag on the
+    /// per-fix output) marks every fix produced under scaled
+    /// intrinsics so the operator knows the path was taken.
+    ///
+    /// # Errors
+    ///
+    /// - [`IntrinsicsScaleError::ZeroDimension`] if any
+    ///   dimension is 0.
+    /// - [`IntrinsicsScaleError::AspectRatioMismatch`] if
+    ///   the source and target aspect ratios differ by more
+    ///   than 0.1% (a tolerance for floating-point comparison
+    ///   of 16:9, 4:3, etc.).
+    pub fn scaled_to(
+        &self,
+        from_width: u32,
+        from_height: u32,
+        to_width: u32,
+        to_height: u32,
+    ) -> Result<Self, IntrinsicsScaleError> {
+        const ASPECT_TOLERANCE: f64 = 0.001;
+        if from_width == 0 || from_height == 0 || to_width == 0 || to_height == 0 {
+            return Err(IntrinsicsScaleError::ZeroDimension);
+        }
+        // Aspect-ratio sanity check. Allow tiny floating-point
+        // slop (e.g. 16:9 vs. 1280:720 vs. 1920:1080 round
+        // identically; a sloppy 1281×720 wouldn't).
+        let from_aspect = f64::from(from_width) / f64::from(from_height);
+        let to_aspect = f64::from(to_width) / f64::from(to_height);
+        let aspect_ratio_drift = (from_aspect / to_aspect - 1.0).abs();
+        if aspect_ratio_drift > ASPECT_TOLERANCE {
+            return Err(IntrinsicsScaleError::AspectRatioMismatch {
+                from_width,
+                from_height,
+                to_width,
+                to_height,
+                relative_drift: aspect_ratio_drift,
+            });
+        }
+        let sx = f64::from(to_width) / f64::from(from_width);
+        let sy = f64::from(to_height) / f64::from(from_height);
+        Ok(Self {
+            fx: self.fx * sx,
+            fy: self.fy * sy,
+            cx: self.cx * sx,
+            cy: self.cy * sy,
+            // Distortion coefficients are dimensionless ratios
+            // in normalized coordinates; they survive uniform
+            // scaling unchanged.
+            k1: self.k1,
+            k2: self.k2,
+            k3: self.k3,
+            p1: self.p1,
+            p2: self.p2,
+        })
+    }
+}
+
+/// Errors from [`Intrinsics::scaled_to`].
+///
+/// All variants signal "a calibration produced at one
+/// resolution can't be cleanly applied at another" — the
+/// operator should recalibrate at the target resolution.
+#[derive(Debug, Clone, Copy, PartialEq, thiserror::Error)]
+pub enum IntrinsicsScaleError {
+    /// One of the dimensions was zero. Probably a programming
+    /// error upstream (a misconfigured `CameraX` selector or a
+    /// missing config field).
+    #[error("intrinsics scale: zero dimension in source or target")]
+    ZeroDimension,
+
+    /// Source and target aspect ratios differ. Per-axis
+    /// scaling would distort the principal point and the
+    /// distortion model in ways the calibration didn't
+    /// observe.
+    #[error(
+        "intrinsics scale: aspect ratio mismatch between calibration ({from_width}×{from_height}, \
+         {from_aspect:.4}) and runtime ({to_width}×{to_height}, {to_aspect:.4}); drift {relative_drift:.3}; \
+         recalibrate at the runtime resolution",
+        from_aspect = f64::from(*from_width) / f64::from(*from_height),
+        to_aspect = f64::from(*to_width) / f64::from(*to_height),
+    )]
+    AspectRatioMismatch {
+        /// Calibration resolution width.
+        from_width: u32,
+        /// Calibration resolution height.
+        from_height: u32,
+        /// Runtime resolution width.
+        to_width: u32,
+        /// Runtime resolution height.
+        to_height: u32,
+        /// `|aspect_from / aspect_to − 1|`, the relative
+        /// aspect-ratio drift.
+        relative_drift: f64,
+    },
 }
 
 /// One captured frame as it flows through the pipeline.
@@ -465,6 +608,116 @@ mod tests {
         assert!((i.cx - 320.0).abs() < 1e-12);
         assert!((i.cy - 240.0).abs() < 1e-12);
         assert!(i.k1.abs() < 1e-12 && i.k2.abs() < 1e-12 && i.k3.abs() < 1e-12);
+    }
+
+    // -----------------------------------------------------------------
+    // Intrinsics::scaled_to
+    // -----------------------------------------------------------------
+
+    /// A measured-style calibration at 4032×3024 (4:3 phone
+    /// sensor) with non-trivial distortion. Used as the source
+    /// for the scaling tests.
+    fn calib_at_4k() -> Intrinsics {
+        Intrinsics {
+            fx: 3200.0,
+            fy: 3200.0,
+            cx: 2010.0, // off-center; scaling must preserve the offset's relative position
+            cy: 1500.0,
+            k1: -0.18,
+            k2: 0.04,
+            k3: 0.00,
+            p1: 0.001,
+            p2: -0.0005,
+        }
+    }
+
+    #[test]
+    fn scaled_to_identity_is_identity() {
+        let src = calib_at_4k();
+        let scaled = src.scaled_to(4032, 3024, 4032, 3024).unwrap();
+        assert_eq!(src, scaled);
+    }
+
+    #[test]
+    #[allow(clippy::float_cmp)] // distortion fields are copied verbatim; bit-identical equality is what we want to assert
+    fn scaled_to_halves_focal_and_principal_under_2x_downsample() {
+        let src = calib_at_4k();
+        let scaled = src.scaled_to(4032, 3024, 2016, 1512).unwrap();
+        let sx = 2016.0 / 4032.0;
+        let sy = 1512.0 / 3024.0;
+        assert!((scaled.fx - src.fx * sx).abs() < 1e-9);
+        assert!((scaled.fy - src.fy * sy).abs() < 1e-9);
+        assert!((scaled.cx - src.cx * sx).abs() < 1e-9);
+        assert!((scaled.cy - src.cy * sy).abs() < 1e-9);
+        // Distortion is dimensionless and must not change.
+        assert_eq!(scaled.k1, src.k1);
+        assert_eq!(scaled.k2, src.k2);
+        assert_eq!(scaled.k3, src.k3);
+        assert_eq!(scaled.p1, src.p1);
+        assert_eq!(scaled.p2, src.p2);
+    }
+
+    #[test]
+    fn scaled_to_round_trips_through_intermediate_resolution() {
+        // A → B → A should recover the original to floating-
+        // point precision. Locks the scaling math against
+        // accidental non-multiplicative refactors.
+        let src = calib_at_4k();
+        let mid = src.scaled_to(4032, 3024, 1280, 960).unwrap();
+        let back = mid.scaled_to(1280, 960, 4032, 3024).unwrap();
+        assert!((back.fx - src.fx).abs() < 1e-9);
+        assert!((back.fy - src.fy).abs() < 1e-9);
+        assert!((back.cx - src.cx).abs() < 1e-9);
+        assert!((back.cy - src.cy).abs() < 1e-9);
+    }
+
+    #[test]
+    fn scaled_to_rejects_aspect_ratio_mismatch() {
+        let src = calib_at_4k(); // 4:3
+        // Try to scale a 4:3 calibration into a 16:9 runtime.
+        // The scaling math would silently distort principal-
+        // point and distortion behavior; refuse instead.
+        let result = src.scaled_to(4032, 3024, 1920, 1080);
+        match result {
+            Err(IntrinsicsScaleError::AspectRatioMismatch {
+                from_width,
+                from_height,
+                to_width,
+                to_height,
+                ..
+            }) => {
+                assert_eq!(from_width, 4032);
+                assert_eq!(from_height, 3024);
+                assert_eq!(to_width, 1920);
+                assert_eq!(to_height, 1080);
+            }
+            other => panic!("expected AspectRatioMismatch, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn scaled_to_accepts_tiny_aspect_drift_within_tolerance() {
+        // 1280:720 has aspect 1.7777... and 1920:1080 has the
+        // same; scaling between them is fine. Verify the
+        // tolerance permits the integer-rounding noise that
+        // shows up in real CameraX numbers.
+        let src = Intrinsics::placeholder(1920, 1080);
+        let scaled = src.scaled_to(1920, 1080, 1280, 720).unwrap();
+        // 1280/1920 = 0.6666...; placeholder fx=1000 → 666.66...
+        assert!((scaled.fx - 1000.0 * 1280.0 / 1920.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn scaled_to_rejects_zero_dimension() {
+        let src = Intrinsics::placeholder(1920, 1080);
+        assert!(matches!(
+            src.scaled_to(1920, 1080, 0, 720),
+            Err(IntrinsicsScaleError::ZeroDimension)
+        ));
+        assert!(matches!(
+            src.scaled_to(0, 1080, 1280, 720),
+            Err(IntrinsicsScaleError::ZeroDimension)
+        ));
     }
 
     // -----------------------------------------------------------------
