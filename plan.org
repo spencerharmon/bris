@@ -554,6 +554,175 @@ references to the regression tests that pin the behavior. See
    User-facing "quality" setting controlling number of frames, RANSAC
    iterations, refinement passes. Document expected runtime per tier.
 
+** Per-stage resolution architecture
+   Different pipeline stages have different optimal input
+   resolutions. Centroiding precision scales with pixel count
+   (sub-pixel fit on a saturated body benefits from every
+   extra pixel); horizon-line fitting saturates at low
+   resolution (the gradient SNR is the limit, not the pixel
+   grid); segmentation gets *worse* above its training
+   resolution (the deep features no longer match the
+   receptive field); plate solving wants full resolution for
+   peak detection but operates in resolution-free angle
+   space afterward.
+
+   Today's pipeline runs every stage on the same input frame.
+   Operator picks one resolution at the camera, every stage
+   sees that. The architecture below carves out per-stage
+   downsampling so each stage operates at its preferred
+   resolution while still composing into a single fix.
+
+   Discussed with the operator (May 2026 session); broken
+   into four steps committed independently so each is
+   reviewable in isolation. Steps 1-3a landed; 3b + 4 pending.
+
+*** DONE Step 1: Intrinsics scaling math
+    ~bris_vision::Intrinsics::scaled_to(from_w, from_h,
+    to_w, to_h)~ derives intrinsics for a target resolution
+    that's a uniform aspect-preserving downsample of the
+    calibration resolution. Focal lengths and principal-point
+    coordinates scale by the per-axis ratio; distortion
+    coefficients are dimensionless and survive scaling
+    unchanged. Aspect-ratio mismatch is rejected with a clear
+    error rather than silently producing a non-physical
+    intrinsics set.
+
+    Surfaced through the FFI as ~scale_intrinsics(intrinsics,
+    from_w, from_h, to_w, to_h)~ so the Android shell can
+    derive runtime intrinsics from a single calibration
+    rather than recalibrating per resolution.
+
+    Six unit tests; commit ~a301bf8~. Workspace test count
+    +6.
+
+*** DONE Step 2: Camera-space ray output types
+    New ~bris_vision::ray~ module:
+
+    - ~CameraRay~ — unit 3-vector in the camera frame (+x
+      right, +y down, +z toward scene). ~from_pixel(intr, x,
+      y)~ for the standard lens-model conversion.
+    - ~HorizonRay~ — horizon plane encoded as its sky-pointing
+      unit normal. ~from_line(line, intr, image_width)~ lifts
+      a pixel-coordinate ~HorizonLine~ by undistorting two
+      points on the line and taking the cross product.
+    - ~BodyRay~ — unit ray + angular σ. The σ is derived from
+      the source pixel σ via the local pixels-per-radian
+      factor (geometric mean of fx/fy).
+    - ~altitude_from_rays(body, horizon)~ —
+      ~sin(altitude) = dot(body, horizon_normal)~. Combines
+      the body's angular σ and the horizon's altitude σ in
+      quadrature. Returns radians.
+
+    Sign convention validated by tests: body in zenith →
+    altitude π/2; body on horizon → altitude 0; body below
+    horizon → altitude < 0.
+
+    The new types live alongside the existing pixel-coordinate
+    types; nothing in the existing pipeline is rewired yet.
+    Step 3b plumbs them through ~bris-streaming~ so each
+    detector emits its camera-space output directly.
+
+    Ten unit tests; commit ~a49b7d9~. Workspace test count
+    +7.
+
+*** DONE Step 3a: FramePyramid abstraction
+    ~bris_vision::pyramid::FramePyramid~ — a full-resolution
+    Frame plus a mutex-guarded cache of downsampled levels
+    keyed by target dimensions. ~pyramid.full()~ returns the
+    source zero-cost; ~pyramid.level(target_w, target_h)~
+    returns a cached level or computes one and caches it.
+
+    Each cached level holds a Frame whose intrinsics are
+    derived from the source via Step 1's ~scaled_to~, so a
+    stage consuming the level uses correctly-scaled
+    intrinsics automatically.
+
+    Box-filter downsample (mean over the proportional
+    source-pixel region per output pixel). Asking for a
+    resolution ≥ source returns the source unchanged
+    (we never upsample). Aspect-ratio mismatch is rejected
+    via Step 1's gate.
+
+    Nine unit tests; commit ~584f27c~. Workspace test count
+    +9.
+
+*** TODO Step 3b: engine integration of FramePyramid
+    Plumb the abstraction through the streaming engine so the
+    cycle-time win actually materializes:
+
+    - ~bris_streaming::Storage::admit_frame~ takes a Frame and
+      constructs a FramePyramid; ~RingFrame~ holds the
+      pyramid instead of a bare Frame. Existing call sites
+      that read ~&RingFrame.frame~ migrate to
+      ~&RingFrame.pyramid.full()~ and behave identically.
+    - ~EngineConfig~ grows per-stage analysis-resolution
+      knobs:
+      - ~horizon_analysis_size: Option<(u32, u32)>~ — when
+        ~Some((w, h))~, horizon detection runs against
+        ~pyramid.level(w, h)~ instead of the full frame.
+      - ~segmentation_analysis_size~ — likewise for the
+        segmentation horizon detector.
+      - Centroiding and peak detection always run on
+        ~pyramid.full()~ — sub-pixel precision is the point.
+    - ~bris_vision::detect_horizon~ continues to internally
+      downsample to ~cfg.working_width~; with the pyramid
+      already at the target size the detector's own
+      downsample becomes a near-identity, amortizing the
+      work across stages reading the same pyramid level.
+    - The diagnostic snapshot grows a per-stage
+      analyzed-resolution field so the operator can see "the
+      horizon ran at 480×270 (downsampled 4× from your
+      1920×1080 capture)."
+    - The FFI ~FfiEngineConfig~ gains the new knobs;
+      Android settings UI exposes them as a single "analysis
+      resolution" slider per stage.
+
+    Care item: the regression-test corpus
+    (~tests/regression/*/case.toml~) currently expects
+    pixel-coordinate horizon-line outputs against the source
+    frame. Stage-level resolution changes the working-image
+    coordinates *internally* but the publicly-reported
+    HorizonLine remains in source-frame coordinates today
+    (the existing detector already maps back). This commit
+    must preserve that contract; the regression assertions
+    don't change.
+
+*** TODO Step 4: Camera-space stitching
+    ~bris_vision::panorama~ today computes pixel-rigid
+    transforms between consecutive frames via
+    Harris+NCC+RANSAC. That assumes both frames are at the
+    same resolution. Cross-resolution stitching (frame N's
+    horizon at low-res + frame N+1's body centroid at
+    high-res) requires *rotations* between camera frames,
+    not pixel transforms.
+
+    Lift the panorama path:
+
+    - Replace the rigid-transform output with a per-pair
+      ~RotationBetweenFrames { rotation_matrix: [f64; 9],
+      rms_residual_rad: f64 }~.
+    - Compute the rotation by feature-matching pairs of
+      pixels (Harris corners or similar), converting each to
+      a camera-space ray via the source frame's intrinsics
+      (or whichever pyramid level the stitcher chose), then
+      Kabsch-fitting a rotation that maps frame-N rays onto
+      frame-(N+1) rays. The plate-solve crate already has a
+      Kabsch implementation; reuse it.
+    - ~panorama_altitude~ becomes "find body in frame B,
+      project body ray through K_B, rotate by stitcher's
+      rotation back into frame A's coordinate system, measure
+      against frame A's horizon ray." Resolution-free
+      end-to-end.
+
+    Unblocks: cross-resolution composition (Step 3b can have
+    the horizon detector run at 480p in frame N and the body
+    centroider at full-res in frame N+1; the stitcher
+    composes them in camera space without caring).
+
+    The current pixel-rigid path remains for same-resolution
+    same-frame fast paths where the camera-space round-trip
+    is unnecessary work.
+
 * Phase 2.5: Real-data validation against captured footage
   The user has captured a substantial test corpus (see ~progress.md~
   for the full inventory). Each scene exercises the algorithms against
@@ -1688,6 +1857,47 @@ references to the regression tests that pin the behavior. See
 ** TODO Mobile calibration UX
    Guided checkerboard capture or "point at a clear night sky"
    star-field auto-calibration. Persists per-device intrinsics.
+** TODO Lens selection (multi-camera Android devices)
+   Modern phones expose multiple physical cameras (ultrawide,
+   wide, telephoto) through CameraX's logical-camera API. The
+   wide lens is the default; the **telephoto** is what Bris
+   actually wants — more arcsec-per-pixel at the body
+   centroid means tighter altitude σ, exactly the win the
+   accuracy section of ~readme.org~ calls out.
+
+   Surface:
+   - Settings → Camera → Lens: radio between "Wide (1×)" and
+     "Telephoto (Nx)" plus any additional physical cameras
+     the device exposes. Enumerate via
+     ~Camera2CameraInfo.from(info).cameraCharacteristicsMap~,
+     identify telephoto by the longest ~LENS_FOCAL_LENGTHS~
+     entry.
+   - LiveScreen + CalibrationScreen pin the chosen lens via
+     ~CameraSelector.Builder().addCameraFilter { ... }~
+     filtering to the selected physical camera ID.
+   - Calibration storage extends with a ~lens_id~ key:
+     ~<external-files>/calibration/<lens-id>/<resolution>/<session-ulid>/...~
+     so a calibration solved against the wide lens doesn't
+     accidentally apply to the telephoto. The on-device
+     intrinsics-loader keys by ~(lens_id, width, height)~.
+   - First-launch default per device: pick the lens with the
+     longest focal length that delivers reasonable low-light
+     performance (heuristic: prefer non-ultrawide lenses
+     with sensor area ≥ 1/3" if available; otherwise the wide
+     default).
+
+   Cross-references:
+   - The accuracy framing in ~readme.org~ §"What the operator
+     can do" item 2 ("Use a long focal length") is the
+     architectural rationale.
+   - Telephoto FOV is small enough that body-and-horizon
+     rarely fit in one frame above modest altitudes, which
+     pushes the multi-frame stitching path
+     (~bris-vision::panorama~ + the streaming engine's
+     cross-frame pair-selection logic) into the common case
+     rather than the edge case. That path is implemented but
+     gets exercised more.
+
 ** PARTIAL Sight log review
    *Done in the sight-capture spike:* list + detail screens at
    ~bris-android~'s ~SightLogScreen~ + ~SightLogDetailScreen~.

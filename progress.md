@@ -75,6 +75,25 @@ For the end-to-end pipeline architecture and data flow, see
   threshold settings UI, frame thumbnails, map preview, and
   the foreground service for backgrounding survival are all
   tracked follow-ups.
+- **Per-stage resolution architecture (Phase 2 evolution) —
+  steps 1, 2, 3a landed; 3b + 4 pending.** Operator-driven
+  scope after a design discussion about whether to downsample
+  uniformly (silently penalizing centroiding precision) or
+  carve out per-stage resolutions. Three foundation commits:
+  `Intrinsics::scaled_to` (cross-resolution math + FFI
+  surface), `bris_vision::ray` (camera-space `HorizonRay` /
+  `BodyRay` / `CameraRay` + altitude composition), and
+  `FramePyramid` (lazy-cached per-stage downsamples + scaled
+  intrinsics). Step 3b (engine + Storage uses pyramids;
+  horizon detector consumes a pyramid level via a config
+  knob) and step 4 (camera-space stitching in `panorama` for
+  cross-resolution composition) are scoped in plan.org
+  Phase 2 → "Per-stage resolution architecture" with the
+  next-commit shape spelled out. Lens selection in
+  `bris-android` (telephoto-sensor selection per
+  `readme.org`'s "use a long focal length" guidance) is
+  tracked under Phase 7 and is independently
+  shippable.
 
 **Phase 2.5 (real-data validation): 13 regression cases** spanning
 working day, working night-with-moon, working
@@ -93,7 +112,7 @@ Phase 7 (session-based mobile sight UX — distinct from the Phase
 (magnitude-consistency verification check, observer-location
 external prior) that are queued.
 
-**Workspace metrics:** 476 tests passing + 4 ignored
+**Workspace metrics:** 498 tests passing + 4 ignored
 (slow/release-only), 9 crates with active code (added
 `bris-ffi` and `bris-collector` in the diagnostic-collection
 spike), zero clippy warnings under `--all-targets -- -D
