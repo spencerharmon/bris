@@ -46,6 +46,8 @@
 )]
 
 use crate::frame::Frame;
+use crate::kabsch;
+use crate::lens::pixel_ray_direction;
 use bris_core::Sigma;
 
 /// A detected corner in a frame.
@@ -82,6 +84,54 @@ pub struct RigidTransform {
     /// 1σ uncertainty in the rotation angle, radians, derived from
     /// the residual RMS.
     pub theta_sigma: Sigma,
+}
+
+/// Camera-space rotation between two frames captured by the
+/// same camera at (slightly) different orientations.
+///
+/// The output of [`track_rotation`]: a rotation matrix mapping
+/// frame A's camera-coordinate rays onto frame B's. With this
+/// in hand, a body detected in frame B at pixel `(x_b, y_b)`
+/// can be projected through frame B's intrinsics to a unit
+/// ray, then *rotated by the inverse of this matrix* to land
+/// in frame A's camera frame, where it can be measured against
+/// frame A's horizon plane.
+///
+/// Resolution-free at the boundary: the rotation depends only
+/// on the camera's orientation in space between the two
+/// captures. The pixel grids of frame A and frame B may
+/// differ — that's the whole point of the per-stage-resolution
+/// architecture (Phase 2 step 4: `bris-vision`'s panorama
+/// stitcher composes a low-resolution horizon detection with a
+/// high-resolution body centroid by lifting both into camera-
+/// space rays through their respective intrinsics, then
+/// composing through this rotation).
+///
+/// The rotation is computed by Kabsch on `n ≥ 3` matched ray
+/// pairs `(ray_a, ray_b)`. The RMS residual is reported in
+/// radians (great-circle distance between the rotation-mapped
+/// `ray_a` and the observed `ray_b`, averaged over inliers).
+#[derive(Debug, Clone, Copy)]
+pub struct RotationBetweenFrames {
+    /// Rotation matrix R such that `ray_b ≈ R · ray_a`.
+    /// 3×3 in row-major order.
+    pub matrix: [f64; 9],
+    /// Number of feature-matched ray pairs that contributed to
+    /// the Kabsch fit.
+    pub inlier_count: u32,
+    /// Number of feature matches considered (some may have
+    /// been rejected as RANSAC outliers when the ransac path
+    /// is added; today every match feeds Kabsch directly).
+    pub candidate_count: u32,
+    /// RMS great-circle residual `acos(dot(R · ray_a, ray_b))`
+    /// over the inlier ray pairs, radians.
+    pub rms_residual_rad: f64,
+    /// 1σ rotation uncertainty in radians, surfaced for σ
+    /// composition in downstream sight-reduction. Today we
+    /// report `rms_residual_rad` directly; a more rigorous
+    /// derivation that accounts for ray-density and
+    /// distribution is a future refinement.
+    pub rotation_sigma: Sigma,
 }
 
 /// Errors from feature tracking.
@@ -373,6 +423,108 @@ fn track_with_anchors(
         candidate_count,
         residual_rms_px: fit.residual_rms_px,
         theta_sigma,
+    })
+}
+
+/// Compute the **camera-space rotation** between two frames
+/// using the same Harris+NCC feature-matching pipeline as
+/// [`track`] but composing the matched pixel pairs into ray
+/// pairs and Kabsch-fitting a rotation.
+///
+/// This is the camera-space sibling of [`track`]. Use it
+/// when:
+///
+/// * the two frames are at different resolutions (the ray
+///   conversion handles each frame's own intrinsics);
+/// * downstream code wants a resolution-free composition
+///   (rotation matrix in camera space) rather than a pixel-
+///   space transform tied to one resolution;
+/// * cross-frame body / horizon composition needs to bridge
+///   measurements from differently-downsampled stages.
+///
+/// The rotation maps `ray_a → ray_b`: applying the result to
+/// a frame-A camera-space ray gives the corresponding frame-B
+/// camera-space ray. To go the other direction (project a
+/// frame-B detection back into frame A's coordinate system),
+/// transpose the matrix.
+///
+/// # Errors
+///
+/// Same as [`track`]: insufficient corners, insufficient
+/// matches, or a degenerate ray distribution that makes
+/// Kabsch refuse.
+pub fn track_rotation(
+    frame_a: &Frame,
+    frame_b: &Frame,
+    cfg: TrackConfig,
+) -> Result<RotationBetweenFrames, TrackError> {
+    let corners_a = detect_corners(frame_a, cfg);
+    if corners_a.len() < cfg.min_inliers as usize {
+        return Err(TrackError::InsufficientCorners(
+            corners_a.len() as u32,
+            cfg.min_inliers,
+        ));
+    }
+
+    // Match each anchor in A to its best NCC candidate in B.
+    let mut matched: Vec<((f64, f64), (f64, f64))> = Vec::new();
+    for c in &corners_a {
+        let dummy = Corner {
+            x: c.x,
+            y: c.y,
+            strength: 0.0,
+        };
+        if let Some((bx, by, _score)) = find_best_match(frame_a, frame_b, &dummy, &cfg) {
+            matched.push(((f64::from(c.x), f64::from(c.y)), (bx, by)));
+        }
+    }
+    let candidate_count = matched.len() as u32;
+    if candidate_count < cfg.min_inliers {
+        return Err(TrackError::InsufficientMatches(
+            candidate_count,
+            cfg.min_inliers,
+        ));
+    }
+
+    // Lift each matched pair to a unit-ray pair through each
+    // frame's own intrinsics.
+    let intr_a = frame_a.intrinsics;
+    let intr_b = frame_b.intrinsics;
+    let mut rays_a: Vec<[f64; 3]> = Vec::with_capacity(matched.len());
+    let mut rays_b: Vec<[f64; 3]> = Vec::with_capacity(matched.len());
+    for &((ax, ay), (bx, by)) in &matched {
+        let (rx, ry, rz) = pixel_ray_direction(intr_a, ax, ay);
+        rays_a.push([rx, ry, rz]);
+        let (rx, ry, rz) = pixel_ray_direction(intr_b, bx, by);
+        rays_b.push([rx, ry, rz]);
+    }
+
+    let matrix = kabsch::kabsch_rotation(&rays_a, &rays_b).map_err(|_| {
+        // Kabsch refused; treat as low-confidence so the
+        // caller's error path is consistent with the pixel-
+        // rigid track().
+        TrackError::LowConfidence(0, candidate_count, cfg.min_inliers)
+    })?;
+
+    // Per-pair angular residual: angle between (R · ray_a) and
+    // ray_b. Sum of squares averaged → RMS.
+    let mut sq_sum = 0.0_f64;
+    for (a, b) in rays_a.iter().zip(rays_b.iter()) {
+        let mapped = kabsch::rotate_vec(&matrix, *a);
+        let dot = (mapped[0] * b[0] + mapped[1] * b[1] + mapped[2] * b[2]).clamp(-1.0, 1.0);
+        let theta = dot.acos();
+        sq_sum += theta * theta;
+    }
+    let rms_residual_rad = (sq_sum / matched.len() as f64).sqrt();
+
+    let rotation_sigma = Sigma::new(rms_residual_rad).unwrap_or(Sigma::ZERO);
+
+    Ok(RotationBetweenFrames {
+        matrix,
+        inlier_count: candidate_count,
+        candidate_count,
+        rms_residual_rad,
+        rotation_sigma,
     })
 }
 
@@ -793,5 +945,64 @@ mod tests {
         );
         assert_relative_eq!(xform.tx_px, -10.0, epsilon = 1.0);
         assert_relative_eq!(xform.ty_px, -5.0, epsilon = 1.0);
+    }
+
+    #[test]
+    fn track_rotation_recovers_pure_translation_as_small_rotation() {
+        // A pure pixel-translation between two frames is, in
+        // camera space, a rotation about an axis perpendicular
+        // to the translation direction with angle ≈ |t| / f.
+        // For a 10-px x-shift on a 320×240 frame with placeholder
+        // f = 1000 px, the expected rotation is ~0.01 rad about
+        // the y axis.
+        let a = synth_corners_frame(320, 240, 0, 0);
+        let b = synth_corners_frame(320, 240, 10, 0);
+        let cfg = TrackConfig {
+            min_inliers: 6,
+            ..TrackConfig::default()
+        };
+        let rot = track_rotation(&a, &b, cfg).unwrap();
+        // The rotation should be small.
+        // Apply R to the optical-axis ray [0, 0, 1]; it should
+        // tilt mostly along the x axis (because the translation
+        // shifted features in x).
+        let mapped = kabsch::rotate_vec(&rot.matrix, [0.0, 0.0, 1.0]);
+        assert!(
+            mapped[2] > 0.99,
+            "rotation should be small; got mapped z = {}",
+            mapped[2],
+        );
+        // Residual should be small for a synthetic translation.
+        // NCC matching quantizes to integer pixel coordinates,
+        // contributing ~1 px ÷ f ≈ 0.001 rad per pair plus
+        // accumulation across the corner set, so the empirical
+        // ceiling sits around ~0.02 rad on this fixture.
+        assert!(
+            rot.rms_residual_rad < 0.05,
+            "residual {} too large for synthetic translation",
+            rot.rms_residual_rad,
+        );
+        assert!(rot.inlier_count >= 6);
+    }
+
+    #[test]
+    fn track_rotation_rejects_too_few_corners() {
+        // Empty frame → no corners → InsufficientCorners.
+        let pixels = vec![5000_u16; 200 * 200];
+        let blank = Frame::new(
+            200,
+            200,
+            pixels,
+            Tt::from_julian_date(JD_J2000),
+            1000,
+            Intrinsics::placeholder(200, 200),
+        )
+        .unwrap();
+        let cfg = TrackConfig {
+            min_inliers: 6,
+            ..TrackConfig::default()
+        };
+        let err = track_rotation(&blank, &blank, cfg).unwrap_err();
+        assert!(matches!(err, TrackError::InsufficientCorners(_, _)));
     }
 }

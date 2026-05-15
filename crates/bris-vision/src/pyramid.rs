@@ -175,8 +175,13 @@ impl FramePyramid {
             target_width,
             target_height,
         )?;
-        let pixels =
-            box_downsample(self.full.pixels(), self.full.width(), self.full.height(), target_width, target_height);
+        let pixels = box_downsample(
+            self.full.pixels(),
+            self.full.width(),
+            self.full.height(),
+            target_width,
+            target_height,
+        );
         let level_frame = Frame::new(
             target_width,
             target_height,
@@ -246,11 +251,13 @@ fn box_downsample(src: &[u16], sw: u32, sh: u32, dw: u32, dh: u32) -> Vec<u16> {
     let sw_u = sw as usize;
     for oy in 0..dh {
         let y0 = ((u64::from(oy) * u64::from(sh)) / u64::from(dh)) as usize;
-        let y1 = ((u64::from(oy + 1) * u64::from(sh)) / u64::from(dh)).max(u64::from(y0 as u32) + 1) as usize;
+        let y1 = ((u64::from(oy + 1) * u64::from(sh)) / u64::from(dh)).max(u64::from(y0 as u32) + 1)
+            as usize;
         let y1 = y1.min(sh as usize);
         for ox in 0..dw {
             let x0 = ((u64::from(ox) * u64::from(sw)) / u64::from(dw)) as usize;
-            let x1 = ((u64::from(ox + 1) * u64::from(sw)) / u64::from(dw)).max(u64::from(x0 as u32) + 1) as usize;
+            let x1 = ((u64::from(ox + 1) * u64::from(sw)) / u64::from(dw))
+                .max(u64::from(x0 as u32) + 1) as usize;
             let x1 = x1.min(sw as usize);
             let mut sum: u64 = 0;
             let mut count: u64 = 0;
@@ -363,7 +370,10 @@ mod tests {
         // path (no upsample) before we hit aspect check; use a
         // case that's smaller in both dimensions but with a
         // different aspect ratio.
-        assert!(result.is_ok(), "640x480 from 640x360 returns source (no upsample)");
+        assert!(
+            result.is_ok(),
+            "640x480 from 640x360 returns source (no upsample)"
+        );
 
         // Try 320x240 (4:3) from 640x360 (16:9). Smaller in
         // both dims, mismatched aspect.

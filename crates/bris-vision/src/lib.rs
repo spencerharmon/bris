@@ -10,6 +10,7 @@ pub mod frame;
 pub mod fusion;
 pub mod horizon;
 pub mod io;
+pub mod kabsch;
 pub mod lens;
 pub mod measure;
 pub mod night_horizon;
@@ -57,5 +58,6 @@ pub use segment::{
     segment, segment_with_rotation, SegmentError, SegmentationMask,
 };
 pub use track::{
-    detect_corners, track, track_peaks, Corner, RigidTransform, TrackConfig, TrackError,
+    detect_corners, track, track_peaks, track_rotation, Corner, RigidTransform,
+    RotationBetweenFrames, TrackConfig, TrackError,
 };

@@ -248,17 +248,12 @@ impl BodyRay {
 /// horizon's altitude σ in quadrature. Both are 1σ values in
 /// radians; the result is a 1σ value in radians.
 #[must_use]
-pub fn altitude_from_rays(
-    body: &BodyRay,
-    horizon: &HorizonRay,
-) -> AltitudeMeasurement {
+pub fn altitude_from_rays(body: &BodyRay, horizon: &HorizonRay) -> AltitudeMeasurement {
     let sin_alt = body.ray.dot(&horizon.normal);
     let altitude_rad = sin_alt.clamp(-1.0, 1.0).asin();
-    let combined_sigma_value = (body.direction_sigma.value().powi(2)
-        + horizon.altitude_sigma.value().powi(2))
-    .sqrt();
-    let altitude_sigma =
-        Sigma::new(combined_sigma_value).unwrap_or(horizon.altitude_sigma);
+    let combined_sigma_value =
+        (body.direction_sigma.value().powi(2) + horizon.altitude_sigma.value().powi(2)).sqrt();
+    let altitude_sigma = Sigma::new(combined_sigma_value).unwrap_or(horizon.altitude_sigma);
     AltitudeMeasurement {
         altitude_rad,
         altitude_sigma,
