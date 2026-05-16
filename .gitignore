@@ -72,3 +72,6 @@ tmp/
 # round-trip in CI are promoted into a regression-test case.
 calibration/
 crates/bris-vision/tests/regression/night_test_highres/Screenshot*.png
+
+# Local exports pulled off device via adb; not for the repo.
+bris-exports/

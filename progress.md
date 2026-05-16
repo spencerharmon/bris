@@ -118,6 +118,19 @@ For the end-to-end pipeline architecture and data flow, see
     `cargo clippy --all-features -- -D warnings` are
     clean; APK build and on-device validation run in CI.
 
+  **Factory calibration profiles (2026-05).** New
+  `FactoryCalibration` registry in the Android shell ships
+  per-(device, lens, resolution) intrinsics so operators on
+  known devices get good-enough day-one calibration without
+  running the in-app workflow. Live screen now uses a
+  `CalibrationSource` sealed type (Operator / Factory /
+  Placeholder) so the diagnostic overlay can tell the
+  operator honestly which intrinsics they're on. Initial
+  shipped profile: Cat S62 main camera at 4032×3024
+  (RMS 0.73 px, 15 views, diagnosis OK). Adding more
+  devices is a one-entry append to
+  `FactoryCalibration.PROFILES`.
+
 - **Phase 7 (mobile sight-capture session) — developer-iteration
   spike.** `crates/bris-streaming` exposes per-fix
   contributing-frame IDs + `frame_by_id` so the mobile

@@ -323,9 +323,22 @@ references to the regression tests that pin the behavior. See
 
    Star-field self-calibration is still pending — interesting once
    plate solving on real data is reliable enough to bootstrap.
-   Factory-default per-device intrinsics for shipped hardware
-   units is also still pending — needs the hardware product
-   pipeline.
+
+   *Factory profiles (2026-05):* the Android shell now carries a
+   per-device factory-calibration registry
+   (~FactoryCalibration.kt~) keyed by
+   (~Build.MODEL~, lens id, capture resolution). When the
+   operator hasn't run their own calibration, the live screen
+   falls back to a matching factory entry before degrading to
+   placeholder; the diagnostic overlay tags it
+   ~calib: factory (<label>, rms <value>)~ so the operator
+   knows it's a shipped default they can override. Initial
+   entry: Cat S62 main camera @ 4032×3024
+   (RMS 0.73 px, 15 views, diagnosis OK). Adding more
+   devices is a one-entry-per-(device, lens, resolution)
+   append to ~FactoryCalibration.PROFILES~. Star-field
+   self-calibration and per-unit hardware factory profiles
+   (vs per-model) remain follow-ups.
 ** TODO Eye-height handling
    Eye height contributes to horizon dip, which is a per-fix correction.
    - Persist a default eye height per device (settings).
