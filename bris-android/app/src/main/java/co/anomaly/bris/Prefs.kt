@@ -31,6 +31,20 @@ class Prefs(private val context: Context) {
     val debugCaptureFlow: Flow<Boolean> = context.dataStore.data.map { it[KEY_DEBUG_CAPTURE] ?: false }
     val collectorBaseFlow: Flow<String> = context.dataStore.data.map { it[KEY_COLLECTOR_BASE] ?: "" }
 
+    /**
+     * Operator-selected physical-camera lens id, or `null` if
+     * the operator has not chosen one yet (in which case
+     * callers fall back to a heuristic default).
+     *
+     * The id is the underlying Camera2 `cameraId` string
+     * surfaced by [`co.anomaly.bris.engine.LensCatalog`]; it is
+     * stable across app launches on a given device but is
+     * device-specific. Calibration intrinsics are keyed by
+     * this id so a wide-lens calibration never silently
+     * applies to the telephoto.
+     */
+    val selectedLensIdFlow: Flow<String?> = context.dataStore.data.map { it[KEY_SELECTED_LENS_ID] }
+
     suspend fun setDebugMode(enabled: Boolean) {
         context.dataStore.edit { it[KEY_DEBUG_MODE] = enabled }
     }
@@ -41,6 +55,11 @@ class Prefs(private val context: Context) {
 
     suspend fun setCollectorBase(url: String) {
         context.dataStore.edit { it[KEY_COLLECTOR_BASE] = url }
+    }
+
+    /** Persist the operator's lens selection. */
+    suspend fun setSelectedLensId(lensId: String) {
+        context.dataStore.edit { it[KEY_SELECTED_LENS_ID] = lensId }
     }
 
     /** Get or lazily generate the per-install device UUID. */
@@ -57,5 +76,6 @@ class Prefs(private val context: Context) {
         private val KEY_DEBUG_CAPTURE = booleanPreferencesKey("debug_capture")
         private val KEY_COLLECTOR_BASE = stringPreferencesKey("collector_base")
         private val KEY_DEVICE_UUID = stringPreferencesKey("device_uuid")
+        private val KEY_SELECTED_LENS_ID = stringPreferencesKey("selected_lens_id")
     }
 }

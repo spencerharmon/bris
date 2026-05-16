@@ -10,17 +10,39 @@ import uniffi.bris_ffi.FfiCalibrationResult
  *
  * One session = one camera + one resolution + N captured
  * checkerboard frames + (after solve) the intrinsics + the
- * solver diagnostics. Lives at
- * `<app-files>/calibration/<session-ulid>/`:
+ * solver diagnostics.
  *
- *   frames/<seq>.jpg       captured checkerboard frames
- *   intrinsics.json        solved intrinsics + per-session metadata
- *   target.json            checkerboard rows/cols/square_size_mm
+ * **Lens-aware layout** (current):
  *
- * Sessions are append-only; the `current` symlink-equivalent
- * is just "the most recently created session" (we don't keep a
- * pointer file — we list and pick the latest by name, which
- * sorts correctly because ULIDs are time-sortable).
+ * ```
+ * <app-files>/calibration/<lens-id>/<width>x<height>/<session-ulid>/
+ *   frames/<seq>.jpg
+ *   intrinsics.json
+ *   target.json
+ * ```
+ *
+ * Calibration intrinsics depend on the *physical* lens and on
+ * the pixel grid they were solved against. A wide-lens
+ * calibration applied to telephoto frames produces silently
+ * wrong altitudes; a 1280×720 calibration applied to 1920×1080
+ * frames does the same. Keying the on-disk layout by both
+ * dimensions makes the right thing happen by construction:
+ * `latestIntrinsicsFor(lensId, w, h)` returns either an
+ * exact match or `null`, and the caller falls back to
+ * placeholder intrinsics with the diagnostic overlay flagging
+ * "calib: PLACEHOLDER (run calibration)".
+ *
+ * **Legacy layout.** Pre-lens-selection sessions live directly
+ * at `<root>/<session-ulid>/` without a lens prefix. They are
+ * still listable via [`latestSession`] and readable via
+ * [`latestIntrinsics`] for debug/inspection, but
+ * [`latestIntrinsicsFor`] (the lens-aware lookup the live
+ * pipeline uses) ignores them. Operators with legacy data
+ * simply re-run calibration once.
+ *
+ * Sessions are append-only; the current session for a given
+ * `(lens, resolution)` is "the most recently created", which
+ * sorts correctly because session ids are time-prefixed.
  *
  * Submission flow: `PreUploadReviewScreen` reads the latest
  * session's frames + intrinsics, includes them as media in the
@@ -34,16 +56,30 @@ class CalibrationStore(private val rootDir: File) {
     }
 
     /**
-     * Begin a new session. Returns the session directory; the
-     * caller passes this into [`writeFrame`], [`writeTarget`],
-     * and [`writeIntrinsics`].
+     * Begin a new lens-aware session for the given lens id and
+     * pixel grid. Returns the session directory; the caller
+     * passes this into [`writeFrame`], [`writeTarget`], and
+     * [`writeIntrinsics`].
+     *
+     * The directory layout encodes lens + resolution into the
+     * path so accidentally cross-applying intrinsics is
+     * impossible — there is no shared "latest" pointer that a
+     * future load can resolve to the wrong key.
      */
-    fun newSession(): File {
+    fun newSession(lensId: String, width: Int, height: Int): File {
         val id = ulid()
-        val dir = File(rootDir, id).apply { mkdirs() }
+        val dir = File(lensDir(lensId, width, height), id).apply { mkdirs() }
         File(dir, "frames").mkdirs()
         return dir
     }
+
+    /**
+     * Legacy entry point (no lens id, no resolution). Kept
+     * only so callers that haven't yet been updated continue
+     * to compile; new code should use the lens-aware overload.
+     */
+    @Deprecated("Use newSession(lensId, width, height)")
+    fun newSession(): File = newSession(LensCatalog.FALLBACK_LENS_ID, 0, 0)
 
     /** Write one captured frame as JPEG. Returns the file. */
     fun writeFrame(sessionDir: File, seq: Int, jpegBytes: ByteArray): File {
@@ -84,10 +120,28 @@ class CalibrationStore(private val rootDir: File) {
         File(sessionDir, "intrinsics.json").writeText(obj.toString())
     }
 
-    /** Most recent session directory, or `null` if none exist. */
-    fun latestSession(): File? = rootDir.listFiles()
-        ?.filter { it.isDirectory }
-        ?.maxByOrNull { it.name }
+    /**
+     * Most recent session directory across the entire store
+     * (any lens, any resolution, including legacy). Used by
+     * inspection / submission flows that don't care about the
+     * lens key.
+     */
+    fun latestSession(): File? = allSessionDirs().maxByOrNull { it.name }
+
+    /**
+     * Most recent session for the given `(lensId, width,
+     * height)` triple, or `null` if no calibration exists for
+     * that combination. This is the lookup the live pipeline
+     * uses to decide whether to apply persisted intrinsics or
+     * fall back to placeholders.
+     */
+    fun latestSessionFor(lensId: String, width: Int, height: Int): File? {
+        val dir = lensDir(lensId, width, height)
+        if (!dir.isDirectory) return null
+        return dir.listFiles()
+            ?.filter { it.isDirectory }
+            ?.maxByOrNull { it.name }
+    }
 
     /** Frames in the given session, sorted by name. */
     fun framesIn(sessionDir: File): List<File> =
@@ -97,16 +151,29 @@ class CalibrationStore(private val rootDir: File) {
             ?: emptyList()
 
     /**
-     * Load the persisted intrinsics from the latest session,
-     * or `null` if none exists or the file is malformed.
-     *
-     * Returns the in-memory representation matching the Rust
-     * `bris_ffi::FfiIntrinsics` shape so the Kotlin caller can
-     * pass it straight into `Engine.pushFrame`.
+     * Load the persisted intrinsics from the latest session
+     * (across all lenses), or `null` if none exists or the
+     * file is malformed. Inspection-only — the live pipeline
+     * uses [`latestIntrinsicsFor`] instead so it can enforce
+     * the lens + resolution match.
      */
-    fun latestIntrinsics(): PersistedIntrinsics? {
-        val sess = latestSession() ?: return null
-        val f = File(sess, "intrinsics.json")
+    fun latestIntrinsics(): PersistedIntrinsics? =
+        latestSession()?.let(::readIntrinsics)
+
+    /**
+     * Load the persisted intrinsics for a specific lens +
+     * resolution, or `null` if none exists.
+     *
+     * Calibration data is keyed by `(lensId, width, height)`.
+     * A mismatch in either component returns `null`; the
+     * caller is expected to degrade to placeholder intrinsics
+     * and surface the mismatch in the diagnostic overlay.
+     */
+    fun latestIntrinsicsFor(lensId: String, width: Int, height: Int): PersistedIntrinsics? =
+        latestSessionFor(lensId, width, height)?.let(::readIntrinsics)
+
+    private fun readIntrinsics(sessionDir: File): PersistedIntrinsics? {
+        val f = File(sessionDir, "intrinsics.json")
         if (!f.exists()) return null
         return try {
             val obj = JSONObject(f.readText())
@@ -129,6 +196,41 @@ class CalibrationStore(private val rootDir: File) {
             null
         }
     }
+
+    private fun lensDir(lensId: String, width: Int, height: Int): File =
+        File(rootDir, "$lensId/${width}x${height}").apply { mkdirs() }
+
+    /**
+     * Best-effort enumeration of every session directory under
+     * the store, including legacy sessions (no lens prefix).
+     * A session is identified as "any directory containing a
+     * `frames/` subdirectory or an `intrinsics.json` file"; we
+     * walk at most three levels deep
+     * (`<lens-id>/<resolution>/<session>/`) so this stays
+     * O(N sessions).
+     */
+    private fun allSessionDirs(): List<File> {
+        val out = mutableListOf<File>()
+        val top = rootDir.listFiles() ?: return emptyList()
+        for (entry in top) {
+            if (!entry.isDirectory) continue
+            if (looksLikeSession(entry)) {
+                out += entry
+                continue
+            }
+            // lens-id directory; recurse into <resolution>/<session>.
+            val resDirs = entry.listFiles() ?: continue
+            for (resDir in resDirs) {
+                if (!resDir.isDirectory) continue
+                val sessions = resDir.listFiles() ?: continue
+                for (s in sessions) if (s.isDirectory && looksLikeSession(s)) out += s
+            }
+        }
+        return out
+    }
+
+    private fun looksLikeSession(dir: File): Boolean =
+        File(dir, "frames").isDirectory || File(dir, "intrinsics.json").isFile
 
     /**
      * Persisted calibration as loaded back from disk.

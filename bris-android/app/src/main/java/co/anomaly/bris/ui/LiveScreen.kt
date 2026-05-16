@@ -50,6 +50,7 @@ import co.anomaly.bris.engine.DebugCaptureBuffer
 import co.anomaly.bris.engine.EngineWrapper
 import co.anomaly.bris.engine.FixVerdict
 import co.anomaly.bris.engine.FrameAnalyzer
+import co.anomaly.bris.engine.LensCatalog
 import co.anomaly.bris.engine.SessionRecorder
 import co.anomaly.bris.engine.SessionStatus
 import co.anomaly.bris.engine.SightLog
@@ -130,9 +131,20 @@ fun LiveScreen(
 
     val prefs = remember(context) { Prefs(context) }
     val debugCaptureEnabled by prefs.debugCaptureFlow.collectAsState(initial = false)
+    val selectedLensId by prefs.selectedLensIdFlow.collectAsState(initial = null)
+    val defaultBackId = remember(context) {
+        LensCatalog.defaultBackCameraId(context) ?: LensCatalog.FALLBACK_LENS_ID
+    }
+    val effectiveLensId = selectedLensId ?: defaultBackId
     val debugBuffer = remember(context) { DebugCaptureBuffer.forApp(context) }
     val calStore = remember(context) { CalibrationStore.forApp(context) }
-    val persistedIntrinsics = remember(context) { calStore.latestIntrinsics() }
+    val persistedIntrinsics = remember(context, effectiveLensId) {
+        calStore.latestIntrinsicsFor(
+            lensId = effectiveLensId,
+            width = CameraConstants.WIDTH,
+            height = CameraConstants.HEIGHT,
+        )
+    }
     val sightLog = remember(context) { SightLog.forApp(context) }
 
     val engineScope = remember { CoroutineScope(SupervisorJob()) }
@@ -172,6 +184,7 @@ fun LiveScreen(
             persistedIntrinsics = persistedIntrinsics,
             debugCaptureEnabled = debugCaptureEnabled,
             debugBuffer = debugBuffer,
+            lensId = effectiveLensId,
         )
 
         Column(
@@ -188,6 +201,7 @@ fun LiveScreen(
                 ringBufferDepth = snapshot?.ringBufferDepth ?: 0u,
                 sightWindowDepth = snapshot?.sightWindowDepth ?: 0u,
                 persistedIntrinsics = persistedIntrinsics,
+                lensLabel = lensLabelFor(context, effectiveLensId),
             )
             Spacer(Modifier.height(12.dp))
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -230,12 +244,14 @@ private fun CameraSurface(
     persistedIntrinsics: CalibrationStore.PersistedIntrinsics?,
     debugCaptureEnabled: Boolean,
     debugBuffer: DebugCaptureBuffer,
+    lensId: String,
 ) {
     val context = LocalContext.current
     val previewView = remember(context) { PreviewView(context) }
     val analyzerExecutor = remember { Executors.newSingleThreadExecutor() }
+    val cameraSelector = remember(lensId) { LensCatalog.selectorFor(lensId) }
 
-    LaunchedEffect(captureActive, lifecycleOwner) {
+    LaunchedEffect(captureActive, lifecycleOwner, cameraSelector) {
         val provider = ProcessCameraProvider.getInstance(context).get()
         provider.unbindAll()
         val preview = Preview.Builder().build().also {
@@ -288,7 +304,7 @@ private fun CameraSurface(
                 .build()
             provider.bindToLifecycle(
                 lifecycleOwner,
-                CameraSelector.DEFAULT_BACK_CAMERA,
+                cameraSelector,
                 group,
             )
         } else {
@@ -298,7 +314,7 @@ private fun CameraSurface(
                 .build()
             provider.bindToLifecycle(
                 lifecycleOwner,
-                CameraSelector.DEFAULT_BACK_CAMERA,
+                cameraSelector,
                 group,
             )
         }
@@ -328,6 +344,7 @@ private fun DiagnosticOverlay(
     ringBufferDepth: UInt,
     sightWindowDepth: UInt,
     persistedIntrinsics: CalibrationStore.PersistedIntrinsics?,
+    lensLabel: String,
 ) {
     val calibLabel = persistedIntrinsics?.let {
         if (it.width == CameraConstants.WIDTH && it.height == CameraConstants.HEIGHT) {
@@ -345,6 +362,7 @@ private fun DiagnosticOverlay(
         verticalArrangement = Arrangement.spacedBy(2.dp),
     ) {
         Text(calibLabel, color = Color.White)
+        Text("lens: $lensLabel", color = Color.White)
         when (val s = sessionStatus) {
             is SessionStatus.Idle -> {
                 Text("Idle. Tap Start capture to begin a session.", color = Color.White)
@@ -456,3 +474,13 @@ private fun defaultEngineConfig(): FfiEngineConfig = FfiEngineConfig(
     horizonAnalysisWidth = null,
     horizonAnalysisHeight = null,
 )
+
+/**
+ * Resolve a human-readable label for the given lens id by
+ * consulting [`LensCatalog`]. Falls back to the id itself if
+ * the catalog can't enumerate (no Camera2 access yet, etc.).
+ */
+private fun lensLabelFor(context: android.content.Context, lensId: String): String {
+    val match = LensCatalog.enumerate(context).firstOrNull { it.id == lensId }
+    return match?.label ?: lensId
+}

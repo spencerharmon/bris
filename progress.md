@@ -97,8 +97,13 @@ For the end-to-end pipeline architecture and data flow, see
   composition layer. Lens selection in
   `bris-android` (telephoto-sensor selection per
   `readme.org`'s "use a long focal length" guidance) is
-  tracked under Phase 7 and is independently
-  shippable.
+  **DONE** (Settings → Camera lens with auto-enumerated
+  physical-camera radio, first-launch default = longest
+  non-ultrawide, calibration storage keyed by
+  `<lens-id>/<width>x<height>/<session>` so wide- and
+  telephoto-cal never collide, live + calibration screens
+  build their `CameraSelector` via `LensCatalog.selectorFor`,
+  diagnostic overlay surfaces the active lens label).
 
 **Phase 2.5 (real-data validation): 13 regression cases** spanning
 working day, working night-with-moon, working
