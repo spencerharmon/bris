@@ -30,8 +30,8 @@ use bris_core::{Sigma, Uncertain};
 use bris_vision::{measure_altitude_from_ray, HorizonLine, Intrinsics, MeasurementError};
 
 use crate::hash::ra_dec_to_unit_vec;
-use crate::kabsch::rotate_vec;
 use crate::solve::{IdentifiedStar, PlateSolveResult};
+use bris_math::rotate_vec;
 
 /// One identified star's altitude observation.
 #[derive(Debug, Clone, Copy)]

@@ -145,6 +145,14 @@ pub(crate) struct StageOutcome {
     /// both "no detector succeeded" and "Stage C was skipped"
     /// (Unusable verdict).
     pub horizon: HorizonStageOutcome,
+    /// Resolution `(width, height)` at which Stage C actually
+    /// ran. Equals the source frame's resolution when
+    /// `horizon_analysis_size` is unset; equals the requested
+    /// pyramid level when set and successfully computed; falls
+    /// back to source resolution when the requested level was
+    /// rejected (aspect-ratio mismatch, dim-mismatch). Surfaced
+    /// in the engine's `EngineDiagnostics`.
+    pub horizon_analyzed_size: (u32, u32),
     /// Frame's capture instant, threaded through for diagnostics.
     pub frame_tt: Tt,
 }
@@ -158,10 +166,11 @@ pub(crate) struct StageOutcome {
 /// counters and enqueues records based on the returned
 /// [`StageOutcome`].
 pub(crate) fn process_frame(
-    frame: &Frame,
+    pyramid: &bris_vision::FramePyramid,
     cfg: &EngineConfig,
     hysteresis: &mut ClassifierHysteresis,
 ) -> StageOutcome {
+    let frame = pyramid.full();
     // ---- Stage A: classify (raw) + apply hysteresis ----
     let sun_alt_deg = sun_altitude_deg(cfg.observer, frame.capture_tt);
     let classification = classify(frame, sun_alt_deg, cfg.condition_cfg);
@@ -186,7 +195,7 @@ pub(crate) fn process_frame(
     // ordering — saturated-body centroiding doesn't read the
     // horizon — but the pipeline runs C-then-B uniformly to
     // keep the stage graph simple.
-    let horizon = horizon::detect(frame, dispatched_condition, cfg);
+    let (horizon, horizon_analyzed_size) = horizon::detect(pyramid, dispatched_condition, cfg);
     if let HorizonStageOutcome::Detected { detector, line } = horizon {
         trace!(
             detector = ?detector,
@@ -225,6 +234,7 @@ pub(crate) fn process_frame(
         dispatched_condition,
         body,
         horizon,
+        horizon_analyzed_size,
         frame_tt: frame.capture_tt,
     }
 }
@@ -463,7 +473,11 @@ mod tests {
         // of saturated pixels) and reports Day; Stage B
         // centroids the disk.
         let frame = frame_with_disk(128, 128, 10, u16::MAX);
-        let outcome = process_frame(&frame, &test_cfg(), &mut ClassifierHysteresis::default());
+        let outcome = process_frame(
+            &bris_vision::FramePyramid::new(frame.clone()),
+            &test_cfg(),
+            &mut ClassifierHysteresis::default(),
+        );
         assert_eq!(outcome.classification.condition, Condition::Day);
         match outcome.body {
             BodyDetection::Day(c) => {
@@ -481,7 +495,11 @@ mod tests {
         // below the horizon at Greenwich: classifier sees image
         // evidence (dark) and almanac evidence (Night) agreeing.
         let frame = make_frame_at(128, 128, 50, night_tt());
-        let outcome = process_frame(&frame, &test_cfg(), &mut ClassifierHysteresis::default());
+        let outcome = process_frame(
+            &bris_vision::FramePyramid::new(frame.clone()),
+            &test_cfg(),
+            &mut ClassifierHysteresis::default(),
+        );
         assert_eq!(outcome.classification.condition, Condition::Night);
         assert!(matches!(outcome.body, BodyDetection::None));
     }

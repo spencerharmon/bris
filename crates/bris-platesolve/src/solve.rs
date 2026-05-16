@@ -7,8 +7,8 @@
 //! [`crate::kabsch`].
 
 use crate::hash::{pattern_hash, ra_dec_to_unit_vec, CatalogPattern, StarHashDb};
-use crate::kabsch::{kabsch_rotation, rotate_vec};
 use bris_almanac::by_hr;
+use bris_math::kabsch::{kabsch_rotation, rotate_vec};
 use bris_vision::{lens, Intrinsics, Peak};
 
 /// Configuration for [`plate_solve`].

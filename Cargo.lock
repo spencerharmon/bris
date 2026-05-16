@@ -615,6 +615,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "bris-math"
+version = "0.0.1"
+dependencies = [
+ "approx",
+ "thiserror 1.0.69",
+]
+
+[[package]]
 name = "bris-nav"
 version = "0.0.1"
 dependencies = [
@@ -648,6 +656,7 @@ dependencies = [
  "approx",
  "bris-almanac",
  "bris-core",
+ "bris-math",
  "bris-vision",
  "image",
  "proptest",
@@ -680,6 +689,7 @@ version = "0.0.1"
 dependencies = [
  "approx",
  "bris-core",
+ "bris-math",
  "chrono",
  "image",
  "ndarray 0.17.2",

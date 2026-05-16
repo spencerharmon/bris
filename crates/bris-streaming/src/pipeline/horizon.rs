@@ -50,7 +50,7 @@
 use crate::config::EngineConfig;
 use bris_vision::{
     detect_horizon, detect_horizon_night, detect_horizon_night_textured,
-    detect_horizon_via_sky_region, Condition, Frame, HorizonLine,
+    detect_horizon_via_sky_region, Condition, Frame, FramePyramid, HorizonLine,
 };
 use tracing::{debug, trace};
 
@@ -100,10 +100,10 @@ pub(crate) enum HorizonDetector {
 /// horizon found across all attempts, or
 /// [`HorizonStageOutcome::None`] if no detector succeeded.
 pub(crate) fn detect(
-    frame: &Frame,
+    pyramid: &FramePyramid,
     condition: Condition,
     cfg: &EngineConfig,
-) -> HorizonStageOutcome {
+) -> (HorizonStageOutcome, (u32, u32)) {
     let mut best: Option<(HorizonDetector, HorizonLine)> = None;
 
     let early_term = cfg.horizon_early_termination_sigma_rad;
@@ -114,33 +114,73 @@ pub(crate) fn detect(
     // would just waste time.
     if matches!(condition, Condition::Unusable) {
         debug!("Stage C skipped: classifier reported Unusable");
-        return HorizonStageOutcome::None;
+        return (
+            HorizonStageOutcome::None,
+            (pyramid.full_width(), pyramid.full_height()),
+        );
     }
+
+    let frame_for_detect = match cfg.horizon_analysis_size {
+        Some((w, h)) => match pyramid.level(w, h) {
+            Ok(level) => CowFrame::Owned(level.frame),
+            Err(e) => {
+                debug!(
+                    error = %e,
+                    requested_w = w,
+                    requested_h = h,
+                    "Stage C: requested pyramid level unavailable; falling back to source resolution",
+                );
+                CowFrame::Borrowed(pyramid.full())
+            }
+        },
+        None => CowFrame::Borrowed(pyramid.full()),
+    };
+    let frame = frame_for_detect.as_ref();
+    let analyzed_size = (frame.width(), frame.height());
 
     if day_first {
         try_gradient(frame, cfg, &mut best);
         if early_terminate(best.as_ref(), early_term) {
-            return finish(best);
+            return (finish(best), analyzed_size);
         }
         try_sky_region(frame, cfg, &mut best);
         if early_terminate(best.as_ref(), early_term) {
-            return finish(best);
+            return (finish(best), analyzed_size);
         }
     }
     if night_first {
         try_night(frame, cfg, &mut best);
         if early_terminate(best.as_ref(), early_term) {
-            return finish(best);
+            return (finish(best), analyzed_size);
         }
         try_night_textured(frame, cfg, &mut best);
         if early_terminate(best.as_ref(), early_term) {
-            return finish(best);
+            return (finish(best), analyzed_size);
         }
     }
     // Last resort: segmentation. Gated on the feature flag and
     // on the operator opting in by supplying a model path.
     try_segmentation(frame, cfg, &mut best);
-    finish(best)
+    (finish(best), analyzed_size)
+}
+
+/// Cheap copy-on-write wrapper for the analysis-resolution frame.
+/// Either we borrow the pyramid's full frame (no downsample) or
+/// own a freshly-cloned downsampled level. Both expose the same
+/// `&Frame` view to the per-detector helpers, which already
+/// take `&Frame` and don't care about ownership.
+enum CowFrame<'a> {
+    Borrowed(&'a Frame),
+    Owned(Frame),
+}
+
+impl CowFrame<'_> {
+    fn as_ref(&self) -> &Frame {
+        match self {
+            Self::Borrowed(f) => f,
+            Self::Owned(f) => f,
+        }
+    }
 }
 
 fn try_gradient(
@@ -365,7 +405,7 @@ mod tests {
         // gives sub-arcsec residuals).
         let cfg = EngineConfig::new(Observer::default_dev());
         let frame = synthetic_horizon(32);
-        let outcome = detect(&frame, Condition::Day, &cfg);
+        let (outcome, _) = detect(&FramePyramid::new(frame.clone()), Condition::Day, &cfg);
         match outcome {
             HorizonStageOutcome::Detected { detector, line } => {
                 // Detector should be one of the cheap day-path
@@ -400,7 +440,7 @@ mod tests {
     fn unusable_classification_skips_stage_c() {
         let cfg = EngineConfig::new(Observer::default_dev());
         let frame = synthetic_horizon(32);
-        let outcome = detect(&frame, Condition::Unusable, &cfg);
+        let (outcome, _) = detect(&FramePyramid::new(frame.clone()), Condition::Unusable, &cfg);
         assert!(matches!(outcome, HorizonStageOutcome::None));
     }
 
@@ -411,7 +451,7 @@ mod tests {
         // and that the day-path detectors aren't tried.
         let cfg = EngineConfig::new(Observer::default_dev());
         let frame = dark_frame();
-        let outcome = detect(&frame, Condition::Night, &cfg);
+        let (outcome, _) = detect(&FramePyramid::new(frame.clone()), Condition::Night, &cfg);
         // Either a Night/NightTextured detection or None;
         // never a day-path detector.
         match outcome {
@@ -441,7 +481,7 @@ mod tests {
         // the result is the gradient one.
         let cfg = EngineConfig::new(Observer::default_dev());
         let frame = synthetic_horizon(32);
-        let outcome = detect(&frame, Condition::Day, &cfg);
+        let (outcome, _) = detect(&FramePyramid::new(frame.clone()), Condition::Day, &cfg);
         match outcome {
             HorizonStageOutcome::Detected { detector, .. } => {
                 // Allow either the gradient or sky-region

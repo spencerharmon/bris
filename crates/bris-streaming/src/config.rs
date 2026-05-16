@@ -176,6 +176,32 @@ pub struct EngineConfig {
     /// segmentation cost dominates).
     pub horizon_early_termination_sigma_rad: f64,
 
+    /// Optional analysis resolution for Stage C (horizon
+    /// detection). When `Some((w, h))`, the engine asks the
+    /// frame's [`bris_vision::FramePyramid`] for a
+    /// downsampled level at that resolution and runs every
+    /// horizon detector against the downsampled level instead
+    /// of the source frame.
+    ///
+    /// `None` (default) preserves the historical behavior:
+    /// every detector receives the source frame. The
+    /// underlying detectors (gradient, sky-region, etc.)
+    /// already downsample internally to
+    /// [`HorizonConfig::working_width`] for the candidate-
+    /// extraction pass, so opting into engine-level
+    /// downsampling is a *cycle-time* optimization rather than
+    /// a quality knob: when set, every detector and the
+    /// pyramid-cache-hit subsequent stages avoid re-doing
+    /// downsampling on the same source.
+    ///
+    /// The chosen `(w, h)` must preserve the source frame's
+    /// aspect ratio (within
+    /// [`bris_vision::Intrinsics::scaled_to`]'s tolerance) and
+    /// must be ≤ source dimensions (no upsampling). Mismatch
+    /// degrades gracefully: the stage logs a debug message
+    /// and falls back to the source frame.
+    pub horizon_analysis_size: Option<(u32, u32)>,
+
     /// Path to the ONNX segmentation model used by the
     /// last-resort horizon detector
     /// ([`bris_vision::detect_horizon_via_segmentation`]).
@@ -251,6 +277,7 @@ impl EngineConfig {
             // this we don't bother running segmentation; clean
             // sea horizons hit it routinely.
             horizon_early_termination_sigma_rad: std::f64::consts::PI / (60.0 * 180.0),
+            horizon_analysis_size: None,
             segmentation_model_path: None,
             star_hash_db_cfg: StarHashDbConfig::default(),
             plate_solve_cfg: PlateSolveConfig::default(),

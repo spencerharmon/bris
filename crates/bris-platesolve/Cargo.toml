@@ -14,6 +14,7 @@ workspace = true
 
 [dependencies]
 bris-core.workspace = true
+bris-math.workspace = true
 bris-almanac.workspace = true
 bris-vision.workspace = true
 thiserror.workspace = true

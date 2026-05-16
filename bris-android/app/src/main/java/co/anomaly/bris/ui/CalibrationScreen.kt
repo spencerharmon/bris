@@ -1,6 +1,5 @@
 package co.anomaly.bris.ui
 
-import androidx.camera.core.CameraSelector
 import androidx.camera.core.ImageCapture
 import androidx.camera.core.ImageCaptureException
 import androidx.camera.core.Preview
@@ -47,6 +46,7 @@ import androidx.lifecycle.compose.LocalLifecycleOwner
 import co.anomaly.bris.engine.CalibrationStore
 import co.anomaly.bris.engine.CameraConstants
 import co.anomaly.bris.engine.Exporter
+import co.anomaly.bris.engine.LensCatalog
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -105,6 +105,7 @@ import java.util.concurrent.atomic.AtomicInteger
 @Suppress("LongMethod")
 fun CalibrationScreen(
     debugMode: Boolean,
+    lensId: String,
     onBack: () -> Unit,
     onSendCalibration: () -> Unit,
 ) {
@@ -113,7 +114,10 @@ fun CalibrationScreen(
     val scope = rememberCoroutineScope()
     val store = remember(context) { CalibrationStore.forApp(context) }
     val exporter = remember(context) { Exporter.forApp(context) }
-    var sessionDir by remember { mutableStateOf(store.newSession()) }
+    var sessionDir by remember(lensId) {
+        mutableStateOf(store.newSession(lensId, CameraConstants.WIDTH, CameraConstants.HEIGHT))
+    }
+    val cameraSelector = remember(lensId) { LensCatalog.selectorFor(lensId) }
 
     var rows by remember { mutableStateOf(9) }
     var cols by remember { mutableStateOf(6) }
@@ -145,7 +149,7 @@ fun CalibrationScreen(
     }
 
     fun resetSession() {
-        sessionDir = store.newSession()
+        sessionDir = store.newSession(lensId, CameraConstants.WIDTH, CameraConstants.HEIGHT)
         captureSeq.set(0)
         tally.value = CaptureTally()
         lastOutcome = null
@@ -205,7 +209,7 @@ fun CalibrationScreen(
                         provider.unbindAll()
                         provider.bindToLifecycle(
                             lifecycleOwner,
-                            CameraSelector.DEFAULT_BACK_CAMERA,
+                            cameraSelector,
                             group,
                         )
                     }, ContextCompat.getMainExecutor(ctx))
