@@ -44,6 +44,7 @@ import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import io.github.spencerharmon.bris.BuildConfig
 import io.github.spencerharmon.bris.Prefs
+import io.github.spencerharmon.bris.engine.CalibrationSource
 import io.github.spencerharmon.bris.engine.CalibrationStore
 import io.github.spencerharmon.bris.engine.CameraConstants
 import io.github.spencerharmon.bris.engine.DebugCaptureBuffer
@@ -54,6 +55,7 @@ import io.github.spencerharmon.bris.engine.LensCatalog
 import io.github.spencerharmon.bris.engine.SessionRecorder
 import io.github.spencerharmon.bris.engine.SessionStatus
 import io.github.spencerharmon.bris.engine.SightLog
+import io.github.spencerharmon.bris.engine.resolveCalibration
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.SupervisorJob
 import uniffi.bris_ffi.FfiEngineConfig
@@ -152,8 +154,9 @@ fun LiveScreen(
     }
     val debugBuffer = remember(context) { DebugCaptureBuffer.forApp(context) }
     val calStore = remember(context) { CalibrationStore.forApp(context) }
-    val persistedIntrinsics = remember(context, effectiveLensId, captureSize) {
-        calStore.latestIntrinsicsFor(
+    val calibration = remember(context, effectiveLensId, captureSize) {
+        resolveCalibration(
+            store = calStore,
             lensId = effectiveLensId,
             width = captureSize.width,
             height = captureSize.height,
@@ -195,7 +198,7 @@ fun LiveScreen(
             lifecycleOwner = lifecycleOwner,
             captureActive = captureActive,
             engine = engine,
-            persistedIntrinsics = persistedIntrinsics,
+            persistedIntrinsics = persistedIntrinsicsFor(calibration),
             debugCaptureEnabled = debugCaptureEnabled,
             debugBuffer = debugBuffer,
             lensId = effectiveLensId,
@@ -215,7 +218,7 @@ fun LiveScreen(
                 horizonQueueDepth = snapshot?.horizonQueueDepth ?: 0u,
                 ringBufferDepth = snapshot?.ringBufferDepth ?: 0u,
                 sightWindowDepth = snapshot?.sightWindowDepth ?: 0u,
-                persistedIntrinsics = persistedIntrinsics,
+                calibrationSource = calibration,
                 lensLabel = lensLabelFor(context, effectiveLensId),
                 captureSize = captureSize,
             )
@@ -360,17 +363,29 @@ private fun DiagnosticOverlay(
     horizonQueueDepth: UInt,
     ringBufferDepth: UInt,
     sightWindowDepth: UInt,
-    persistedIntrinsics: CalibrationStore.PersistedIntrinsics?,
+    calibrationSource: CalibrationSource,
     lensLabel: String,
     captureSize: android.util.Size,
 ) {
-    val calibLabel = persistedIntrinsics?.let {
-        if (it.width == captureSize.width && it.height == captureSize.height) {
-            "calib: rms ${"%.2f".format(it.rmsPx)} px"
-        } else {
-            "calib mismatch (${it.width}×${it.height} on ${captureSize.width}×${captureSize.height})"
+    // Provenance-honest calibration label. Operator-run
+    // sessions are the gold standard; factory profiles are
+    // a good-enough day-one fallback (operator can override);
+    // placeholder means altitudes are not trustworthy.
+    val calibLabel = when (calibrationSource) {
+        is CalibrationSource.Operator -> {
+            val i = calibrationSource.intrinsics
+            if (i.width == captureSize.width && i.height == captureSize.height) {
+                "calib: operator rms ${"%.2f".format(i.rmsPx)} px"
+            } else {
+                "calib mismatch (${i.width}×${i.height} on ${captureSize.width}×${captureSize.height})"
+            }
         }
-    } ?: "calib: PLACEHOLDER (run calibration)"
+        is CalibrationSource.Factory -> {
+            val i = calibrationSource.intrinsics
+            "calib: factory (${calibrationSource.label}, rms ${"%.2f".format(i.rmsPx)} px)"
+        }
+        CalibrationSource.Placeholder -> "calib: PLACEHOLDER (run calibration)"
+    }
 
     Column(
         modifier = Modifier
@@ -459,6 +474,22 @@ private fun intrinsicsForResolution(
     }
     return placeholderIntrinsicsFor(targetWidth, targetHeight)
 }
+
+/**
+ * Project a [`CalibrationSource`] back down to a nullable
+ * [`CalibrationStore.PersistedIntrinsics`] for code that
+ * pre-dates the sealed-source refactor (engine binding,
+ * `intrinsicsForResolution`). `Placeholder` maps to `null`;
+ * both `Operator` and `Factory` map to their carried
+ * intrinsics — the engine doesn't need to know the
+ * provenance, only the diagnostic overlay does.
+ */
+private fun persistedIntrinsicsFor(source: CalibrationSource): CalibrationStore.PersistedIntrinsics? =
+    when (source) {
+        is CalibrationSource.Operator -> source.intrinsics
+        is CalibrationSource.Factory -> source.intrinsics
+        CalibrationSource.Placeholder -> null
+    }
 
 /**
  * Placeholder intrinsics sized to the supplied resolution.
