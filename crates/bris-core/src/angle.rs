@@ -334,7 +334,7 @@ mod tests {
 
     #[test]
     fn angle_zero_and_full_turn_constants() {
-        assert_eq!(Angle::ZERO.radians(), 0.0);
+        assert_relative_eq!(Angle::ZERO.radians(), 0.0);
         assert_relative_eq!(Angle::FULL_TURN.radians(), TWO_PI);
         assert_relative_eq!(Angle::FULL_TURN.degrees(), 360.0);
     }
@@ -355,10 +355,7 @@ mod tests {
 
     #[test]
     fn arcminutes_and_arcseconds_reject_non_finite() {
-        assert_eq!(
-            Angle::from_arcminutes(f64::NAN),
-            Err(AngleError::NotFinite)
-        );
+        assert_eq!(Angle::from_arcminutes(f64::NAN), Err(AngleError::NotFinite));
         assert_eq!(
             Angle::from_arcseconds(f64::INFINITY),
             Err(AngleError::NotFinite)
@@ -375,22 +372,19 @@ mod tests {
 
     #[test]
     fn latitude_equator_constant_is_zero() {
-        assert_eq!(Latitude::EQUATOR.radians(), 0.0);
-        assert_eq!(Latitude::EQUATOR.degrees(), 0.0);
+        assert_relative_eq!(Latitude::EQUATOR.radians(), 0.0);
+        assert_relative_eq!(Latitude::EQUATOR.degrees(), 0.0);
     }
 
     #[test]
     fn longitude_prime_meridian_constant_is_zero() {
-        assert_eq!(Longitude::PRIME_MERIDIAN.radians(), 0.0);
-        assert_eq!(Longitude::PRIME_MERIDIAN.degrees(), 0.0);
+        assert_relative_eq!(Longitude::PRIME_MERIDIAN.radians(), 0.0);
+        assert_relative_eq!(Longitude::PRIME_MERIDIAN.degrees(), 0.0);
     }
 
     #[test]
     fn latitude_rejects_non_finite() {
-        assert_eq!(
-            Latitude::from_radians(f64::NAN),
-            Err(AngleError::NotFinite)
-        );
+        assert_eq!(Latitude::from_radians(f64::NAN), Err(AngleError::NotFinite));
         assert_eq!(
             Latitude::from_radians(f64::INFINITY),
             Err(AngleError::NotFinite)

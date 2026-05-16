@@ -147,7 +147,7 @@ mod tests {
         // No eye-height uncertainty → no dip uncertainty.
         let mut obs = Observer::default_dev();
         obs.eye_height_sigma_m = 0.0;
-        assert_eq!(obs.horizon_dip_sigma().value(), 0.0);
+        assert_relative_eq!(obs.horizon_dip_sigma().value(), 0.0);
     }
 
     #[test]

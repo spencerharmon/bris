@@ -180,13 +180,13 @@ mod tests {
 
     #[test]
     fn sigma_zero_constant_is_zero() {
-        assert_eq!(Sigma::ZERO.value(), 0.0);
+        assert_relative_eq!(Sigma::ZERO.value(), 0.0);
     }
 
     #[test]
     fn sigma_scale_by_zero_yields_zero() {
         let s = Sigma::new(7.5).unwrap().scale(0.0).unwrap();
-        assert_eq!(s.value(), 0.0);
+        assert_relative_eq!(s.value(), 0.0);
     }
 
     #[test]
@@ -214,7 +214,7 @@ mod tests {
         let s = Sigma::new(2.0).unwrap();
         assert_relative_eq!((s * 1.5).value(), 3.0);
         // Multiplication by zero is allowed.
-        assert_eq!((s * 0.0).value(), 0.0);
+        assert_relative_eq!((s * 0.0).value(), 0.0);
     }
 
     #[test]
@@ -239,16 +239,16 @@ mod tests {
     fn uncertain_new_pairs_value_and_sigma() {
         let s = Sigma::new(0.25).unwrap();
         let u: Uncertain<f64> = Uncertain::new(1.5, s);
-        assert_eq!(u.value, 1.5);
+        assert_relative_eq!(u.value, 1.5);
         assert_eq!(u.sigma, s);
     }
 
     #[test]
     fn uncertain_exact_has_zero_sigma() {
         let u: Uncertain<f64> = Uncertain::exact(42.0);
-        assert_eq!(u.value, 42.0);
+        assert_relative_eq!(u.value, 42.0);
         assert_eq!(u.sigma, Sigma::ZERO);
-        assert_eq!(u.sigma.value(), 0.0);
+        assert_relative_eq!(u.sigma.value(), 0.0);
     }
 
     #[test]
