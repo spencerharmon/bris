@@ -999,6 +999,75 @@ pub fn format_pbris(fix: FfiPublishedFix) -> Vec<String> {
     vec![bris_nmea::pbris_fix(utc, &summary)]
 }
 
+/// Severity of a single diagnostic finding (or the overall
+/// diagnosis), mirroring [`bris_calibrate::DiagnosisLevel`].
+///
+/// Foreign code uses this to drive the post-solve UI's
+/// colour scheme (green / amber / red) without having to
+/// parse free-text messages.
+#[derive(Debug, Clone, Copy, uniffi::Enum)]
+pub enum FfiDiagnosisLevel {
+    /// Healthy; no concern.
+    Ok,
+    /// Usable but worth a closer look.
+    Warn,
+    /// Calibration is unlikely to be trustworthy.
+    Error,
+}
+
+impl From<bris_calibrate::DiagnosisLevel> for FfiDiagnosisLevel {
+    fn from(level: bris_calibrate::DiagnosisLevel) -> Self {
+        match level {
+            bris_calibrate::DiagnosisLevel::Ok => Self::Ok,
+            bris_calibrate::DiagnosisLevel::Warn => Self::Warn,
+            bris_calibrate::DiagnosisLevel::Error => Self::Error,
+        }
+    }
+}
+
+/// One issue surfaced by the calibration diagnostic.
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct FfiDiagnosisIssue {
+    /// Severity.
+    pub level: FfiDiagnosisLevel,
+    /// Stable short identifier (`"reproj_error_high"` etc.).
+    pub code: String,
+    /// Human-readable description of what was found.
+    pub message: String,
+    /// Operator-actionable remediation advice.
+    pub remediation: String,
+}
+
+/// Per-frame detection statistics from a calibration solve.
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct FfiDetectionStats {
+    /// Total candidate frames examined.
+    pub tried: u32,
+    /// Frames where no chessboard was found.
+    pub skipped_no_board: u32,
+    /// Frames where the detected grid didn't match the
+    /// configured target.
+    pub skipped_wrong_size: u32,
+    /// Frames that couldn't be opened or decoded.
+    pub skipped_io: u32,
+}
+
+/// Per-view residual stats extracted from the solve.
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct FfiViewResidual {
+    /// Source frame name (last path component); empty for
+    /// in-memory inputs.
+    pub source: String,
+    /// RMS reprojection residual over this view's corners,
+    /// in pixels. `NaN` if the view had no projectable
+    /// corners.
+    pub rms_px: f64,
+    /// Maximum per-corner residual, in pixels.
+    pub max_px: f64,
+    /// Number of corner observations contributing.
+    pub n_corners: u32,
+}
+
 /// Calibration result returned across the FFI.
 #[derive(Debug, Clone, uniffi::Record)]
 pub struct FfiCalibrationResult {
@@ -1017,6 +1086,163 @@ pub struct FfiCalibrationResult {
     /// Number of input frames examined (including those
     /// silently skipped because no checkerboard was detected).
     pub n_frames_total: u32,
+    /// Per-frame detection breakdown (which frames were
+    /// skipped and why).
+    pub detection_stats: FfiDetectionStats,
+    /// Overall diagnosis severity (worst of `issues`, or
+    /// `Ok` if empty).
+    pub diagnosis_overall: FfiDiagnosisLevel,
+    /// Operator-actionable diagnostic findings. Empty when
+    /// the calibration is healthy.
+    pub diagnosis_issues: Vec<FfiDiagnosisIssue>,
+    /// Per-view residual statistics in input order. Empty
+    /// if extraction failed (the aggregate `rms_px` is
+    /// still trustworthy).
+    pub per_view_residuals: Vec<FfiViewResidual>,
+}
+
+/// Outcome of attempting chessboard detection on a single
+/// captured frame.
+///
+/// Mirrors [`bris_calibrate::FrameOutcome`] so foreign code
+/// (Android) can render an actionable per-capture chip
+/// instead of waiting for the aggregate solve to discover
+/// that two-thirds of frames were unusable.
+#[derive(Debug, Clone, uniffi::Enum)]
+pub enum FfiFrameOutcome {
+    /// Chessboard found and grid matches the expected
+    /// target.
+    Detected {
+        /// Number of inner corners labelled.
+        n_corners: u32,
+        /// Bounding box of labelled corners, in pixels.
+        bbox: FfiBoundingBox,
+        /// Laplacian-variance sharpness over the bbox.
+        /// Higher = sharper. NaN if the bbox was too small
+        /// to compute (degenerate; should not occur for
+        /// real captures).
+        sharpness: f64,
+    },
+    /// Detector ran but found nothing chessboard-shaped.
+    /// Most common cause is motion blur, severe defocus,
+    /// or the board outside the FOV.
+    NoBoardFound,
+    /// Detector found a chessboard but its grid dimensions
+    /// don't match the configured target.
+    WrongGridSize {
+        /// Grid rows the detector recovered.
+        found_rows: u32,
+        /// Grid cols the detector recovered.
+        found_cols: u32,
+        /// Rows the operator configured.
+        expected_rows: u32,
+        /// Cols the operator configured.
+        expected_cols: u32,
+    },
+    /// Image decode failed.
+    DecodeFailed {
+        /// Underlying decoder error message.
+        reason: String,
+    },
+}
+
+/// Pixel-space axis-aligned bounding box.
+#[derive(Debug, Clone, Copy, uniffi::Record)]
+pub struct FfiBoundingBox {
+    /// Smallest X (column).
+    pub min_x: f64,
+    /// Smallest Y (row).
+    pub min_y: f64,
+    /// Largest X (column).
+    pub max_x: f64,
+    /// Largest Y (row).
+    pub max_y: f64,
+}
+
+impl From<bris_calibrate::BoundingBox> for FfiBoundingBox {
+    fn from(b: bris_calibrate::BoundingBox) -> Self {
+        Self {
+            min_x: b.min_x,
+            min_y: b.min_y,
+            max_x: b.max_x,
+            max_y: b.max_y,
+        }
+    }
+}
+
+impl From<bris_calibrate::FrameOutcome> for FfiFrameOutcome {
+    fn from(o: bris_calibrate::FrameOutcome) -> Self {
+        match o {
+            bris_calibrate::FrameOutcome::Detected {
+                n_corners,
+                bbox_px,
+                sharpness,
+                ..
+            } => Self::Detected {
+                n_corners,
+                bbox: bbox_px.into(),
+                sharpness,
+            },
+            bris_calibrate::FrameOutcome::NoBoardFound => Self::NoBoardFound,
+            bris_calibrate::FrameOutcome::WrongGridSize {
+                found_rows,
+                found_cols,
+                expected_rows,
+                expected_cols,
+            } => Self::WrongGridSize {
+                found_rows,
+                found_cols,
+                expected_rows,
+                expected_cols,
+            },
+            bris_calibrate::FrameOutcome::DecodeFailed { reason } => Self::DecodeFailed { reason },
+        }
+    }
+}
+
+/// Detect a chessboard in a single JPEG buffer.
+///
+/// The interactive-calibration entry point: the Android
+/// shell calls this for every captured frame and renders
+/// the result as a per-capture chip (green = detected,
+/// amber = wrong grid, red = no board / decode failed) so
+/// the operator can immediately see which frames will be
+/// usable when the solve runs.
+///
+/// Cheap by FFI standards (decode + corner detection;
+/// hundreds of ms on a phone-class device for a 1920×1080
+/// JPEG). The foreign caller should still invoke this from
+/// a background thread.
+///
+/// # Errors
+///
+/// - [`FfiError::InvalidArgument`] for invalid target
+///   dimensions (zero rows/cols, non-positive square size).
+///
+/// Detection failures are reported via the
+/// [`FfiFrameOutcome`] variants, not as `Err`.
+#[uniffi::export]
+pub fn detect_calibration_frame(
+    jpeg_bytes: Vec<u8>,
+    rows: u32,
+    cols: u32,
+    square_size_mm: f64,
+) -> Result<FfiFrameOutcome, FfiError> {
+    if rows == 0 || cols == 0 {
+        return Err(FfiError::InvalidArgument {
+            detail: format!("calibration: rows={rows} cols={cols} must be positive"),
+        });
+    }
+    if !square_size_mm.is_finite() || square_size_mm <= 0.0 {
+        return Err(FfiError::InvalidArgument {
+            detail: format!("calibration: square_size_mm={square_size_mm} must be positive"),
+        });
+    }
+    let target = bris_calibrate::CheckerboardTarget::new(rows, cols, square_size_mm / 1000.0)
+        .map_err(|e| FfiError::InvalidArgument {
+            detail: format!("calibration target: {e:?}"),
+        })?;
+    Ok(bris_calibrate::detect_corners_in_jpeg(&jpeg_bytes, target).into())
 }
 
 /// Run a one-shot calibration over a directory of checkerboard
@@ -1060,15 +1286,46 @@ pub fn run_calibration(
             detail: format!("calibration target: {e:?}"),
         })?;
     let path = std::path::Path::new(&frames_dir);
-    let (views, stats) =
-        bris_calibrate::detect_corners_in_directory(path, target).map_err(|e| {
-            FfiError::Engine {
-                detail: format!("calibration detect: {e:?}"),
-            }
-        })?;
-    let result = bris_calibrate::calibrate(&views).map_err(|e| FfiError::Engine {
+    let detection = bris_calibrate::detect_corners_in_directory(path, target).map_err(|e| {
+        FfiError::Engine {
+            detail: format!("calibration detect: {e:?}"),
+        }
+    })?;
+    let stats = detection.stats;
+    let result = bris_calibrate::calibrate(&detection.views).map_err(|e| FfiError::Engine {
         detail: format!("calibration solve: {e:?}"),
     })?;
+    let diagnosis = bris_calibrate::diagnose(&result);
+    let detection_stats = FfiDetectionStats {
+        tried: u32::try_from(stats.tried).unwrap_or(u32::MAX),
+        skipped_no_board: u32::try_from(stats.skipped_no_board).unwrap_or(u32::MAX),
+        skipped_wrong_size: u32::try_from(stats.skipped_wrong_size).unwrap_or(u32::MAX),
+        skipped_io: u32::try_from(stats.skipped_io).unwrap_or(u32::MAX),
+    };
+    let diagnosis_issues = diagnosis
+        .issues
+        .iter()
+        .map(|i| FfiDiagnosisIssue {
+            level: i.level.into(),
+            code: i.code.to_string(),
+            message: i.message.clone(),
+            remediation: i.remediation.to_string(),
+        })
+        .collect();
+    let per_view_residuals = result
+        .per_view
+        .iter()
+        .map(|v| FfiViewResidual {
+            source: v
+                .source
+                .file_name()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+            rms_px: v.rms_px,
+            max_px: v.max_px,
+            n_corners: u32::try_from(v.n_corners).unwrap_or(u32::MAX),
+        })
+        .collect();
     Ok(FfiCalibrationResult {
         intrinsics: FfiIntrinsics {
             fx: result.intrinsics.fx,
@@ -1086,5 +1343,110 @@ pub fn run_calibration(
         rms_px: result.mean_reproj_error_px,
         n_frames_used: u32::try_from(result.view_count).unwrap_or(u32::MAX),
         n_frames_total: u32::try_from(stats.tried).unwrap_or(u32::MAX),
+        detection_stats,
+        diagnosis_overall: diagnosis.overall.into(),
+        diagnosis_issues,
+        per_view_residuals,
+    })
+}
+
+/// Image-plane coverage of a session's accumulated
+/// detected views, for the live "where to point next"
+/// indicator.
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct FfiCoverageReport {
+    /// Image width the report was computed against.
+    pub image_width: u32,
+    /// Image height the report was computed against.
+    pub image_height: u32,
+    /// Number of grid columns.
+    pub grid_cols: u32,
+    /// Number of grid rows.
+    pub grid_rows: u32,
+    /// Row-major counts: `cell_counts[r * grid_cols + c]` is
+    /// the number of views overlapping cell `(r, c)`.
+    pub cell_counts: Vec<u32>,
+    /// Fraction of cells with at least one view, 0..=1.
+    pub covered_fraction: f64,
+    /// Cells with zero views.
+    pub empty_cells: u32,
+    /// Standard deviation of per-view bounding-box aspect
+    /// ratios — a coarse pose-tilt diversity proxy.
+    pub aspect_ratio_stddev: f64,
+}
+
+/// Compute coverage for a session whose successful
+/// detections are JPEGs in `frames_dir`.
+///
+/// Decodes and re-detects every frame in the directory.
+/// Cheap relative to the solve but still O(seconds) for a
+/// full session; foreign callers should invoke from a
+/// background thread.
+///
+/// Returns `None` (mapped to `Err(InvalidArgument)`) when
+/// the directory contains no successful detections at all
+/// (typical at session start before the first capture).
+///
+/// # Errors
+///
+/// - [`FfiError::InvalidArgument`] for invalid target
+///   dimensions or when the directory has no usable
+///   detections yet.
+/// - [`FfiError::Engine`] when the directory itself can't
+///   be read.
+#[uniffi::export]
+pub fn calibration_coverage(
+    frames_dir: String,
+    rows: u32,
+    cols: u32,
+    square_size_mm: f64,
+) -> Result<FfiCoverageReport, FfiError> {
+    if rows == 0 || cols == 0 {
+        return Err(FfiError::InvalidArgument {
+            detail: format!("calibration: rows={rows} cols={cols} must be positive"),
+        });
+    }
+    if !square_size_mm.is_finite() || square_size_mm <= 0.0 {
+        return Err(FfiError::InvalidArgument {
+            detail: format!("calibration: square_size_mm={square_size_mm} must be positive"),
+        });
+    }
+    let target = bris_calibrate::CheckerboardTarget::new(rows, cols, square_size_mm / 1000.0)
+        .map_err(|e| FfiError::InvalidArgument {
+            detail: format!("calibration target: {e:?}"),
+        })?;
+    let path = std::path::Path::new(&frames_dir);
+    let detection = match bris_calibrate::detect_corners_in_directory(path, target) {
+        Ok(d) => d,
+        // TooFewViews / NoImages map to an empty-coverage
+        // request, which the Android side renders as "0/16
+        // cells covered" rather than a hard error.
+        Err(
+            bris_calibrate::DetectError::TooFewViews { .. }
+            | bris_calibrate::DetectError::NoImages(_),
+        ) => {
+            return Err(FfiError::InvalidArgument {
+                detail: "no successful detections yet".to_string(),
+            });
+        }
+        Err(e) => {
+            return Err(FfiError::Engine {
+                detail: format!("calibration detect: {e:?}"),
+            })
+        }
+    };
+    let cov = bris_calibrate::coverage(&detection.views, bris_calibrate::CoverageConfig::default())
+        .ok_or_else(|| FfiError::InvalidArgument {
+            detail: "coverage: no usable views".to_string(),
+        })?;
+    Ok(FfiCoverageReport {
+        image_width: cov.image_width,
+        image_height: cov.image_height,
+        grid_cols: cov.config.grid_cols,
+        grid_rows: cov.config.grid_rows,
+        cell_counts: cov.cell_counts,
+        covered_fraction: cov.covered_fraction,
+        empty_cells: cov.empty_cells,
+        aspect_ratio_stddev: cov.aspect_ratio_stddev,
     })
 }

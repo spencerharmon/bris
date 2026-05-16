@@ -21,8 +21,9 @@ mod nmea_transport;
 use anyhow::{bail, Context};
 use bris_almanac::{body_apparent_place, ApparentPlace, Atmosphere, Observer, SolarSystemBody};
 use bris_calibrate::{
-    calibrate, default_intrinsics_path, detect_corners_in_directory_with_progress, diagnose,
-    write_intrinsics, CheckerboardTarget, DiagnosisLevel,
+    calibrate, coverage, default_intrinsics_path, detect_corners_in_directory_with_progress,
+    diagnose, write_intrinsics, CheckerboardTarget, CoverageConfig, DiagnosisLevel, FrameDetection,
+    FrameOutcome,
 };
 use bris_capture::{
     run_capture_loop, run_capture_loop_with, CaptureLoopAction, V4l2Capture, V4l2Config,
@@ -985,7 +986,12 @@ fn run_calibrate(args: &CalibrateArgs) -> anyhow::Result<()> {
     // (which the library does first), but indicatif lets us
     // start with an unknown total and switch to a known one
     // on the first callback. We lean on the callback's
-    // (current, total) signature to do exactly that.
+    // (current, total, &outcome) signature to do exactly
+    // that, and to print a one-line per-frame note for
+    // every non-success outcome so the operator can
+    // immediately see *why* a frame was skipped instead of
+    // discovering "23 of 30 frames were skipped" with no
+    // detail at the end.
     let detect_bar = indicatif::ProgressBar::new(0).with_style(
         indicatif::ProgressStyle::with_template(
             "  detecting [{wide_bar}] {pos}/{len} frames • {elapsed_precise} • eta {eta}",
@@ -994,22 +1000,53 @@ fn run_calibrate(args: &CalibrateArgs) -> anyhow::Result<()> {
         .progress_chars("=> "),
     );
     let detect_bar_for_callback = detect_bar.clone();
-    let mut on_progress = move |current: usize, total: usize| {
-        // The library calls this once before each frame
-        // (with current = 0..total) and once at the end
-        // (with current == total). Resize the bar's known
-        // length on the first call; advance position on
-        // every call.
+    let mut on_progress = move |current: usize, total: usize, det: &FrameDetection| {
         if detect_bar_for_callback.length() != Some(total as u64) {
             detect_bar_for_callback.set_length(total as u64);
         }
-        detect_bar_for_callback.set_position(current as u64);
+        detect_bar_for_callback.set_position(current as u64 + 1);
+        // Print non-success outcomes inline; success is the
+        // norm and the running bar is enough feedback.
+        match &det.outcome {
+            FrameOutcome::Detected { .. } => {}
+            FrameOutcome::NoBoardFound => {
+                detect_bar_for_callback.println(format!(
+                    "  · {}: no chessboard detected (motion blur, defocus, or board out of frame)",
+                    det.path.display()
+                ));
+            }
+            FrameOutcome::WrongGridSize {
+                found_rows,
+                found_cols,
+                expected_rows,
+                expected_cols,
+            } => {
+                detect_bar_for_callback.println(format!(
+                    "  · {}: found {}×{} grid, expected {}×{} \
+                     (partial occlusion or wrong --rows/--cols)",
+                    det.path.display(),
+                    found_rows,
+                    found_cols,
+                    expected_rows,
+                    expected_cols,
+                ));
+            }
+            FrameOutcome::DecodeFailed { reason } => {
+                detect_bar_for_callback.println(format!(
+                    "  · {}: decode failed: {}",
+                    det.path.display(),
+                    reason
+                ));
+            }
+        }
     };
     let detect_result =
         detect_corners_in_directory_with_progress(&args.frames, target, &mut on_progress);
     detect_bar.finish_and_clear();
-    let (views, stats) =
+    let detection =
         detect_result.with_context(|| format!("detect corners in {}", args.frames.display()))?;
+    let views = detection.views;
+    let stats = detection.stats;
     info!(
         successful_views = views.len(),
         skipped_no_board = stats.skipped_no_board,
@@ -1018,11 +1055,60 @@ fn run_calibrate(args: &CalibrateArgs) -> anyhow::Result<()> {
         tried = stats.tried,
         "bris calibrate: detection done"
     );
+    eprintln!(
+        "  detection: {}/{} frames produced usable views \
+         ({} no-board, {} wrong-grid, {} decode-failed)",
+        views.len(),
+        stats.tried,
+        stats.skipped_no_board,
+        stats.skipped_wrong_size,
+        stats.skipped_io,
+    );
     if stats.skipped_no_board + stats.skipped_wrong_size > stats.tried / 3 {
         warn!(
             "more than a third of frames produced no usable detection; \
              consider re-shooting with sharper focus and a fully-visible board"
         );
+    }
+
+    // Coverage report: rendered as ASCII art so the
+    // operator can see at a glance which image-plane
+    // regions they over- or under-sampled. Useful before
+    // the solve to decide whether to re-shoot, and after
+    // it as part of the diagnostic.
+    if let Some(cov) = coverage(&views, CoverageConfig::default()) {
+        eprintln!();
+        eprintln!(
+            "  coverage: {}/{} grid cells sampled ({:.0}% of FOV) — pose-tilt diversity σ = {:.3}",
+            (cov.cell_counts.iter().filter(|&&c| c > 0).count()),
+            cov.cell_counts.len(),
+            cov.covered_fraction * 100.0,
+            cov.aspect_ratio_stddev,
+        );
+        for r in 0..cov.config.grid_rows {
+            let mut line = String::from("    ");
+            for c in 0..cov.config.grid_cols {
+                let count = cov.cell_counts[(r * cov.config.grid_cols + c) as usize];
+                let ch = match count {
+                    0 => '.',
+                    1..=2 => '·',
+                    3..=5 => '+',
+                    6..=10 => '#',
+                    _ => '*',
+                };
+                line.push(ch);
+                line.push(' ');
+            }
+            eprintln!("{line}");
+        }
+        eprintln!("    legend: . empty  · 1-2  + 3-5  # 6-10  * >10");
+        if !cov.fully_covered() {
+            eprintln!(
+                "    {} cell(s) still empty; consider capturing additional frames \
+                 with the board placed in those regions of the FOV.",
+                cov.empty_cells,
+            );
+        }
     }
 
     // Solve bar: spinner only — the LM solve is one opaque
@@ -1049,6 +1135,7 @@ fn run_calibrate(args: &CalibrateArgs) -> anyhow::Result<()> {
 
     let diagnosis = diagnose(&result);
     print_diagnosis(&diagnosis);
+    print_per_view_residuals(&result);
     if matches!(diagnosis.overall, DiagnosisLevel::Error) {
         bail!(
             "calibration diagnostic flagged at least one error; not writing intrinsics. \
@@ -1111,5 +1198,56 @@ fn print_diagnosis(d: &bris_calibrate::Diagnosis) {
             issue.message
         );
         eprintln!("       → {}", issue.remediation);
+    }
+}
+
+/// Print the per-view residual table (top offenders).
+///
+/// Empty `per_view` (residual extraction failed) prints
+/// nothing; the aggregate `mean_reproj_error_px` already
+/// printed elsewhere is the headline number.
+fn print_per_view_residuals(result: &bris_calibrate::CalibrationResult) {
+    if result.per_view.is_empty() {
+        return;
+    }
+    let mut sorted: Vec<&bris_calibrate::ViewResidual> = result.per_view.iter().collect();
+    sorted.sort_by(|a, b| {
+        b.rms_px
+            .partial_cmp(&a.rms_px)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    let n_show = sorted.len().min(5);
+    eprintln!();
+    eprintln!("Per-view residuals (worst {n_show} of {}):", sorted.len());
+    for v in sorted.iter().take(n_show) {
+        let name = v.source.file_name().map_or_else(
+            || v.source.display().to_string(),
+            |s| s.to_string_lossy().into_owned(),
+        );
+        eprintln!(
+            "  {:<28} rms={:>6.3} px  max={:>6.3} px  ({} corners)",
+            name, v.rms_px, v.max_px, v.n_corners,
+        );
+    }
+    eprintln!(
+        "  (median view rms = {:.3} px; consider deleting outliers > 2× median and re-running)",
+        median(&result.per_view.iter().map(|v| v.rms_px).collect::<Vec<_>>()),
+    );
+}
+
+fn median(values: &[f64]) -> f64 {
+    if values.is_empty() {
+        return f64::NAN;
+    }
+    let mut v: Vec<f64> = values.iter().copied().filter(|x| x.is_finite()).collect();
+    v.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    if v.is_empty() {
+        return f64::NAN;
+    }
+    let n = v.len();
+    if n % 2 == 1 {
+        v[n / 2]
+    } else {
+        0.5 * (v[n / 2 - 1] + v[n / 2])
     }
 }

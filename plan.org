@@ -300,6 +300,27 @@ references to the regression tests that pin the behavior. See
    producing. Operator-facing user documentation in
    [[file:docs/operator/calibration.md][docs/operator/calibration.md]].
 
+   *Interactive calibration UX (2026-05):* the per-frame primitive
+   ~detect_corners_in_jpeg~ now reports a typed ~FrameOutcome~
+   enum (Detected / NoBoardFound / WrongGridSize / DecodeFailed,
+   with corner counts, bbox, and Laplacian-variance sharpness
+   for the success case) so callers can show per-capture
+   feedback instead of discovering bad frames only after the
+   solve runs. The CLI walks the directory printing inline
+   per-frame skip reasons during detection, an ASCII coverage
+   map (4×4 grid of FOV cells with sample counts) before the
+   solve, and a "worst-N per-view residuals" table after.
+   ~CalibrationResult~ now carries per-view RMS / max
+   residuals, a ~DetectionStats~ summary, and the ~Diagnosis~
+   inline. The Android shell uses the new FFI surfaces
+   (~detectCalibrationFrame~, ~calibrationCoverage~) to show
+   per-capture chips (green/amber/red), auto-reject ~NoBoard~
+   frames into ~frames/rejected/~, and render post-solve
+   diagnosis cards plus worst-3 outlier views. Pose-coverage
+   estimator lives in ~bris-calibrate::coverage~ as a
+   pre-solve "where to point next" helper (heuristic, see
+   module docs).
+
    Star-field self-calibration is still pending — interesting once
    plate solving on real data is reliable enough to bootstrap.
    Factory-default per-device intrinsics for shipped hardware

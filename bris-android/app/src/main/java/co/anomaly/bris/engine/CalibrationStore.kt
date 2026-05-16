@@ -70,6 +70,7 @@ class CalibrationStore(private val rootDir: File) {
         val id = ulid()
         val dir = File(lensDir(lensId, width, height), id).apply { mkdirs() }
         File(dir, "frames").mkdirs()
+        File(dir, "frames/rejected").mkdirs()
         return dir
     }
 
@@ -87,6 +88,41 @@ class CalibrationStore(private val rootDir: File) {
         val f = File(sessionDir, "frames/$name")
         f.writeBytes(jpegBytes)
         return f
+    }
+
+    /**
+     * Move a captured frame into the per-session
+     * `frames/rejected/` subdir.
+     *
+     * Used when per-capture detection reports an outcome
+     * the operator chooses to discard ("no board found",
+     * "wrong grid size", or any other case the operator
+     * doesn't want to feed to the solver). The file is
+     * preserved (not deleted) so the session remains
+     * forensically reproducible — `bris-collector`
+     * submissions of a calibration session can include
+     * the `rejected/` directory if the operator opts in.
+     *
+     * Returns the new path of the moved file, or `null` if
+     * the source didn't exist.
+     */
+    fun rejectFrame(sessionDir: File, seq: Int, reasonCode: String): File? {
+        val name = "frame_${"%04d".format(seq)}.jpg"
+        val src = File(sessionDir, "frames/$name")
+        if (!src.exists()) return null
+        val dstName = "frame_${"%04d".format(seq)}_${reasonCode}.jpg"
+        val dst = File(sessionDir, "frames/rejected/$dstName")
+        dst.parentFile?.mkdirs()
+        // File.renameTo can fail across mount points; on
+        // Android internal storage that's not a concern, but
+        // we fall back to a copy+delete just in case the
+        // session was moved to external storage by the
+        // operator.
+        if (!src.renameTo(dst)) {
+            src.copyTo(dst, overwrite = true)
+            src.delete()
+        }
+        return dst
     }
 
     /** Persist the checkerboard target description for the session. */
@@ -110,6 +146,31 @@ class CalibrationStore(private val rootDir: File) {
             .put("k3", result.intrinsics.k3)
             .put("p1", result.intrinsics.p1)
             .put("p2", result.intrinsics.p2)
+        val stats = JSONObject()
+            .put("tried", result.detectionStats.tried.toLong())
+            .put("skipped_no_board", result.detectionStats.skippedNoBoard.toLong())
+            .put("skipped_wrong_size", result.detectionStats.skippedWrongSize.toLong())
+            .put("skipped_io", result.detectionStats.skippedIo.toLong())
+        val issues = org.json.JSONArray()
+        for (issue in result.diagnosisIssues) {
+            issues.put(
+                JSONObject()
+                    .put("level", issue.level.name)
+                    .put("code", issue.code)
+                    .put("message", issue.message)
+                    .put("remediation", issue.remediation),
+            )
+        }
+        val perView = org.json.JSONArray()
+        for (v in result.perViewResiduals) {
+            perView.put(
+                JSONObject()
+                    .put("source", v.source)
+                    .put("rms_px", v.rmsPx)
+                    .put("max_px", v.maxPx)
+                    .put("n_corners", v.nCorners.toLong()),
+            )
+        }
         val obj = JSONObject()
             .put("intrinsics", intr)
             .put("width", result.width.toLong())
@@ -117,6 +178,10 @@ class CalibrationStore(private val rootDir: File) {
             .put("rms_px", result.rmsPx)
             .put("n_frames_used", result.nFramesUsed.toLong())
             .put("n_frames_total", result.nFramesTotal.toLong())
+            .put("detection_stats", stats)
+            .put("diagnosis_overall", result.diagnosisOverall.name)
+            .put("diagnosis_issues", issues)
+            .put("per_view_residuals", perView)
         File(sessionDir, "intrinsics.json").writeText(obj.toString())
     }
 

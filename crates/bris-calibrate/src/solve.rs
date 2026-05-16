@@ -3,7 +3,8 @@
 //! Wraps the `vision-calibration` planar-intrinsics workflow
 //! (Zhang's closed-form initialization + non-linear bundle
 //! adjustment) into a single function returning Bris's
-//! [`bris_vision::Intrinsics`] plus a quality summary.
+//! [`bris_vision::Intrinsics`] plus a quality summary
+//! including per-view RMS reprojection residuals.
 //!
 //! # Solver behaviour
 //!
@@ -17,18 +18,48 @@
 //! residual over every observed corner. Sub-pixel residuals
 //! (< 0.5 px) on a clean capture are routine; > 1.0 px
 //! suggests a problem (the [`crate::doctor`] module
-//! flags this and other failure modes).
+//! flags this and other failure modes). Per-view residuals
+//! let the caller (CLI / Android UI) point at the
+//! offending frames specifically rather than just reporting
+//! an aggregate.
+
+use std::path::PathBuf;
 
 use bris_vision::Intrinsics;
 use thiserror::Error;
 use tracing::{debug, info};
-use vision_calibration::core::{CorrespondenceView, NoMeta, PlanarDataset, Pt2, Pt3, View};
+use vision_calibration::core::{
+    make_pinhole_camera, CorrespondenceView, NoMeta, PlanarDataset, Pt2, Pt3, View,
+};
 use vision_calibration::planar_intrinsics::{
     run_calibration as run_planar, PlanarIntrinsicsProblem,
 };
 use vision_calibration::session::CalibrationSession;
 
 use crate::detect::DetectedView;
+
+/// Per-view residual statistics extracted from the solve.
+///
+/// Lets the operator see *which* views are dragging the
+/// aggregate RMS up. The CLI prints a sorted list with the
+/// worst offenders at the top; the Android UI surfaces the
+/// outliers as a list of "remove this frame and re-solve?"
+/// suggestions.
+#[derive(Debug, Clone)]
+pub struct ViewResidual {
+    /// Source frame path (copied from the input
+    /// [`DetectedView::source`]).
+    pub source: PathBuf,
+    /// RMS reprojection residual over this view's corners,
+    /// in pixels.
+    pub rms_px: f64,
+    /// Maximum per-corner residual, in pixels — useful for
+    /// catching individual mis-labelled corners that the
+    /// average smooths out.
+    pub max_px: f64,
+    /// Number of corner observations contributing.
+    pub n_corners: usize,
+}
 
 /// Result of a calibration solve.
 #[derive(Debug, Clone)]
@@ -53,6 +84,11 @@ pub struct CalibrationResult {
     pub view_count: usize,
     /// Total number of corner observations across all views.
     pub observation_count: usize,
+    /// Per-view residual statistics in input order. Length
+    /// equals `view_count`. Empty if per-view extraction
+    /// failed (logged as a `warn!`); the aggregate result
+    /// is still trustworthy in that case.
+    pub per_view: Vec<ViewResidual>,
 }
 
 /// Errors during the calibration solve.
@@ -88,6 +124,14 @@ pub enum SolveError {
 /// internally runs `step_init` (Zhang) then `step_optimize`
 /// (LM); we call the convenience `run_calibration` wrapper
 /// that does both with default options.
+///
+/// After the solve, the per-view extrinsics are recovered
+/// from `session.output()` and used to compute per-view RMS
+/// residuals (we project each view's correspondences using
+/// the fitted intrinsics + the view's pose and accumulate
+/// pixel errors). These per-view stats let the caller
+/// surface "frame 12 is the outlier" feedback instead of
+/// just an aggregate "rms = 1.4 px".
 ///
 /// # Errors
 ///
@@ -136,6 +180,18 @@ pub fn calibrate(views: &[DetectedView]) -> Result<CalibrationResult, SolveError
         .map_err(|e| SolveError::Solver(format!("set_input: {e}")))?;
     debug!(views = views.len(), "bris-calibrate: starting solve");
     run_planar(&mut session).map_err(|e| SolveError::Solver(format!("run_calibration: {e}")))?;
+
+    // Pull per-view residuals from the in-progress output
+    // (the export drops them; only the aggregate survives
+    // export). If anything goes wrong we still return the
+    // aggregate result with an empty `per_view` — the
+    // caller's per-view UI just won't have anything to
+    // show, but the calibration itself is unaffected.
+    let per_view = compute_per_view_residuals(&session, views).unwrap_or_else(|e| {
+        tracing::warn!(error = %e, "per-view residual extraction failed; aggregate stats still valid");
+        Vec::new()
+    });
+
     let export = session
         .export()
         .map_err(|e| SolveError::Solver(format!("export: {e}")))?;
@@ -172,7 +228,64 @@ pub fn calibrate(views: &[DetectedView]) -> Result<CalibrationResult, SolveError
         mean_reproj_error_px: export.mean_reproj_error,
         view_count: views.len(),
         observation_count: total_observations,
+        per_view,
     })
+}
+
+/// Compute per-view RMS / max residuals by projecting each
+/// view's 3D correspondences using the fitted intrinsics
+/// and the view's recovered pose.
+fn compute_per_view_residuals(
+    session: &CalibrationSession<PlanarIntrinsicsProblem>,
+    inputs: &[DetectedView],
+) -> Result<Vec<ViewResidual>, String> {
+    let estimate = session
+        .output()
+        .ok_or_else(|| "session.output() unavailable".to_string())?;
+    let camera = make_pinhole_camera(estimate.params.intrinsics(), estimate.params.distortion());
+    let poses = estimate.params.poses();
+    if poses.len() != inputs.len() {
+        return Err(format!(
+            "pose count {} ≠ input view count {}",
+            poses.len(),
+            inputs.len(),
+        ));
+    }
+    let mut out = Vec::with_capacity(inputs.len());
+    for (view, pose) in inputs.iter().zip(poses.iter()) {
+        let mut sum_sq = 0.0_f64;
+        let mut max = 0.0_f64;
+        let mut n = 0_usize;
+        for c in &view.correspondences {
+            let p_target = vision_calibration::core::Pt3::new(c.board_x_m, c.board_y_m, 0.0);
+            let p_cam = pose * p_target;
+            let Some(projected) = camera.project_point_c(&p_cam.coords) else {
+                continue;
+            };
+            let dx = projected.x - c.pixel_x;
+            let dy = projected.y - c.pixel_y;
+            let err = (dx * dx + dy * dy).sqrt();
+            sum_sq += err * err;
+            if err > max {
+                max = err;
+            }
+            n += 1;
+        }
+        let rms = if n > 0 {
+            #[allow(clippy::cast_precision_loss)]
+            let nf = n as f64;
+            (sum_sq / nf).sqrt()
+        } else {
+            f64::NAN
+        };
+        out.push(ViewResidual {
+            source: view.source.clone(),
+            rms_px: rms,
+            max_px: max,
+            n_corners: n,
+        });
+    }
+    Ok(out)
 }
 
 #[cfg(test)]

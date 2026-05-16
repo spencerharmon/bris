@@ -59,6 +59,65 @@ For the end-to-end pipeline architecture and data flow, see
   device verified through the YUV-buffer-underflow fix
   (commit a9894ef). Design doc:
   `docs/design/diagnostic_collection.md`.
+
+  **Interactive calibration UX overhaul (2026-05, this branch).**
+  The previous flow ("capture 40 frames, wait, find out only 7
+  solved") was the operator's headline pain point. The fix:
+
+  - `bris-calibrate::detect_corners_in_jpeg` is the new
+    per-frame primitive returning a typed `FrameOutcome`
+    (`Detected { n_corners, bbox_px, sharpness, view }` /
+    `NoBoardFound` / `WrongGridSize { found, expected }` /
+    `DecodeFailed { reason }`). Corner detection plus a
+    Laplacian-variance sharpness reading over the labelled
+    bbox; the same primitive backs both `detect_corners_in_jpeg`
+    (FFI/Android) and `detect_corners_in_image` (used by the
+    refactored directory walker).
+  - `detect_corners_in_directory*` now returns a
+    `DirectoryDetection { views, per_frame, stats }` and the
+    progress callback receives `(current, total,
+    &FrameDetection)` so the CLI can print one-line skip
+    reasons inline as detection proceeds.
+  - `solve::calibrate` extracts per-view RMS / max residuals
+    by re-projecting each view's correspondences with the
+    fitted intrinsics + recovered pose. The CLI prints a
+    "worst N" table; Android shows the worst three under
+    the result panel.
+  - New `bris-calibrate::coverage` module: 4×4 image-plane
+    coverage report + tilt-diversity proxy (per-view bbox
+    aspect-ratio stddev). Module docs flag this as a
+    pre-solve heuristic, not a substitute for post-solve
+    pose analysis.
+  - `bris-cli calibrate` subcommand: prints per-frame skip
+    reasons during detection, an ASCII coverage map before
+    the solve, post-solve diagnosis (was already there) plus
+    the worst-N residual table.
+  - `bris-ffi` exposes `detectCalibrationFrame`,
+    `calibrationCoverage`, `FfiFrameOutcome`,
+    `FfiDiagnosisLevel`, `FfiDiagnosisIssue`,
+    `FfiDetectionStats`, `FfiViewResidual`, and a
+    `FfiCalibrationResult` extended with diagnosis +
+    per-view residuals.
+  - `bris-android` `CalibrationScreen.kt`: every capture
+    now decodes-and-detects on `Dispatchers.Default`,
+    shows a colored chip with the outcome plus a
+    one-paragraph remediation hint, maintains a running
+    tally (`Good 12 · NoBoard 3 · Wrong 1 · DecodeErr 0`),
+    auto-rejects `NoBoardFound` and `DecodeFailed` into
+    `frames/rejected/` (preserved for forensic review,
+    not deleted — operator-confirmed default), offers
+    "Discard last" for manual rejection of accepted
+    frames, and renders post-solve diagnosis cards plus
+    the three worst per-view residuals.
+  - `CalibrationStore.rejectFrame` moves bytes into
+    `frames/rejected/<seq>_<reason>.jpg`; the directory
+    walk that feeds the solver lists files only at
+    `frames/*.jpg` so rejected frames are excluded
+    automatically.
+  - All 39 `bris-calibrate` tests + the full workspace
+    `cargo clippy --all-features -- -D warnings` are
+    clean; APK build and on-device validation run in CI.
+
 - **Phase 7 (mobile sight-capture session) — developer-iteration
   spike.** `crates/bris-streaming` exposes per-fix
   contributing-frame IDs + `frame_by_id` so the mobile
