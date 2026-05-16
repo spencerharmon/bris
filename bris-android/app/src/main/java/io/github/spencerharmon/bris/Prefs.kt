@@ -1,4 +1,4 @@
-package co.anomaly.bris
+package io.github.spencerharmon.bris
 
 import android.content.Context
 import androidx.datastore.preferences.core.booleanPreferencesKey
@@ -37,7 +37,7 @@ class Prefs(private val context: Context) {
      * callers fall back to a heuristic default).
      *
      * The id is the underlying Camera2 `cameraId` string
-     * surfaced by [`co.anomaly.bris.engine.LensCatalog`]; it is
+     * surfaced by [`io.github.spencerharmon.bris.engine.LensCatalog`]; it is
      * stable across app launches on a given device but is
      * device-specific. Calibration intrinsics are keyed by
      * this id so a wide-lens calibration never silently

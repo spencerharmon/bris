@@ -1,4 +1,4 @@
-package co.anomaly.bris.engine
+package io.github.spencerharmon.bris.engine
 
 import android.content.Context
 import org.json.JSONArray
@@ -42,7 +42,7 @@ import uniffi.bris_ffi.FfiFrame
  * Submission flow (wired in `PreUploadReviewScreen`): when
  * "Send fix" or "Send debug capture" is invoked, the buffer's
  * [`recentEntries`] is queried, each entry's frame and snapshot
- * become a [`co.anomaly.bris.upload.MediaSummary`], and the
+ * become a [`io.github.spencerharmon.bris.upload.MediaSummary`], and the
  * Submitter uploads them.
  *
  * Threading: this class is `Sendable`-equivalent via internal

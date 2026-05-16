@@ -1,4 +1,4 @@
-package co.anomaly.bris.upload
+package io.github.spencerharmon.bris.upload
 
 import android.os.Build
 import org.json.JSONArray

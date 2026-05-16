@@ -1,4 +1,4 @@
-package co.anomaly.bris.upload
+package io.github.spencerharmon.bris.upload
 
 import okhttp3.MediaType.Companion.toMediaTypeOrNull
 import okhttp3.MultipartBody

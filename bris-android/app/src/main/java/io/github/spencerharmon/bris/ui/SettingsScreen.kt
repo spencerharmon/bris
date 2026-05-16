@@ -1,4 +1,4 @@
-package co.anomaly.bris.ui
+package io.github.spencerharmon.bris.ui
 
 import android.Manifest
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -28,8 +28,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
-import co.anomaly.bris.Prefs
-import co.anomaly.bris.engine.LensCatalog
+import io.github.spencerharmon.bris.Prefs
+import io.github.spencerharmon.bris.engine.LensCatalog
 import kotlinx.coroutines.launch
 
 /**
