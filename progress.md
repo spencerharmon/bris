@@ -135,27 +135,36 @@ For the end-to-end pipeline architecture and data flow, see
   the foreground service for backgrounding survival are all
   tracked follow-ups.
 - **Per-stage resolution architecture (Phase 2 evolution) —
-  steps 1, 2, 3a landed; 3b + 4 pending.** Operator-driven
-  scope after a design discussion about whether to downsample
-  uniformly (silently penalizing centroiding precision) or
-  carve out per-stage resolutions. Three foundation commits:
-  `Intrinsics::scaled_to` (cross-resolution math + FFI
-  surface), `bris_vision::ray` (camera-space `HorizonRay` /
-  `BodyRay` / `CameraRay` + altitude composition), and
-  `FramePyramid` (lazy-cached per-stage downsamples + scaled
-  intrinsics). Step 3b (engine + Storage uses pyramids;
-  horizon detector consumes a pyramid level via a config
-  knob) and step 4 (camera-space stitching primitive
-  `track_rotation` via Kabsch over ray pairs) landed. The
-  three deferred follow-ups all landed too: extraction of
-  the duplicated Kabsch + 3×3 SVD into a new shared
-  `bris-math` workspace crate; RANSAC over ray pairs in
-  `track_rotation` (`TrackConfig.ransac_inlier_rad`,
-  default 0.003 rad); and `panorama_altitude_via_rotation`
-  for cross-resolution stitching at the panorama
-  composition layer. Lens selection in
-  `bris-android` (telephoto-sensor selection per
-  `readme.org`'s "use a long focal length" guidance) is
+  steps 1-5 + three deferred follow-ups all landed.**
+  Operator-driven scope after a design discussion about
+  whether to downsample uniformly (silently penalizing
+  centroiding precision) or carve out per-stage resolutions.
+  Foundation pieces: `Intrinsics::scaled_to`
+  (cross-resolution math + FFI surface), `bris_vision::ray`
+  (camera-space `HorizonRay` / `BodyRay` / `CameraRay` +
+  altitude composition), `FramePyramid` (lazy-cached
+  per-stage downsamples + scaled intrinsics). Step 3b
+  (engine + Storage uses pyramids; horizon detector consumes
+  a pyramid level via a config knob), step 4 (camera-space
+  stitching primitive `track_rotation` via Kabsch over ray
+  pairs) and step 5 (capture at native sensor maximum on
+  both Android and Linux — see below) all landed. The three
+  deferred follow-ups: extraction of the duplicated Kabsch
+  + 3×3 SVD into a new shared `bris-math` workspace crate;
+  RANSAC over ray pairs in `track_rotation`
+  (`TrackConfig.ransac_inlier_rad`, default 0.003 rad); and
+  `panorama_altitude_via_rotation` for cross-resolution
+  stitching at the panorama composition layer. **Step 5
+  (capture at native max):** Android now queries
+  `StreamConfigurationMap` per chosen lens and requests the
+  largest `YUV_420_888` size; Linux's `bris-cli` drops its
+  silent 640×480 default and the new
+  `bris_capture::max_yuyv_resolution` helper enumerates
+  device frame sizes when no width/height is configured.
+  Lower fix cadence at higher resolution is the preferred
+  trade — σ per fix is what drives the 0.5 nm target. Lens
+  selection in `bris-android` (telephoto-sensor selection
+  per `readme.org`'s "use a long focal length" guidance) is
   **DONE** (Settings → Camera lens with auto-enumerated
   physical-camera radio, first-launch default = longest
   non-ultrawide, calibration storage keyed by
@@ -181,7 +190,7 @@ Phase 7 (session-based mobile sight UX — distinct from the Phase
 (magnitude-consistency verification check, observer-location
 external prior) that are queued.
 
-**Workspace metrics:** 504 tests passing + 4 ignored
+**Workspace metrics:** 520 tests passing + 4 ignored
 (slow/release-only), 9 crates with active code (added
 `bris-ffi` and `bris-collector` in the diagnostic-collection
 spike), zero clippy warnings under `--all-targets -- -D

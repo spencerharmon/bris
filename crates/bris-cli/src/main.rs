@@ -26,7 +26,8 @@ use bris_calibrate::{
     FrameOutcome,
 };
 use bris_capture::{
-    run_capture_loop, run_capture_loop_with, CaptureLoopAction, V4l2Capture, V4l2Config,
+    max_yuyv_resolution, run_capture_loop, run_capture_loop_with, CaptureLoopAction, V4l2Capture,
+    V4l2Config,
 };
 use bris_core::time::{utc_to_tt, Tt};
 use bris_core::{Latitude, Longitude, Sigma, Uncertain};
@@ -678,19 +679,21 @@ fn run_capture(args: &CaptureArgs, raw_config: &config::RawConfig) -> anyhow::Re
     fs::create_dir_all(&args.output)
         .with_context(|| format!("create output dir {}", args.output.display()))?;
 
+    let (width, height) =
+        resolve_capture_resolution(&resolved.device, resolved.width, resolved.height)?;
     let v4l_config = V4l2Config {
         device_path: resolved.device.clone(),
-        width: resolved.width,
-        height: resolved.height,
+        width,
+        height,
         buffer_count: 4,
         exposure_us: resolved.exposure_us,
     };
-    let intrinsics = Intrinsics::placeholder(resolved.width, resolved.height);
+    let intrinsics = Intrinsics::placeholder(width, height);
     let capture = V4l2Capture::open(v4l_config, intrinsics).context("open V4L2 device")?;
     info!(
         device = %resolved.device.display(),
-        width = resolved.width,
-        height = resolved.height,
+        width = width,
+        height = height,
         output = %args.output.display(),
         "bris capture: starting"
     );
@@ -799,23 +802,22 @@ fn run_serve(args: &ServeArgs, raw_config: &config::RawConfig) -> anyhow::Result
         .fix_stream()
         .map_err(|e| anyhow::anyhow!("fix_stream: {e}"))?;
 
+    let (width, height) =
+        resolve_capture_resolution(&resolved.device, resolved.width, resolved.height)?;
     let v4l_config = V4l2Config {
         device_path: resolved.device.clone(),
-        width: resolved.width,
-        height: resolved.height,
+        width,
+        height,
         buffer_count: 4,
         exposure_us: resolved.exposure_us,
     };
-    let (intrinsics, used_placeholder) = load_intrinsics(
-        resolved.intrinsics.as_deref(),
-        resolved.width,
-        resolved.height,
-    )?;
+    let (intrinsics, used_placeholder) =
+        load_intrinsics(resolved.intrinsics.as_deref(), width, height)?;
     let capture = V4l2Capture::open(v4l_config, intrinsics).context("open V4L2 device")?;
     info!(
         device = %resolved.device.display(),
-        width = resolved.width,
-        height = resolved.height,
+        width = width,
+        height = height,
         observer_lat = resolved.assumed_lat,
         observer_lon = resolved.assumed_lon,
         "bris serve: starting"
@@ -903,6 +905,47 @@ fn install_ctrlc_handler() -> anyhow::Result<Arc<AtomicBool>> {
     })
     .context("install Ctrl-C handler")?;
     Ok(shutdown)
+}
+
+/// Resolve a possibly-unspecified capture resolution against
+/// a V4L2 device's advertised YUYV frame sizes.
+///
+/// - If both `width` and `height` are `Some`, returns them
+///   verbatim.
+/// - If both are `None`, queries the device and returns its
+///   largest advertised YUYV size. This is the operator-
+///   preferred default (see `plan.org` per-stage-resolution
+///   architecture): downstream stages downsample on their
+///   own via `bris_vision::FramePyramid`, so feeding capture
+///   the highest pixel count the sensor can deliver is the
+///   right choice.
+/// - Mixed `Some`/`None` is rejected — under-specifying one
+///   axis is more likely a config mistake than an intent.
+fn resolve_capture_resolution(
+    device_path: &Path,
+    width: Option<u32>,
+    height: Option<u32>,
+) -> anyhow::Result<(u32, u32)> {
+    match (width, height) {
+        (Some(w), Some(h)) => Ok((w, h)),
+        (None, None) => {
+            let (w, h) = max_yuyv_resolution(device_path).with_context(|| {
+                format!("query max YUYV resolution from {}", device_path.display())
+            })?;
+            info!(
+                device = %device_path.display(),
+                width = w,
+                height = h,
+                "auto-selected device's largest YUYV resolution (per-stage \
+                 downsampling handles smaller-grid stages)"
+            );
+            Ok((w, h))
+        }
+        _ => bail!(
+            "capture width and height must both be specified or both omitted; \
+             got width={width:?} height={height:?}"
+        ),
+    }
 }
 
 /// Load camera intrinsics from a calibration file when one

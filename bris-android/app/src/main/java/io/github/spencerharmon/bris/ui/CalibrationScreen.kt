@@ -97,11 +97,16 @@ import java.util.concurrent.atomic.AtomicInteger
  * board found; check focus / target / lighting").
  *
  * Camera FOV: ImageCapture is pinned to the same resolution
- * the streaming engine analyzes (CameraConstants.SIZE) and
- * preview + capture share a single ViewPort. The pixel grid
- * the operator sees in the preview is *exactly* the pixel
- * grid that lands in the calibration solver, and *exactly*
- * the pixel grid the engine analyzes during fix capture.
+ * the streaming engine analyzes (the chosen lens's native
+ * maximum, queried via `CameraConstants.maxOutputSizeFor`)
+ * and preview + capture share a single ViewPort. The pixel
+ * grid the operator sees in the preview is *exactly* the
+ * pixel grid that lands in the calibration solver, and
+ * *exactly* the pixel grid the engine analyzes during fix
+ * capture. Per-stage downsampling for stages that prefer a
+ * smaller grid (horizon, segmentation) happens downstream
+ * of capture inside the engine via `FramePyramid` +
+ * `Intrinsics::scaled_to`.
  */
 @Composable
 @Suppress("LongMethod")
@@ -116,8 +121,20 @@ fun CalibrationScreen(
     val scope = rememberCoroutineScope()
     val store = remember(context) { CalibrationStore.forApp(context) }
     val exporter = remember(context) { Exporter.forApp(context) }
-    var sessionDir by remember(lensId) {
-        mutableStateOf(store.newSession(lensId, CameraConstants.WIDTH, CameraConstants.HEIGHT))
+    // Calibrate at the same resolution the live engine
+    // captures at: the chosen lens's native maximum
+    // (CameraConstants.maxOutputSizeFor). Calibrating at a
+    // smaller resolution and applying those intrinsics at a
+    // larger fix-time resolution silently produces wrong
+    // altitudes; the per-stage downsampling architecture
+    // operates downstream of capture (inside the engine),
+    // not upstream of it.
+    val captureSize = remember(context, lensId) {
+        CameraConstants.maxOutputSizeFor(context, lensId)
+            ?: android.util.Size(1280, 720)
+    }
+    var sessionDir by remember(lensId, captureSize) {
+        mutableStateOf(store.newSession(lensId, captureSize.width, captureSize.height))
     }
     val cameraSelector = remember(lensId) { LensCatalog.selectorFor(lensId) }
 
@@ -135,13 +152,13 @@ fun CalibrationScreen(
     var solving by remember { mutableStateOf(false) }
     var showTargetDialog by remember { mutableStateOf(false) }
 
-    val imageCapture = remember {
+    val imageCapture = remember(captureSize) {
         ImageCapture.Builder()
             .setResolutionSelector(
                 ResolutionSelector.Builder()
                     .setResolutionStrategy(
                         ResolutionStrategy(
-                            CameraConstants.SIZE,
+                            captureSize,
                             ResolutionStrategy.FALLBACK_RULE_CLOSEST_LOWER_THEN_HIGHER,
                         ),
                     )
@@ -151,7 +168,7 @@ fun CalibrationScreen(
     }
 
     fun resetSession() {
-        sessionDir = store.newSession(lensId, CameraConstants.WIDTH, CameraConstants.HEIGHT)
+        sessionDir = store.newSession(lensId, captureSize.width, captureSize.height)
         captureSeq.set(0)
         tally.value = CaptureTally()
         lastOutcome = null
@@ -185,10 +202,7 @@ fun CalibrationScreen(
                         it.setSurfaceProvider(previewView.surfaceProvider)
                     }
                     val viewport = ViewPort.Builder(
-                        android.util.Rational(
-                            CameraConstants.WIDTH,
-                            CameraConstants.HEIGHT,
-                        ),
+                        CameraConstants.aspectRatioOf(captureSize),
                         preview.targetRotation,
                     )
                         .setScaleType(ViewPort.FIT)

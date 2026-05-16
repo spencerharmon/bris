@@ -181,8 +181,14 @@ pub(crate) fn load_config(path: Option<&Path>) -> Result<RawConfig> {
 #[derive(Debug, Clone)]
 pub(crate) struct ResolvedServeConfig {
     pub device: PathBuf,
-    pub width: u32,
-    pub height: u32,
+    /// Capture width in pixels, or `None` to use the
+    /// device's largest YUYV frame size. Callers query
+    /// [`bris_capture::max_yuyv_resolution`] at open time
+    /// when this is `None`.
+    pub width: Option<u32>,
+    /// Capture height in pixels, or `None` to use the
+    /// device's largest YUYV frame size (see `width`).
+    pub height: Option<u32>,
     pub exposure_us: u32,
     pub assumed_lat: f64,
     pub assumed_lon: f64,
@@ -199,8 +205,12 @@ pub(crate) struct ResolvedServeConfig {
 #[derive(Debug, Clone)]
 pub(crate) struct ResolvedCaptureConfig {
     pub device: PathBuf,
-    pub width: u32,
-    pub height: u32,
+    /// Capture width in pixels, or `None` for the device's
+    /// largest YUYV frame size.
+    pub width: Option<u32>,
+    /// Capture height in pixels, or `None` for the device's
+    /// largest YUYV frame size.
+    pub height: Option<u32>,
     pub exposure_us: u32,
 }
 
@@ -239,12 +249,16 @@ impl ResolvedServeConfig {
         let device = cli_device
             .or_else(|| camera.and_then(|c| c.device.clone()))
             .unwrap_or_else(|| PathBuf::from("/dev/video0"));
-        let width = cli_width
-            .or_else(|| camera.and_then(|c| c.width))
-            .unwrap_or(640);
-        let height = cli_height
-            .or_else(|| camera.and_then(|c| c.height))
-            .unwrap_or(480);
+        // Resolution: prefer CLI override, then config file,
+        // then `None` — which means "ask the device for its
+        // largest YUYV size at open time" (no silent default).
+        // The per-stage downsampling architecture
+        // (`bris-vision::FramePyramid` + `Intrinsics::scaled_to`)
+        // means downstream stages get the resolution each
+        // prefers regardless of what comes in; capture should
+        // feed the highest pixel count the sensor delivers.
+        let width = cli_width.or_else(|| camera.and_then(|c| c.width));
+        let height = cli_height.or_else(|| camera.and_then(|c| c.height));
         let exposure_us = cli_exposure_us
             .or_else(|| camera.and_then(|c| c.exposure_us))
             .unwrap_or(10_000);
@@ -309,12 +323,11 @@ impl ResolvedCaptureConfig {
         let device = cli_device
             .or_else(|| camera.and_then(|c| c.device.clone()))
             .unwrap_or_else(|| PathBuf::from("/dev/video0"));
-        let width = cli_width
-            .or_else(|| camera.and_then(|c| c.width))
-            .unwrap_or(640);
-        let height = cli_height
-            .or_else(|| camera.and_then(|c| c.height))
-            .unwrap_or(480);
+        // Same "no silent default" rule as ResolvedServeConfig
+        // (see the long comment there): `None` means "use the
+        // device's native maximum, queried at open time".
+        let width = cli_width.or_else(|| camera.and_then(|c| c.width));
+        let height = cli_height.or_else(|| camera.and_then(|c| c.height));
         let exposure_us = cli_exposure_us
             .or_else(|| camera.and_then(|c| c.exposure_us))
             .unwrap_or(10_000);
@@ -408,7 +421,7 @@ latitudo = 47.6  # typo
         )
         .unwrap();
         assert_eq!(resolved.device, PathBuf::from("/dev/video1"));
-        assert_eq!(resolved.width, 800);
+        assert_eq!(resolved.width, Some(800));
         assert_eq!(resolved.assumed_lat, 45.0);
         assert!(matches!(resolved.nmea_sinks.as_slice(), [RawNmea::Stdout]));
     }
@@ -433,8 +446,12 @@ device = "/dev/video2"
         assert_eq!(resolved.device, PathBuf::from("/dev/video2"));
         assert_eq!(resolved.assumed_lat, 47.6);
         assert_eq!(resolved.assumed_lon, -122.3);
-        // Defaults applied where neither file nor CLI specified.
-        assert_eq!(resolved.width, 640);
+        // No silent default for width/height: when neither
+        // CLI nor file specifies, the resolver hands back
+        // `None` and the CLI queries the device for its max
+        // YUYV size at open time.
+        assert_eq!(resolved.width, None);
+        assert_eq!(resolved.height, None);
         assert_eq!(resolved.eye_height_m, 2.0);
     }
 

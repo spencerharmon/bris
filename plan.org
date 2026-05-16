@@ -758,6 +758,52 @@ references to the regression tests that pin the behavior. See
       through the principal point and won't lift to a plane
       normal.
 
+*** DONE Step 5: Capture at native sensor maximum
+    The per-stage architecture's whole point was to let
+    stages that benefit from higher resolution (centroiding,
+    plate-solve) see all the pixels the sensor can deliver
+    while stages that prefer lower resolution (horizon,
+    segmentation) downsample on their own via ~FramePyramid~.
+    With steps 1-4 + follow-ups landed, the downstream
+    plumbing supports it. But capture itself was still
+    hardcoded to 1280×720 on both Android (~CameraConstants~)
+    and Linux (CLI default 640×480), which defeated the
+    architecture: every stage saw at most 720p regardless of
+    sensor capability.
+
+    Capture now requests the chosen lens's *native maximum*
+    on both platforms:
+
+    - *Android* (~CameraConstants.maxOutputSizeFor(context,
+      cameraId)~): queries ~StreamConfigurationMap~ for the
+      largest ~ImageFormat.YUV_420_888~ output size the
+      physical camera advertises. Calibration uses the same
+      lookup, so calibration intrinsics and live-fix
+      intrinsics match exactly (no scaled_to round-trip
+      needed at the boundary). The old ~CameraConstants.WIDTH~
+      / ~HEIGHT~ / ~SIZE~ constants are gone; consumers pass
+      the resolved ~Size~ through.
+
+    - *Linux / V4L2* (~bris_capture::max_yuyv_resolution~):
+      new free function that enumerates YUYV frame sizes via
+      ~VIDIOC_ENUM_FRAMESIZES~ and picks the largest. The
+      CLI's ~ResolvedServeConfig~ / ~ResolvedCaptureConfig~
+      drop their silent 640×480 default; ~width~ / ~height~
+      are now ~Option<u32>~ and the resolver returns ~None~
+      when neither CLI nor config-file specifies them. The
+      CLI's ~resolve_capture_resolution~ helper then queries
+      the device at open time.
+
+    *Throughput trade-off — accepted by the operator:*
+    higher capture resolution means the single-threaded
+    streaming engine takes longer per-frame; ~STRATEGY_KEEP_ONLY_LATEST~
+    on the Android side and the engine's input ring on
+    both sides drop excess frames cleanly. *Lower fix
+    cadence at higher resolution is the preferred trade* —
+    a 5-second-per-fix cadence at full sensor resolution
+    beats a 1-second-per-fix cadence at 720p because the σ
+    on each fix is what drives the 0.5 nm position target.
+
 * Phase 2.5: Real-data validation against captured footage
   The user has captured a substantial test corpus (see ~progress.md~
   for the full inventory). Each scene exercises the algorithms against

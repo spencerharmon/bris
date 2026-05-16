@@ -136,13 +136,27 @@ fun LiveScreen(
         LensCatalog.defaultBackCameraId(context) ?: LensCatalog.FALLBACK_LENS_ID
     }
     val effectiveLensId = selectedLensId ?: defaultBackId
+    // The capture resolution is the chosen lens's *native
+    // maximum* for the analyzer pixel format. Per-stage
+    // downsampling happens inside the engine via
+    // FramePyramid + Intrinsics::scaled_to (plan.org Phase 2
+    // per-stage-resolution architecture); upstream of the
+    // engine we always feed the highest pixel count the
+    // sensor delivers so plate-solve / centroiding get
+    // everything they can. Falls back to a conservative
+    // 1280×720 if the device's StreamConfigurationMap can't
+    // be enumerated.
+    val captureSize = remember(context, effectiveLensId) {
+        CameraConstants.maxOutputSizeFor(context, effectiveLensId)
+            ?: android.util.Size(1280, 720)
+    }
     val debugBuffer = remember(context) { DebugCaptureBuffer.forApp(context) }
     val calStore = remember(context) { CalibrationStore.forApp(context) }
-    val persistedIntrinsics = remember(context, effectiveLensId) {
+    val persistedIntrinsics = remember(context, effectiveLensId, captureSize) {
         calStore.latestIntrinsicsFor(
             lensId = effectiveLensId,
-            width = CameraConstants.WIDTH,
-            height = CameraConstants.HEIGHT,
+            width = captureSize.width,
+            height = captureSize.height,
         )
     }
     val sightLog = remember(context) { SightLog.forApp(context) }
@@ -185,6 +199,7 @@ fun LiveScreen(
             debugCaptureEnabled = debugCaptureEnabled,
             debugBuffer = debugBuffer,
             lensId = effectiveLensId,
+            captureSize = captureSize,
         )
 
         Column(
@@ -202,6 +217,7 @@ fun LiveScreen(
                 sightWindowDepth = snapshot?.sightWindowDepth ?: 0u,
                 persistedIntrinsics = persistedIntrinsics,
                 lensLabel = lensLabelFor(context, effectiveLensId),
+                captureSize = captureSize,
             )
             Spacer(Modifier.height(12.dp))
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -245,13 +261,14 @@ private fun CameraSurface(
     debugCaptureEnabled: Boolean,
     debugBuffer: DebugCaptureBuffer,
     lensId: String,
+    captureSize: android.util.Size,
 ) {
     val context = LocalContext.current
     val previewView = remember(context) { PreviewView(context) }
     val analyzerExecutor = remember { Executors.newSingleThreadExecutor() }
     val cameraSelector = remember(lensId) { LensCatalog.selectorFor(lensId) }
 
-    LaunchedEffect(captureActive, lifecycleOwner, cameraSelector) {
+    LaunchedEffect(captureActive, lifecycleOwner, cameraSelector, captureSize) {
         val provider = ProcessCameraProvider.getInstance(context).get()
         provider.unbindAll()
         val preview = Preview.Builder().build().also {
@@ -263,7 +280,7 @@ private fun CameraSurface(
         // operator would line up the horizon visually but the
         // analyzer would be analyzing a different frame.
         val viewport = ViewPort.Builder(
-            android.util.Rational(CameraConstants.WIDTH, CameraConstants.HEIGHT),
+            CameraConstants.aspectRatioOf(captureSize),
             preview.targetRotation,
         )
             .setScaleType(ViewPort.FIT)
@@ -275,7 +292,7 @@ private fun CameraSurface(
                     ResolutionSelector.Builder()
                         .setResolutionStrategy(
                             ResolutionStrategy(
-                                CameraConstants.SIZE,
+                                captureSize,
                                 ResolutionStrategy.FALLBACK_RULE_CLOSEST_LOWER_THEN_HIGHER,
                             ),
                         )
@@ -289,8 +306,8 @@ private fun CameraSurface(
                     intrinsicsProvider = {
                         intrinsicsForResolution(
                             persistedIntrinsics,
-                            targetWidth = CameraConstants.WIDTH,
-                            targetHeight = CameraConstants.HEIGHT,
+                            targetWidth = captureSize.width,
+                            targetHeight = captureSize.height,
                         )
                     },
                     debugCaptureProvider = { debugCaptureEnabled },
@@ -345,12 +362,13 @@ private fun DiagnosticOverlay(
     sightWindowDepth: UInt,
     persistedIntrinsics: CalibrationStore.PersistedIntrinsics?,
     lensLabel: String,
+    captureSize: android.util.Size,
 ) {
     val calibLabel = persistedIntrinsics?.let {
-        if (it.width == CameraConstants.WIDTH && it.height == CameraConstants.HEIGHT) {
+        if (it.width == captureSize.width && it.height == captureSize.height) {
             "calib: rms ${"%.2f".format(it.rmsPx)} px"
         } else {
-            "calib mismatch (${it.width}×${it.height} on ${CameraConstants.WIDTH}×${CameraConstants.HEIGHT})"
+            "calib mismatch (${it.width}×${it.height} on ${captureSize.width}×${captureSize.height})"
         }
     } ?: "calib: PLACEHOLDER (run calibration)"
 
@@ -362,6 +380,7 @@ private fun DiagnosticOverlay(
         verticalArrangement = Arrangement.spacedBy(2.dp),
     ) {
         Text(calibLabel, color = Color.White)
+        Text("capture: ${captureSize.width}×${captureSize.height}", color = Color.White)
         Text("lens: $lensLabel", color = Color.White)
         when (val s = sessionStatus) {
             is SessionStatus.Idle -> {
@@ -412,13 +431,18 @@ private fun DiagnosticOverlay(
 /**
  * Pick intrinsics for the analyzer's resolution. Prefer
  * persisted calibration when available *and* the resolution
- * matches; otherwise fall back to placeholder defaults.
+ * matches; otherwise fall back to placeholder defaults sized
+ * for the current capture resolution.
  *
- * Calibration data is keyed by camera + resolution. Applying a
- * 640×480 calibration to 1280×720 frames silently produces
+ * Calibration data is keyed by camera + resolution. Applying
+ * a 640×480 calibration to a 4032×3024 frame silently produces
  * wrong altitudes, so the resolution gate is mandatory; on
  * mismatch we degrade to placeholder and the diagnostic
- * overlay flags it.
+ * overlay flags it. The placeholder is intended to keep the
+ * pipeline alive in the un-calibrated case; quantitative
+ * altitudes from a placeholder-intrinsics fix are not
+ * trustworthy and the operator is expected to run calibration
+ * before relying on the numbers.
  */
 private fun intrinsicsForResolution(
     persisted: CalibrationStore.PersistedIntrinsics?,
@@ -433,21 +457,36 @@ private fun intrinsicsForResolution(
             p1 = persisted.p1, p2 = persisted.p2,
         )
     }
-    return placeholderIntrinsicsForCurrentResolution()
+    return placeholderIntrinsicsFor(targetWidth, targetHeight)
 }
 
-private fun placeholderIntrinsicsForCurrentResolution(): FfiIntrinsics =
-    FfiIntrinsics(
-        fx = 1000.0,
-        fy = 1000.0,
-        cx = 640.0,
-        cy = 360.0,
+/**
+ * Placeholder intrinsics sized to the supplied resolution.
+ * Principal point at the image center; focal length scaled
+ * so the field of view is roughly that of a "normal" phone
+ * camera (a 50°-ish horizontal FOV). The values are *not*
+ * accurate for any specific lens — the operator must run
+ * calibration to get quantitative altitudes. The placeholder
+ * exists only so the pipeline doesn't refuse to start on a
+ * fresh install.
+ */
+private fun placeholderIntrinsicsFor(width: Int, height: Int): FfiIntrinsics {
+    // f ≈ width / (2 · tan(FOV/2)); for FOV ≈ 60° horizontal,
+    // f ≈ width / 1.1547. Round to a friendly value per pixel
+    // grid: 720p → ~1000 px, matching the historical placeholder.
+    val focal = width.toDouble() / 1.1547
+    return FfiIntrinsics(
+        fx = focal,
+        fy = focal,
+        cx = width / 2.0,
+        cy = height / 2.0,
         k1 = 0.0,
         k2 = 0.0,
         k3 = 0.0,
         p1 = 0.0,
         p2 = 0.0,
     )
+}
 
 /**
  * Placeholder engine config. Observer is the dev default

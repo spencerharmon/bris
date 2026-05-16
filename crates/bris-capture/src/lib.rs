@@ -82,6 +82,6 @@ pub use format::{widen_u8_to_u16, yuyv_to_grayscale_u16, FormatError};
 pub use time::{buffer_to_mid_exposure_tt, MonotonicAnchor, TimestampError};
 #[cfg(feature = "v4l2")]
 pub use v4l2::{
-    run_capture_loop, run_capture_loop_with, CaptureLoopAction, CaptureStats, V4l2Capture,
-    V4l2Config,
+    max_yuyv_resolution, run_capture_loop, run_capture_loop_with, CaptureLoopAction, CaptureStats,
+    V4l2Capture, V4l2Config,
 };

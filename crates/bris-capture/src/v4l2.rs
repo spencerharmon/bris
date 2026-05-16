@@ -249,6 +249,65 @@ impl V4l2Capture {
     }
 }
 
+/// Query the device for the largest YUYV frame size it
+/// advertises and return it as `(width, height)`. Used by
+/// callers (typically the CLI) that want to capture at the
+/// sensor's native maximum and have downstream pipeline
+/// stages downsample per-stage (see `bris-vision::FramePyramid`
+/// + `plan.org` Phase 2 per-stage-resolution architecture).
+///
+/// Stepwise / continuous frame-size advertisements are
+/// flattened to their largest discrete sample.
+///
+/// # Errors
+///
+/// - [`CaptureError::V4l2`] if the device cannot be opened
+///   or the ioctl fails.
+/// - [`CaptureError::UnsupportedFormat`] if the device does
+///   not advertise YUYV at all.
+/// - [`CaptureError::UnsupportedResolution`] with an empty
+///   `supported` list if the device advertises YUYV but no
+///   discrete frame sizes (shouldn't happen on conformant
+///   hardware; guarded so we never return `(0, 0)`).
+pub fn max_yuyv_resolution(device_path: &std::path::Path) -> Result<(u32, u32), CaptureError> {
+    let device = Device::with_path(device_path)?;
+    let yuyv = FourCC::new(&FOURCC_YUYV);
+    let mut max: Option<(u32, u32)> = None;
+    let mut yuyv_advertised = false;
+    let mut supported_fourcc_strings: Vec<String> = Vec::new();
+    for desc in device.enum_formats()? {
+        let fourcc = desc.fourcc.repr;
+        supported_fourcc_strings.push(format!(
+            "{}{}{}{}",
+            fourcc[0] as char, fourcc[1] as char, fourcc[2] as char, fourcc[3] as char,
+        ));
+        if fourcc == FOURCC_YUYV {
+            yuyv_advertised = true;
+        }
+    }
+    if !yuyv_advertised {
+        return Err(CaptureError::UnsupportedFormat {
+            device_path: device_path.to_path_buf(),
+            formats: supported_fourcc_strings,
+        });
+    }
+    for size in device.enum_framesizes(yuyv)? {
+        for d in size.size.to_discrete() {
+            let area = u64::from(d.width) * u64::from(d.height);
+            let best_area = max.map_or(0u64, |(w, h)| u64::from(w) * u64::from(h));
+            if area > best_area {
+                max = Some((d.width, d.height));
+            }
+        }
+    }
+    max.ok_or_else(|| CaptureError::UnsupportedResolution {
+        device_path: device_path.to_path_buf(),
+        width: 0,
+        height: 0,
+        supported: Vec::new(),
+    })
+}
+
 /// Statistics from a [`run_capture_loop`] run.
 ///
 /// Reported when the loop exits (via `shutdown` flag,
