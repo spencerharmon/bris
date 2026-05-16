@@ -674,9 +674,9 @@ mod tests {
     #[test]
     fn scaled_to_rejects_aspect_ratio_mismatch() {
         let src = calib_at_4k(); // 4:3
-        // Try to scale a 4:3 calibration into a 16:9 runtime.
-        // The scaling math would silently distort principal-
-        // point and distortion behavior; refuse instead.
+                                 // Try to scale a 4:3 calibration into a 16:9 runtime.
+                                 // The scaling math would silently distort principal-
+                                 // point and distortion behavior; refuse instead.
         let result = src.scaled_to(4032, 3024, 1920, 1080);
         match result {
             Err(IntrinsicsScaleError::AspectRatioMismatch {

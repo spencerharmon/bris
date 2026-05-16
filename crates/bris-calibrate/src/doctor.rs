@@ -268,6 +268,7 @@ mod tests {
             mean_reproj_error_px: 0.32,
             view_count: 22,
             observation_count: 1700,
+            per_view: Vec::new(),
         }
     }
 
