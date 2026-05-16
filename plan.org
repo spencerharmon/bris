@@ -1857,7 +1857,7 @@ references to the regression tests that pin the behavior. See
 ** TODO Mobile calibration UX
    Guided checkerboard capture or "point at a clear night sky"
    star-field auto-calibration. Persists per-device intrinsics.
-** TODO Lens selection (multi-camera Android devices)
+** DONE Lens selection (multi-camera Android devices)
    Modern phones expose multiple physical cameras (ultrawide,
    wide, telephoto) through CameraX's logical-camera API. The
    wide lens is the default; the **telephoto** is what Bris

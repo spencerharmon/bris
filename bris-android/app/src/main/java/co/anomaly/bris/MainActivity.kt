@@ -18,6 +18,7 @@ import co.anomaly.bris.ui.PreUploadReviewScreen
 import co.anomaly.bris.ui.SettingsScreen
 import co.anomaly.bris.ui.SightLogDetailScreen
 import co.anomaly.bris.ui.SightLogScreen
+import co.anomaly.bris.engine.LensCatalog
 import java.net.URLDecoder
 import java.net.URLEncoder
 
@@ -44,6 +45,17 @@ class MainActivity : ComponentActivity() {
                 Surface(modifier = Modifier) {
                     val nav = rememberNavController()
                     val debugMode by prefs.debugModeFlow.collectAsState(initial = false)
+                    val selectedLensId by prefs.selectedLensIdFlow.collectAsState(initial = null)
+                    val context = androidx.compose.ui.platform.LocalContext.current
+                    // Resolve the effective lens id once per recomposition: the
+                    // operator's saved choice if present, otherwise CameraX's
+                    // default-back-camera id, otherwise the catalog fallback
+                    // sentinel. This keeps the calibration-storage key stable
+                    // even before the operator visits Settings.
+                    val defaultBackId = androidx.compose.runtime.remember(context) {
+                        LensCatalog.defaultBackCameraId(context) ?: LensCatalog.FALLBACK_LENS_ID
+                    }
+                    val effectiveLensId = selectedLensId ?: defaultBackId
 
                     NavHost(navController = nav, startDestination = "live") {
                         composable("live") {
@@ -64,6 +76,7 @@ class MainActivity : ComponentActivity() {
                         composable("calibration") {
                             CalibrationScreen(
                                 debugMode = debugMode,
+                                lensId = effectiveLensId,
                                 onBack = { nav.popBackStack() },
                                 onSendCalibration = { nav.navigate("review/calibration") },
                             )

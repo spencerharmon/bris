@@ -9,8 +9,12 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -22,8 +26,10 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import co.anomaly.bris.Prefs
+import co.anomaly.bris.engine.LensCatalog
 import kotlinx.coroutines.launch
 
 /**
@@ -44,17 +50,76 @@ import kotlinx.coroutines.launch
  */
 @Composable
 fun SettingsScreen(prefs: Prefs, onBack: () -> Unit) {
+    val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val debugMode by prefs.debugModeFlow.collectAsState(initial = false)
     val debugCapture by prefs.debugCaptureFlow.collectAsState(initial = false)
     val collectorBase by prefs.collectorBaseFlow.collectAsState(initial = "")
+    val selectedLensId by prefs.selectedLensIdFlow.collectAsState(initial = null)
     var collectorBaseDraft by remember { mutableStateOf(collectorBase) }
 
+    // Lens enumeration is cheap (a single Camera2 metadata
+    // walk) but we still cache it per-context: the set of
+    // physical cameras doesn't change at runtime.
+    val lenses = remember(context) { LensCatalog.enumerate(context) }
+    val effectiveLensId = selectedLensId
+        ?: LensCatalog.pickDefault(lenses)?.id
+        ?: LensCatalog.FALLBACK_LENS_ID
+
     Column(
-        modifier = Modifier.fillMaxSize().padding(16.dp),
+        modifier = Modifier
+            .fillMaxSize()
+            .verticalScroll(rememberScrollState())
+            .padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(16.dp),
     ) {
         Text("Settings", style = androidx.compose.material3.MaterialTheme.typography.titleLarge)
+
+        // ---- Lens (Camera) ----
+        // Multi-camera Android devices expose ultrawide / wide
+        // / telephoto as separate physical cameras under one
+        // logical id. Bris's accuracy is dominated by focal
+        // length (longer = more arcsec/px at the body
+        // centroid = tighter altitude σ), so the operator
+        // explicitly picks here. Calibration is keyed by
+        // (lens, resolution); switching lens forces a fresh
+        // calibration run.
+        Text(
+            "Camera lens",
+            style = androidx.compose.material3.MaterialTheme.typography.titleMedium,
+        )
+        Text(
+            "Bris's altitude precision is set by your camera's focal length. " +
+                "Pick the longest lens with acceptable low-light performance — " +
+                "usually the telephoto.",
+            style = androidx.compose.material3.MaterialTheme.typography.bodySmall,
+        )
+        if (lenses.isEmpty()) {
+            Text("No back cameras detected.")
+        } else {
+            for (lens in lenses) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(vertical = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    RadioButton(
+                        selected = lens.id == effectiveLensId,
+                        onClick = { scope.launch { prefs.setSelectedLensId(lens.id) } },
+                    )
+                    Text(lens.label, modifier = Modifier.padding(start = 8.dp))
+                }
+            }
+        }
+        if (selectedLensId == null && lenses.isNotEmpty()) {
+            Text(
+                "(default selection — auto-picked the longest non-ultrawide lens)",
+                style = androidx.compose.material3.MaterialTheme.typography.bodySmall,
+            )
+        }
+
+        HorizontalDivider()
 
         Row(
             modifier = Modifier.fillMaxWidth(),
