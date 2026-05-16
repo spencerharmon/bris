@@ -506,12 +506,19 @@ private fun defaultEngineConfig(): FfiEngineConfig = FfiEngineConfig(
     minFixPublicationIntervalMs = 1000u,
     inputRingCapacity = 120u,
     segmentationModelPath = null,
-    // Per-stage analysis resolution (Phase 2 step 3b) — null
-    // = source-resolution detection. Operator-facing setting
-    // for this knob lands when there's a UI for camera +
-    // resolution choices.
+    // Per-stage analysis resolution (plan.org Phase 2 / Per-
+    // stage-resolution step 3b + the long-edge follow-up):
+    // leave the explicit width/height pair null so the engine
+    // falls back to its long-edge cap, which the core defaults
+    // to 1280 px. Horizon detectors saturate well below 1280
+    // on the long edge — gradient SNR is set by the sky-sea
+    // contrast, not pixel count, and segmentation gets worse
+    // above its training resolution. Passing the cap
+    // explicitly here keeps Kotlin honest about the contract
+    // (and would let a future Settings toggle override it).
     horizonAnalysisWidth = null,
     horizonAnalysisHeight = null,
+    horizonAnalysisMaxLongEdgePx = 1280u,
 )
 
 /**

@@ -120,7 +120,9 @@ pub(crate) fn detect(
         );
     }
 
-    let frame_for_detect = match cfg.horizon_analysis_size {
+    let frame_for_detect = match cfg
+        .resolved_horizon_analysis_size(pyramid.full_width(), pyramid.full_height())
+    {
         Some((w, h)) => match pyramid.level(w, h) {
             Ok(level) => CowFrame::Owned(level.frame),
             Err(e) => {

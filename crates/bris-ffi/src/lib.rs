@@ -248,6 +248,23 @@ pub struct FfiEngineConfig {
     /// dimensions as separate fields and combine them
     /// engine-side.
     pub horizon_analysis_height: Option<u32>,
+    /// Aspect-ratio-agnostic alternative to the
+    /// `horizon_analysis_width` / `horizon_analysis_height`
+    /// pair: cap the long edge of the horizon-analysis frame
+    /// at this many pixels and let the engine derive the
+    /// short edge from the source's actual aspect ratio at
+    /// runtime. Preferred when capture resolution varies by
+    /// device — phone sensors are commonly 4:3 while
+    /// machine-vision sensors are 16:9, and a hard-coded
+    /// `(w, h)` pair only matches one of them.
+    ///
+    /// Mutually exclusive with the `horizon_analysis_width`
+    /// / `horizon_analysis_height` pair; setting both forms
+    /// returns
+    /// [`FfiError::InvalidArgument`]. See
+    /// [`bris_streaming::EngineConfig::horizon_analysis_max_long_edge_px`]
+    /// for the resolver contract.
+    pub horizon_analysis_max_long_edge_px: Option<u32>,
 }
 
 impl FfiEngineConfig {
@@ -272,6 +289,25 @@ impl FfiEngineConfig {
                 });
                 }
             };
+        if cfg.horizon_analysis_size.is_some() && self.horizon_analysis_max_long_edge_px.is_some() {
+            return Err(FfiError::InvalidArgument {
+                detail: "horizon_analysis_width/height and \
+                         horizon_analysis_max_long_edge_px are mutually exclusive; \
+                         set one form or the other, not both"
+                    .to_owned(),
+            });
+        }
+        // Only override the core default when the FFI caller
+        // supplied an explicit value. UniFFI scalars default to
+        // `null`, so a Kotlin/Swift caller that never touches
+        // this field gets `None` here, which we *do* want to
+        // surface as "use the core default" rather than as
+        // "explicitly disable downsampling". The core default
+        // is currently `Some(1280)`, so leaving it alone
+        // preserves the sensible behavior.
+        if let Some(cap) = self.horizon_analysis_max_long_edge_px {
+            cfg.horizon_analysis_max_long_edge_px = Some(cap);
+        }
         Ok(cfg)
     }
 }

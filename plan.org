@@ -804,6 +804,54 @@ references to the regression tests that pin the behavior. See
     beats a 1-second-per-fix cadence at 720p because the σ
     on each fix is what drives the 0.5 nm position target.
 
+*** DONE Step 6: Default horizon-stage downsampling to long-edge 1280
+    Verification pass after Step 5 walked the pipeline stage
+    by stage to confirm the right resolution reaches each:
+
+    | Stage | Resolution | Notes |
+    |-------+------------+-------|
+    | A classifier         | source                | cheap; no benefit from downsampling |
+    | B day (centroid)     | source                | sub-pixel intensity-weighted fit scales as 1/√N |
+    | B night (peaks)      | source                | more pixels → more candidate stars over threshold |
+    | C horizon            | configurable          | gradient SNR is contrast-bound, saturates well below 1080p |
+    | D plate-solve        | source (via B peaks)  | solver itself is resolution-free |
+    | E sight assembly     | source intrinsics     | composition-only |
+
+    Stage C was the only one whose per-stage knob was
+    *plumbed but switched off* — ~EngineConfig.horizon_analysis_size~
+    defaulted to ~None~, so even after Step 5 the horizon
+    stage was running every detector on the full 4K-class
+    capture frame. Wasted work: gradient SNR is set by the
+    sky/sea contrast, not the pixel grid, and segmentation
+    models get *worse* above their training resolution.
+
+    The existing ~horizon_analysis_size: Option<(u32, u32)>~
+    config requires an exact aspect-ratio match with the
+    source; a hardcoded ~(1280, 720)~ default would fail on
+    a 4:3 phone sensor (4032×3024) and silently fall back to
+    source. Added a sibling field that doesn't have that
+    problem:
+
+    ~EngineConfig.horizon_analysis_max_long_edge_px: Option<u32>~
+
+    When set, the engine derives ~(w, h)~ from the source's
+    actual aspect ratio with ~max(w, h) ≤ cap~. The new
+    helper ~EngineConfig::resolved_horizon_analysis_size(source_w,
+    source_h)~ unifies both forms; Stage C calls it once
+    per frame. Default: ~Some(1280)~.
+
+    FFI mirrors the field (~FfiEngineConfig.horizon_analysis_max_long_edge_px:
+    Option<u32>~); the two forms are mutually exclusive at
+    the FFI boundary with ~FfiError::InvalidArgument~ when
+    both are set. Android ~defaultEngineConfig~ passes the
+    cap explicitly so the operator can see it in code.
+
+    Operator-facing Settings UI for this knob is the obvious
+    next step (toggle "horizon analysis resolution" with
+    Off / 720 / 1080 / 1280 / source choices); deferred
+    until there's a concrete operator complaint about
+    detection quality at the default.
+
 * Phase 2.5: Real-data validation against captured footage
   The user has captured a substantial test corpus (see ~progress.md~
   for the full inventory). Each scene exercises the algorithms against

@@ -162,7 +162,18 @@ For the end-to-end pipeline architecture and data flow, see
   `bris_capture::max_yuyv_resolution` helper enumerates
   device frame sizes when no width/height is configured.
   Lower fix cadence at higher resolution is the preferred
-  trade — σ per fix is what drives the 0.5 nm target. Lens
+  trade — σ per fix is what drives the 0.5 nm target.
+  **Step 6 (default horizon stage to long-edge 1280):**
+  pipeline verification pass confirmed every other stage
+  already uses source resolution correctly; Stage C was the
+  only one whose per-stage knob was *plumbed but switched
+  off*. Added a sibling config
+  `EngineConfig.horizon_analysis_max_long_edge_px` (default
+  `Some(1280)`) that derives `(w, h)` from the source's
+  actual aspect ratio — works on both 4:3 phone sensors and
+  16:9 machine-vision sensors without per-sensor
+  configuration. FFI mirrors the field; Android default
+  passes the cap explicitly. Lens
   selection in `bris-android` (telephoto-sensor selection
   per `readme.org`'s "use a long focal length" guidance) is
   **DONE** (Settings → Camera lens with auto-enumerated
@@ -190,7 +201,7 @@ Phase 7 (session-based mobile sight UX — distinct from the Phase
 (magnitude-consistency verification check, observer-location
 external prior) that are queued.
 
-**Workspace metrics:** 520 tests passing + 4 ignored
+**Workspace metrics:** 526 tests passing + 4 ignored
 (slow/release-only), 9 crates with active code (added
 `bris-ffi` and `bris-collector` in the diagnostic-collection
 spike), zero clippy warnings under `--all-targets -- -D

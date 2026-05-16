@@ -187,11 +187,9 @@ pub struct EngineConfig {
     /// every detector receives the source frame. The
     /// underlying detectors (gradient, sky-region, etc.)
     /// already downsample internally to
-    /// [`HorizonConfig::working_width`] for the candidate-
-    /// extraction pass, so opting into engine-level
-    /// downsampling is a *cycle-time* optimization rather than
-    /// a quality knob: when set, every detector and the
-    /// pyramid-cache-hit subsequent stages avoid re-doing
+    /// their preferred working size; setting this knob lets
+    /// the engine factor that downsample out of every detector
+    /// so they share a single decimation instead of each doing
     /// downsampling on the same source.
     ///
     /// The chosen `(w, h)` must preserve the source frame's
@@ -200,7 +198,45 @@ pub struct EngineConfig {
     /// must be ≤ source dimensions (no upsampling). Mismatch
     /// degrades gracefully: the stage logs a debug message
     /// and falls back to the source frame.
+    ///
+    /// Mutually exclusive with
+    /// [`Self::horizon_analysis_max_long_edge_px`]; setting
+    /// both is a config error caught at engine construction.
     pub horizon_analysis_size: Option<(u32, u32)>,
+
+    /// Aspect-ratio-agnostic alternative to
+    /// [`Self::horizon_analysis_size`]: cap the long edge of
+    /// the horizon-analysis frame at this many pixels and
+    /// derive the matching short edge from the source's actual
+    /// aspect ratio. When `Some(n)`, Stage C asks the pyramid
+    /// for a level sized so `max(level_w, level_h) ≤ n` and
+    /// the level preserves the source aspect exactly.
+    ///
+    /// Preferred over `horizon_analysis_size` when the engine
+    /// may run against sources of varying aspect ratios (phone
+    /// sensors are commonly 4:3, machine-vision sensors often
+    /// 16:9 or 3:2, embedded sensors sometimes squarish). The
+    /// pixel-pair form refuses to downsample anything whose
+    /// aspect doesn't match the configured `(w, h)`; the
+    /// long-edge form keeps working.
+    ///
+    /// Default: `Some(1280)`. Horizon detectors saturate well
+    /// below 1280 px on the long edge — gradient SNR is set by
+    /// the sky-sea transition contrast, not the pixel grid,
+    /// and segmentation models get *worse* above their
+    /// training resolution. Capping the horizon stage at this
+    /// size keeps it cheap even when capture runs at 4K+, and
+    /// the per-stage architecture exists exactly so this
+    /// trade-off is invisible to higher-resolution stages
+    /// (centroiding, plate-solve).
+    ///
+    /// Sources at or below the cap pass through unchanged (the
+    /// pyramid declines to upsample).
+    ///
+    /// Mutually exclusive with [`Self::horizon_analysis_size`];
+    /// setting both is a config error caught at engine
+    /// construction.
+    pub horizon_analysis_max_long_edge_px: Option<u32>,
 
     /// Path to the ONNX segmentation model used by the
     /// last-resort horizon detector
@@ -278,6 +314,7 @@ impl EngineConfig {
             // sea horizons hit it routinely.
             horizon_early_termination_sigma_rad: std::f64::consts::PI / (60.0 * 180.0),
             horizon_analysis_size: None,
+            horizon_analysis_max_long_edge_px: Some(1280),
             segmentation_model_path: None,
             star_hash_db_cfg: StarHashDbConfig::default(),
             plate_solve_cfg: PlateSolveConfig::default(),
@@ -285,6 +322,70 @@ impl EngineConfig {
             per_star_sigma: Sigma::new(30.0 * std::f64::consts::PI / (180.0 * 3600.0))
                 .expect("30 arcsec is a valid Sigma"),
         }
+    }
+
+    /// Resolve the effective horizon-analysis resolution for a
+    /// source frame of size `(source_w, source_h)`.
+    ///
+    /// Returns:
+    ///
+    /// - `Some((w, h))` to ask the pyramid for a level at that
+    ///   resolution. The aspect ratio matches the source
+    ///   (within `Intrinsics::scaled_to` tolerance).
+    /// - `None` to run horizon detection on the source frame
+    ///   unchanged.
+    ///
+    /// Precedence: `horizon_analysis_size` (explicit pair)
+    /// wins over `horizon_analysis_max_long_edge_px`
+    /// (aspect-derived) when both are set; setting both is a
+    /// configuration mistake that the FFI layer rejects, but
+    /// in-process callers using the Rust API directly are
+    /// trusted, so the engine just picks one and proceeds.
+    ///
+    /// The long-edge form derives `(w, h)` by scaling the
+    /// source dimensions uniformly so `max(w, h) == cap` (or
+    /// the source as-is when it already fits under the cap),
+    /// then rounding to the nearest even integer per axis to
+    /// keep the YUYV / 2×2 box-downsample invariants happy.
+    /// Returns `None` if the derivation would yield a degenerate
+    /// dimension (zero or larger than source).
+    #[must_use]
+    pub fn resolved_horizon_analysis_size(
+        &self,
+        source_w: u32,
+        source_h: u32,
+    ) -> Option<(u32, u32)> {
+        if let Some(pair) = self.horizon_analysis_size {
+            return Some(pair);
+        }
+        let cap = self.horizon_analysis_max_long_edge_px?;
+        let long_edge = source_w.max(source_h);
+        if cap == 0 || long_edge == 0 {
+            return None;
+        }
+        if cap >= long_edge {
+            // Source already fits under the cap; let the pyramid
+            // hand the source back unchanged via its
+            // "asking for >= source returns full" branch.
+            return Some((source_w, source_h));
+        }
+        // Uniform scale so the long edge lands at `cap`. Round
+        // each axis down to the nearest even integer so YUYV
+        // even-width and 2×2 box-downsample invariants hold.
+        let scale = f64::from(cap) / f64::from(long_edge);
+        // scale ∈ (0, 1] by construction (cap < long_edge in
+        // this branch), so scale * source_w and scale * source_h
+        // are both in (0, source dim]. The cast cannot truncate
+        // a meaningful value or lose a sign that wasn't already
+        // checked against zero below.
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let w = ((f64::from(source_w) * scale) as u32) & !1;
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let h = ((f64::from(source_h) * scale) as u32) & !1;
+        if w == 0 || h == 0 || w > source_w || h > source_h {
+            return None;
+        }
+        Some((w, h))
     }
 }
 
@@ -331,5 +432,89 @@ mod tests {
         assert_eq!(cfg.max_concurrent_pipeline_workers, 1);
         assert_eq!(cfg.classifier_hysteresis_frames, 90);
         assert!(matches!(cfg.plate_solver_init, PlateSolverInit::Lazy));
+        // The long-edge cap defaults on so horizon detection
+        // doesn't waste cycles at 4K capture resolutions.
+        assert_eq!(cfg.horizon_analysis_max_long_edge_px, Some(1280));
+        assert_eq!(cfg.horizon_analysis_size, None);
+    }
+
+    #[test]
+    fn resolved_horizon_analysis_size_uses_explicit_pair_when_set() {
+        let mut cfg = EngineConfig::new(Observer::default_dev());
+        cfg.horizon_analysis_size = Some((640, 480));
+        cfg.horizon_analysis_max_long_edge_px = Some(1280);
+        // Explicit pair wins regardless of source dims and
+        // regardless of the long-edge cap.
+        assert_eq!(
+            cfg.resolved_horizon_analysis_size(4032, 3024),
+            Some((640, 480))
+        );
+    }
+
+    #[test]
+    fn resolved_horizon_analysis_size_scales_4_3_source() {
+        let mut cfg = EngineConfig::new(Observer::default_dev());
+        cfg.horizon_analysis_size = None;
+        cfg.horizon_analysis_max_long_edge_px = Some(1280);
+        // 4032 × 3024 source (4:3, typical phone main camera).
+        // Cap 1280 → scale 1280/4032 ≈ 0.3175.
+        // 4032 * 0.3175 ≈ 1280 (capped); 3024 * 0.3175 ≈ 960.
+        // Both rounded to even.
+        let (w, h) = cfg.resolved_horizon_analysis_size(4032, 3024).unwrap();
+        assert_eq!(w, 1280);
+        assert_eq!(h, 960);
+        // Aspect preserved within rounding.
+        let src_ratio = 4032.0_f64 / 3024.0;
+        let dst_ratio = f64::from(w) / f64::from(h);
+        assert!(
+            (src_ratio - dst_ratio).abs() < 0.01,
+            "aspect ratio mismatch: src={src_ratio} dst={dst_ratio}"
+        );
+    }
+
+    #[test]
+    fn resolved_horizon_analysis_size_scales_16_9_source() {
+        let mut cfg = EngineConfig::new(Observer::default_dev());
+        cfg.horizon_analysis_size = None;
+        cfg.horizon_analysis_max_long_edge_px = Some(1280);
+        // 3840 × 2160 (16:9 UHD). Cap 1280 → scale 1280/3840 = 1/3.
+        let (w, h) = cfg.resolved_horizon_analysis_size(3840, 2160).unwrap();
+        assert_eq!(w, 1280);
+        assert_eq!(h, 720);
+    }
+
+    #[test]
+    fn resolved_horizon_analysis_size_portrait_source() {
+        let mut cfg = EngineConfig::new(Observer::default_dev());
+        cfg.horizon_analysis_size = None;
+        cfg.horizon_analysis_max_long_edge_px = Some(1280);
+        // 3024 × 4032 (portrait 3:4). Long edge is height now.
+        // Cap 1280 → 1280/4032 ≈ 0.3175; 3024*0.3175 ≈ 960, 4032*0.3175 ≈ 1280.
+        let (w, h) = cfg.resolved_horizon_analysis_size(3024, 4032).unwrap();
+        assert_eq!(w, 960);
+        assert_eq!(h, 1280);
+    }
+
+    #[test]
+    fn resolved_horizon_analysis_size_source_already_under_cap() {
+        let mut cfg = EngineConfig::new(Observer::default_dev());
+        cfg.horizon_analysis_size = None;
+        cfg.horizon_analysis_max_long_edge_px = Some(1280);
+        // 800 × 600 source (long edge 800 < cap 1280).
+        // Resolver returns the source dimensions; the pyramid
+        // then declines to upsample and hands back the source
+        // frame as-is.
+        assert_eq!(
+            cfg.resolved_horizon_analysis_size(800, 600),
+            Some((800, 600))
+        );
+    }
+
+    #[test]
+    fn resolved_horizon_analysis_size_both_none_disables_downsampling() {
+        let mut cfg = EngineConfig::new(Observer::default_dev());
+        cfg.horizon_analysis_size = None;
+        cfg.horizon_analysis_max_long_edge_px = None;
+        assert_eq!(cfg.resolved_horizon_analysis_size(4032, 3024), None);
     }
 }
