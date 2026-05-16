@@ -1,4 +1,4 @@
-package co.anomaly.bris.engine
+package io.github.spencerharmon.bris.engine
 
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job

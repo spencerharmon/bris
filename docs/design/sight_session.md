@@ -167,13 +167,13 @@ identically. The schema is documented in
 
 Operators pull entries off the device via `adb pull` /
 MTP / the system Files app. The app's *internal* files dir
-(`/data/data/co.anomaly.bris/files/...`) is private — pulling
-requires `adb shell run-as co.anomaly.bris` which doesn't
+(`/data/data/io.github.spencerharmon.bris/files/...`) is private — pulling
+requires `adb shell run-as io.github.spencerharmon.bris` which doesn't
 work for non-debuggable APKs and is awkward even for debug
 builds.
 
 The app's **external-files** dir
-(`/sdcard/Android/data/co.anomaly.bris/files/sights/...`) is:
+(`/sdcard/Android/data/io.github.spencerharmon.bris/files/sights/...`) is:
 
 - Visible to MTP and adb pull without `run-as`.
 - Auto-deleted on app uninstall (clean teardown).

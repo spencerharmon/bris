@@ -1,4 +1,4 @@
-package co.anomaly.bris.ui
+package io.github.spencerharmon.bris.ui
 
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -20,8 +20,8 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
-import co.anomaly.bris.engine.Exporter
-import co.anomaly.bris.engine.SightLog
+import io.github.spencerharmon.bris.engine.Exporter
+import io.github.spencerharmon.bris.engine.SightLog
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext

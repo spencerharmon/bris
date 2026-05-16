@@ -23,7 +23,7 @@ plugins {
 }
 
 android {
-    namespace = "co.anomaly.bris"
+    namespace = "io.github.spencerharmon.bris"
     compileSdk = 34
     // Pin build-tools so AGP doesn't try to fetch a different
     // version than the one installed under the merged SDK at
@@ -38,7 +38,7 @@ android {
     ndkVersion = "29.0.14206865"
 
     defaultConfig {
-        applicationId = "co.anomaly.bris"
+        applicationId = "io.github.spencerharmon.bris"
         minSdk = 26
         targetSdk = 34
         versionCode = 1

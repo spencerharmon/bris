@@ -1,4 +1,4 @@
-package co.anomaly.bris.ui
+package io.github.spencerharmon.bris.ui
 
 import androidx.camera.core.ImageCapture
 import androidx.camera.core.ImageCaptureException
@@ -43,10 +43,10 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.LocalLifecycleOwner
-import co.anomaly.bris.engine.CalibrationStore
-import co.anomaly.bris.engine.CameraConstants
-import co.anomaly.bris.engine.Exporter
-import co.anomaly.bris.engine.LensCatalog
+import io.github.spencerharmon.bris.engine.CalibrationStore
+import io.github.spencerharmon.bris.engine.CameraConstants
+import io.github.spencerharmon.bris.engine.Exporter
+import io.github.spencerharmon.bris.engine.LensCatalog
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext

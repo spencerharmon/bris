@@ -1,10 +1,10 @@
-package co.anomaly.bris.engine
+package io.github.spencerharmon.bris.engine
 
 import android.content.Context
 import android.os.Build
-import co.anomaly.bris.upload.GpsInfo
-import co.anomaly.bris.upload.ManifestBuilder
-import co.anomaly.bris.upload.MediaSummary
+import io.github.spencerharmon.bris.upload.GpsInfo
+import io.github.spencerharmon.bris.upload.ManifestBuilder
+import io.github.spencerharmon.bris.upload.MediaSummary
 import org.json.JSONObject
 import uniffi.bris_ffi.FfiPublishedFix
 import uniffi.bris_ffi.formatPbris

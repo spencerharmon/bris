@@ -1,4 +1,4 @@
-package co.anomaly.bris
+package io.github.spencerharmon.bris
 
 import android.os.Bundle
 import androidx.activity.ComponentActivity
@@ -12,13 +12,13 @@ import androidx.lifecycle.lifecycleScope
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
-import co.anomaly.bris.ui.CalibrationScreen
-import co.anomaly.bris.ui.LiveScreen
-import co.anomaly.bris.ui.PreUploadReviewScreen
-import co.anomaly.bris.ui.SettingsScreen
-import co.anomaly.bris.ui.SightLogDetailScreen
-import co.anomaly.bris.ui.SightLogScreen
-import co.anomaly.bris.engine.LensCatalog
+import io.github.spencerharmon.bris.ui.CalibrationScreen
+import io.github.spencerharmon.bris.ui.LiveScreen
+import io.github.spencerharmon.bris.ui.PreUploadReviewScreen
+import io.github.spencerharmon.bris.ui.SettingsScreen
+import io.github.spencerharmon.bris.ui.SightLogDetailScreen
+import io.github.spencerharmon.bris.ui.SightLogScreen
+import io.github.spencerharmon.bris.engine.LensCatalog
 import java.net.URLDecoder
 import java.net.URLEncoder
 
@@ -88,7 +88,7 @@ class MainActivity : ComponentActivity() {
                                 onBack = { nav.popBackStack() },
                                 onSend = {
                                     // Submission orchestration is wired in
-                                    // co.anomaly.bris.upload.Submitter once
+                                    // io.github.spencerharmon.bris.upload.Submitter once
                                     // an end-to-end test exists; the spike
                                     // currently logs and dismisses.
                                     nav.popBackStack()

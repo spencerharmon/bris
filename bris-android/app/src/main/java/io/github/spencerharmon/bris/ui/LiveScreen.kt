@@ -1,4 +1,4 @@
-package co.anomaly.bris.ui
+package io.github.spencerharmon.bris.ui
 
 import android.Manifest
 import android.content.pm.PackageManager
@@ -42,18 +42,18 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.LocalLifecycleOwner
-import co.anomaly.bris.BuildConfig
-import co.anomaly.bris.Prefs
-import co.anomaly.bris.engine.CalibrationStore
-import co.anomaly.bris.engine.CameraConstants
-import co.anomaly.bris.engine.DebugCaptureBuffer
-import co.anomaly.bris.engine.EngineWrapper
-import co.anomaly.bris.engine.FixVerdict
-import co.anomaly.bris.engine.FrameAnalyzer
-import co.anomaly.bris.engine.LensCatalog
-import co.anomaly.bris.engine.SessionRecorder
-import co.anomaly.bris.engine.SessionStatus
-import co.anomaly.bris.engine.SightLog
+import io.github.spencerharmon.bris.BuildConfig
+import io.github.spencerharmon.bris.Prefs
+import io.github.spencerharmon.bris.engine.CalibrationStore
+import io.github.spencerharmon.bris.engine.CameraConstants
+import io.github.spencerharmon.bris.engine.DebugCaptureBuffer
+import io.github.spencerharmon.bris.engine.EngineWrapper
+import io.github.spencerharmon.bris.engine.FixVerdict
+import io.github.spencerharmon.bris.engine.FrameAnalyzer
+import io.github.spencerharmon.bris.engine.LensCatalog
+import io.github.spencerharmon.bris.engine.SessionRecorder
+import io.github.spencerharmon.bris.engine.SessionStatus
+import io.github.spencerharmon.bris.engine.SightLog
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.SupervisorJob
 import uniffi.bris_ffi.FfiEngineConfig
@@ -386,10 +386,10 @@ private fun DiagnosticOverlay(
             is SessionStatus.Saving -> Text("Saving…", color = Color.White)
             is SessionStatus.Saved -> {
                 val msg = when (val o = s.outcome) {
-                    is co.anomaly.bris.engine.SessionOutcome.Captured ->
+                    is io.github.spencerharmon.bris.engine.SessionOutcome.Captured ->
                         "Captured ${o.verdict.name.lowercase()} fix " +
                             "(σ=${"%.2f".format(o.fix.sigmaMajorNm)} nm). Saved to ${s.sessionDir.name}."
-                    is co.anomaly.bris.engine.SessionOutcome.NoFix ->
+                    is io.github.spencerharmon.bris.engine.SessionOutcome.NoFix ->
                         "No fix recorded (${o.reason})."
                 }
                 Text(msg, color = Color.White)

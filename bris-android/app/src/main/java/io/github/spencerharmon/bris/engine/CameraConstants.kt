@@ -1,4 +1,4 @@
-package co.anomaly.bris.engine
+package io.github.spencerharmon.bris.engine
 
 import android.util.Size
 

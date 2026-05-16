@@ -1,4 +1,4 @@
-package co.anomaly.bris.engine
+package io.github.spencerharmon.bris.engine
 
 import android.content.Context
 import java.io.File
@@ -13,7 +13,7 @@ import java.util.Locale
  *
  * Lives at:
  *
- *   /sdcard/Android/data/co.anomaly.bris/files/exports/
+ *   /sdcard/Android/data/io.github.spencerharmon.bris/files/exports/
  *     <yyyy>/<mm>/<dd>/<kind>-<ulid>/
  *       … same on-disk layout as the collector's submission
  *         directory: manifest.json + media/ + per-kind extras.
