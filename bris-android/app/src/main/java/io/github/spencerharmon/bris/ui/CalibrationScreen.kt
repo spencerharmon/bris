@@ -214,7 +214,7 @@ fun CalibrationScreen(
             modifier = Modifier
                 .align(Alignment.TopCenter)
                 .fillMaxWidth()
-                .background(Color(0xCC000000))
+                .background(Color(0x80000000))
                 .padding(horizontal = 12.dp, vertical = 8.dp),
             horizontalArrangement = Arrangement.SpaceBetween,
         ) {
@@ -234,7 +234,7 @@ fun CalibrationScreen(
                 .align(Alignment.BottomCenter)
                 .fillMaxWidth()
                 .heightIn(max = 360.dp)
-                .background(Color(0xCC000000))
+                .background(Color(0x80000000))
                 .padding(12.dp)
                 .verticalScroll(rememberScrollState()),
             verticalArrangement = Arrangement.spacedBy(8.dp),

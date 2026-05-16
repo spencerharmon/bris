@@ -357,7 +357,7 @@ private fun DiagnosticOverlay(
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .background(Color(0xCC000000))
+            .background(Color(0x80000000))
             .padding(8.dp),
         verticalArrangement = Arrangement.spacedBy(2.dp),
     ) {
