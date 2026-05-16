@@ -55,8 +55,10 @@ use crate::centroid::{centroid_brightest_body, CentroidConfig};
 use crate::frame::{Frame, Intrinsics};
 use crate::horizon::{HorizonConfig, HorizonLine};
 use crate::measure::{measure_altitude, MeasurementError};
-use crate::track::{track, RigidTransform, TrackConfig};
+use crate::ray::{altitude_from_rays, AltitudeMeasurement, BodyRay, CameraRay, HorizonRay};
+use crate::track::{track, track_rotation, RigidTransform, TrackConfig};
 use bris_core::{Sigma, Uncertain};
+use bris_math::kabsch;
 
 /// One frame's role in the panorama: did it produce a horizon? a body
 /// centroid? both? neither?
@@ -88,6 +90,14 @@ pub enum PanoramaError {
     /// Final altitude measurement failed.
     #[error("altitude measurement failed: {0}")]
     Measurement(#[from] MeasurementError),
+    /// The horizon line in the chosen horizon frame could not
+    /// be lifted to a camera-space plane (degenerate normal).
+    /// Only produced by the ray-space variants.
+    #[error("horizon line in frame {frame} could not be lifted to a camera-space plane")]
+    DegenerateHorizonRay {
+        /// Index of the horizon frame whose line refused to lift.
+        frame: usize,
+    },
 }
 
 /// Compute body-to-horizon altitude across a sequence of frames.
@@ -253,6 +263,254 @@ where
     let altitude = measure_altitude(frames[horizon_idx].intrinsics, horizon_line, centroid)?;
 
     Ok(altitude)
+}
+
+/// Camera-space (ray-based) sibling of [`panorama_altitude`].
+///
+/// Differs from [`panorama_altitude`] in two ways:
+///
+/// 1. The cross-frame chain is composed in **camera-ray space**
+///    via [`crate::track::track_rotation`] (Kabsch over ray
+///    pairs) rather than in pixel space via [`crate::track::track`].
+///    This means each pair in the chain may run at a different
+///    resolution; each frame contributes its own intrinsics
+///    when its pixels are lifted to rays.
+/// 2. The final body-vs-horizon altitude is computed via
+///    [`crate::ray::altitude_from_rays`] using the body ray
+///    rotated into the horizon frame's coordinate system and
+///    the horizon plane lifted from the horizon frame's
+///    detected line. Lens distortion is applied per-frame at
+///    each conversion, eliminating the pixel-chain
+///    approximation that the [`panorama_altitude`] path makes
+///    for distorted lenses.
+///
+/// Same input / output contract as [`panorama_altitude`]: pass
+/// frames in capture order with adjacent frames overlapping
+/// enough for `track_rotation` to find correspondences.
+///
+/// # Errors
+///
+/// See [`PanoramaError`]. The ray-space path adds
+/// [`PanoramaError::DegenerateHorizonRay`] when the horizon
+/// line in the chosen frame won't lift to a camera plane (a
+/// horizon line passing precisely through the principal point
+/// is the only realistic trigger).
+pub fn panorama_altitude_via_rotation(
+    frames: &[Frame],
+    horizon_cfg: HorizonConfig,
+    centroid_cfg: CentroidConfig,
+    track_cfg: TrackConfig,
+) -> Result<Uncertain<f64>, PanoramaError> {
+    panorama_altitude_via_rotation_with_detector(
+        frames,
+        horizon_cfg,
+        centroid_cfg,
+        track_cfg,
+        crate::horizon::detect_horizon,
+    )
+}
+
+/// Same as [`panorama_altitude_via_rotation`] but with a
+/// caller-supplied horizon detection function. Mirrors the
+/// pixel-rigid [`panorama_altitude_with_detector`] entry point.
+///
+/// # Errors
+///
+/// See [`PanoramaError`].
+pub fn panorama_altitude_via_rotation_with_detector<F, E>(
+    frames: &[Frame],
+    horizon_cfg: HorizonConfig,
+    centroid_cfg: CentroidConfig,
+    track_cfg: TrackConfig,
+    horizon_fn: F,
+) -> Result<Uncertain<f64>, PanoramaError>
+where
+    F: Fn(&Frame, HorizonConfig) -> Result<crate::horizon::HorizonLine, E>,
+    E: std::fmt::Display,
+{
+    if frames.is_empty() {
+        return Err(PanoramaError::NoHorizonFrame);
+    }
+
+    // Phase 1: per-frame role classification (identical to
+    // pixel-rigid path).
+    let roles: Vec<FrameRoles> = frames
+        .iter()
+        .enumerate()
+        .map(|(i, f)| {
+            let horizon = horizon_fn(f, horizon_cfg)
+                .inspect(|h| {
+                    tracing::debug!(
+                        frame = i,
+                        slope = h.slope,
+                        inliers = h.inlier_count,
+                        "panorama_via_rotation: horizon detected"
+                    );
+                })
+                .map_err(|e| {
+                    tracing::debug!(
+                        frame = i,
+                        error = %e,
+                        "panorama_via_rotation: horizon detection failed"
+                    );
+                })
+                .ok();
+            let body_centroid = centroid_brightest_body(f, centroid_cfg)
+                .inspect(|c| {
+                    tracing::debug!(
+                        frame = i,
+                        x = c.x,
+                        y = c.y,
+                        "panorama_via_rotation: body centroid detected"
+                    );
+                })
+                .map_err(|e| {
+                    tracing::debug!(
+                        frame = i,
+                        error = %e,
+                        "panorama_via_rotation: centroiding failed"
+                    );
+                })
+                .ok()
+                .map(|c| (c.x, c.y, c.position_sigma_px));
+            FrameRoles {
+                horizon,
+                body_centroid,
+            }
+        })
+        .collect();
+
+    let horizon_idx = roles
+        .iter()
+        .enumerate()
+        .filter_map(|(i, r)| r.horizon.map(|h| (i, h.inlier_count)))
+        .max_by_key(|&(_, n)| n)
+        .map(|(i, _)| i)
+        .ok_or(PanoramaError::NoHorizonFrame)?;
+    let body_idx = roles
+        .iter()
+        .enumerate()
+        .filter_map(|(i, r)| r.body_centroid.map(|(_, _, s)| (i, s.value())))
+        .min_by(|(_, sa), (_, sb)| sa.partial_cmp(sb).unwrap_or(std::cmp::Ordering::Equal))
+        .map(|(i, _)| i)
+        .ok_or(PanoramaError::NoBodyFrame)?;
+
+    let horizon_line = roles[horizon_idx].horizon.expect("checked above");
+    let (body_px_x, body_px_y, body_sigma_px) =
+        roles[body_idx].body_centroid.expect("checked above");
+
+    // Lift the body centroid in body_idx's intrinsics to a
+    // camera-space BodyRay.
+    let body_ray = BodyRay::from_pixel(
+        &frames[body_idx].intrinsics,
+        body_px_x,
+        body_px_y,
+        body_sigma_px,
+    );
+
+    // Lift the horizon line in horizon_idx's intrinsics to a
+    // camera-space HorizonRay (sky-pointing plane normal).
+    let horizon_ray = HorizonRay::from_line(
+        &horizon_line,
+        &frames[horizon_idx].intrinsics,
+        frames[horizon_idx].width(),
+    )
+    .ok_or(PanoramaError::DegenerateHorizonRay { frame: horizon_idx })?;
+
+    tracing::info!(
+        horizon_frame = horizon_idx,
+        body_frame = body_idx,
+        "panorama_via_rotation: selected horizon and body frames"
+    );
+
+    // Walk the chain and rotate the body ray into the horizon
+    // frame's coordinates. If body_idx == horizon_idx the chain
+    // is empty and the ray passes through unchanged.
+    let body_ray_in_horizon_frame = if body_idx == horizon_idx {
+        body_ray
+    } else {
+        let chain = build_rotation_chain(frames, body_idx, horizon_idx, track_cfg)?;
+        apply_rotation_chain(body_ray, &chain, body_idx, horizon_idx)
+    };
+
+    let measurement: AltitudeMeasurement =
+        altitude_from_rays(&body_ray_in_horizon_frame, &horizon_ray);
+
+    Ok(Uncertain {
+        value: measurement.altitude_rad,
+        sigma: measurement.altitude_sigma,
+    })
+}
+
+/// Build the chain of camera-space rotations from `from_idx` to
+/// `to_idx`. Each entry is the rotation R such that `ray_{i+1}
+/// ≈ R · ray_i` for adjacent frame pair (i, i+1) — always
+/// stored in ascending index order regardless of walk direction;
+/// the inverse is taken at apply time when walking backward.
+fn build_rotation_chain(
+    frames: &[Frame],
+    from_idx: usize,
+    to_idx: usize,
+    cfg: TrackConfig,
+) -> Result<Vec<[f64; 9]>, PanoramaError> {
+    let mut chain = Vec::new();
+    if from_idx == to_idx {
+        return Ok(chain);
+    }
+    let (start, end) = (from_idx.min(to_idx), from_idx.max(to_idx));
+    for i in start..end {
+        let rot = track_rotation(&frames[i], &frames[i + 1], cfg).map_err(|e| {
+            tracing::warn!(
+                from = i,
+                to = i + 1,
+                error = %e,
+                "panorama_via_rotation: pairwise rotation tracking failed"
+            );
+            PanoramaError::TrackingFailed { from: i, to: i + 1 }
+        })?;
+        chain.push(rot.matrix);
+    }
+    Ok(chain)
+}
+
+/// Apply a chain of rotations to a body ray in `body_idx`'s
+/// coordinates, returning the equivalent ray in `horizon_idx`'s
+/// coordinates. The chain is stored in ascending-index order;
+/// the walk direction determines whether each entry is applied
+/// directly (forward) or transposed (backward).
+fn apply_rotation_chain(
+    ray: BodyRay,
+    chain: &[[f64; 9]],
+    body_idx: usize,
+    horizon_idx: usize,
+) -> BodyRay {
+    if body_idx == horizon_idx {
+        return ray;
+    }
+    let mut current = ray.ray.as_array();
+    if body_idx < horizon_idx {
+        // Walk forward; chain[k] maps frame (body+k) → (body+k+1).
+        for r in chain {
+            current = kabsch::rotate_vec(r, current);
+        }
+    } else {
+        // Walk backward; chain[k] maps frame (horizon+k) →
+        // (horizon+k+1). To go horizon ← body we apply each in
+        // reverse order, transposed.
+        for r in chain.iter().rev() {
+            let r_t = transpose_3x3(r);
+            current = kabsch::rotate_vec(&r_t, current);
+        }
+    }
+    BodyRay {
+        ray: CameraRay::from_unit_components(current[0], current[1], current[2]),
+        direction_sigma: ray.direction_sigma,
+    }
+}
+
+/// Transpose a 3×3 matrix stored row-major in a flat [f64; 9].
+fn transpose_3x3(m: &[f64; 9]) -> [f64; 9] {
+    [m[0], m[3], m[6], m[1], m[4], m[7], m[2], m[5], m[8]]
 }
 
 /// Build the chain of pairwise rigid transforms from `from_idx` to
@@ -583,5 +841,69 @@ mod tests {
             }
             Err(e) => panic!("unexpected error: {e:?}"),
         }
+    }
+
+    #[test]
+    fn via_rotation_single_frame_agrees_with_pixel_rigid() {
+        // Same fixture as single_frame_with_body_and_horizon: the
+        // ray-space path should produce an altitude that agrees
+        // with the pixel-rigid path within a small tolerance, since
+        // the chain is empty (single frame) and both routes share
+        // the same horizon detection + body centroid.
+        let frame = synth_body_and_horizon(320, 240, 200, 160.0, 100.0, 12.0);
+        let frames = [frame];
+        let pixel = panorama_altitude(
+            &frames,
+            HorizonConfig::default(),
+            CentroidConfig::default(),
+            TrackConfig::default(),
+        )
+        .unwrap();
+        let rays = panorama_altitude_via_rotation(
+            &frames,
+            HorizonConfig::default(),
+            CentroidConfig::default(),
+            TrackConfig::default(),
+        )
+        .unwrap();
+        let diff_arcmin = (pixel.value - rays.value).to_degrees() * 60.0;
+        assert!(
+            diff_arcmin.abs() < 1.0,
+            "pixel-rigid {}° vs ray {}°: diff {} arcmin too large",
+            pixel.value.to_degrees(),
+            rays.value.to_degrees(),
+            diff_arcmin
+        );
+    }
+
+    #[test]
+    fn via_rotation_two_frame_chain_recovers_known_altitude() {
+        // Same fixture as two_frame_chain_body_above_horizon. With
+        // the camera-space chain, the body ray from frame 1 must
+        // be rotated into frame 0's coordinates via track_rotation
+        // (which on this nearly-identical-content pair recovers a
+        // small rotation), then composed with the horizon plane in
+        // frame 0. Expect roughly the same answer as the pixel
+        // path.
+        let frame0 = synth_horizon_only(320, 240, 120);
+        let frame1 = synth_body_only(320, 240, 160.0, 50.0, 10.0);
+        let alt = panorama_altitude_via_rotation(
+            &[frame0, frame1],
+            HorizonConfig::default(),
+            CentroidConfig::default(),
+            TrackConfig {
+                // Two-frame chain on synthetic data — needs only a
+                // few inliers to be confident.
+                min_inliers: 4,
+                ..TrackConfig::default()
+            },
+        )
+        .unwrap();
+        let alt_deg = alt.value.to_degrees();
+        // Body 70 px above horizon at fy=1000 → atan(70/1000) ≈ 4°.
+        assert!(
+            alt_deg > 1.0 && alt_deg < 10.0,
+            "ray-space altitude {alt_deg}° out of expected range"
+        );
     }
 }

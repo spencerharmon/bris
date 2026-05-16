@@ -673,7 +673,8 @@ mod tests {
 
     #[test]
     fn scaled_to_rejects_aspect_ratio_mismatch() {
-        let src = calib_at_4k(); // 4:3
+        // src is calibrated at 4:3 (4032×3024).
+        let src = calib_at_4k();
         // Try to scale a 4:3 calibration into a 16:9 runtime.
         // The scaling math would silently distort principal-
         // point and distortion behavior; refuse instead.

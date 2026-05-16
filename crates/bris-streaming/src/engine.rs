@@ -96,6 +96,10 @@ struct EngineState {
     last_classification: Option<bris_vision::Condition>,
     last_processed_frame_tt: Option<bris_core::time::Tt>,
     last_published_fix_tt: Option<bris_core::time::Tt>,
+    /// Resolution at which Stage C ran on the most recent
+    /// processed frame. Mirrors
+    /// [`crate::EngineDiagnostics::last_horizon_analysis_size`].
+    last_horizon_analysis_size: Option<(u32, u32)>,
     /// Ring buffer + body/horizon queues + eviction. Owns the
     /// retained raw frames and detection records.
     storage: Storage,
@@ -193,6 +197,7 @@ fn update_stage_counters(
 
     state.last_classification = Some(outcome.classification.condition);
     state.last_processed_frame_tt = Some(outcome.frame_tt);
+    state.last_horizon_analysis_size = Some(outcome.horizon_analyzed_size);
 }
 
 impl StreamingEngine {
@@ -252,6 +257,7 @@ impl StreamingEngine {
                 last_classification: None,
                 last_processed_frame_tt: None,
                 last_published_fix_tt: None,
+                last_horizon_analysis_size: None,
                 storage: Storage::new(config.input_ring_capacity),
                 sight_window: SightWindow::default(),
                 last_publication: None,
@@ -314,10 +320,17 @@ impl StreamingEngine {
         let frame_id = FrameId(state.next_frame_id);
         state.next_frame_id += 1;
 
+        // Wrap the frame in a pyramid up front so process_frame's
+        // horizon stage and the post-process admission share one
+        // cache. Per-stage downsamples computed during Stage C
+        // survive into stage_e (and any post-frame stitching
+        // pair-selection) without re-doing the box filter.
+        let pyramid = bris_vision::FramePyramid::new(frame);
+
         // Run Stages A + B + C synchronously. Pass the
         // hysteresis state by mutable reference so it advances
         // by exactly one observation per frame.
-        let mut outcome = process_frame(&frame, &self.config, &mut state.classifier_hysteresis);
+        let mut outcome = process_frame(&pyramid, &self.config, &mut state.classifier_hysteresis);
         let frame_tt = outcome.frame_tt;
 
         // ---- Stage D: plate solving (night/twilight only) ----
@@ -330,7 +343,7 @@ impl StreamingEngine {
         // the lazy build path below ran.
         let stage_d_outcome = run_stage_d(
             &mut outcome.body,
-            &frame,
+            pyramid.full(),
             self.plate_db.get(),
             self.config.plate_solve_cfg,
         );
@@ -355,7 +368,7 @@ impl StreamingEngine {
                 let _ = self.plate_db.set(db);
                 run_stage_d(
                     &mut outcome.body,
-                    &frame,
+                    pyramid.full(),
                     self.plate_db.get(),
                     self.config.plate_solve_cfg,
                 )
@@ -376,7 +389,7 @@ impl StreamingEngine {
         let StageOutcome { body, horizon, .. } = outcome;
         // Move `frame` into the ring buffer; the records into
         // their queues.
-        state.storage.admit_frame(frame_id, frame_tt, frame);
+        state.storage.admit_pyramid(frame_id, frame_tt, pyramid);
         state
             .storage
             .admit_records(frame_id, frame_tt, body, horizon);
@@ -470,6 +483,7 @@ impl StreamingEngine {
             last_classification: state.last_classification,
             last_processed_frame_tt: state.last_processed_frame_tt,
             last_published_fix_tt: state.last_published_fix_tt,
+            last_horizon_analysis_size: state.last_horizon_analysis_size,
         }
     }
 
@@ -501,7 +515,7 @@ impl StreamingEngine {
         state
             .storage
             .frame(crate::pipeline::FrameId(id))
-            .map(|rf| rf.frame.clone())
+            .map(|rf| rf.frame().clone())
     }
 
     /// Test-only hook: synthesize a published fix and emit it on

@@ -646,82 +646,96 @@ references to the regression tests that pin the behavior. See
     Nine unit tests; commit ~584f27c~. Workspace test count
     +9.
 
-*** TODO Step 3b: engine integration of FramePyramid
-    Plumb the abstraction through the streaming engine so the
-    cycle-time win actually materializes:
+*** DONE Step 3b: engine integration of FramePyramid
+    Plumbed FramePyramid through the streaming engine.
+    Commit ~5aef634~.
 
-    - ~bris_streaming::Storage::admit_frame~ takes a Frame and
-      constructs a FramePyramid; ~RingFrame~ holds the
-      pyramid instead of a bare Frame. Existing call sites
-      that read ~&RingFrame.frame~ migrate to
-      ~&RingFrame.pyramid.full()~ and behave identically.
-    - ~EngineConfig~ grows per-stage analysis-resolution
-      knobs:
-      - ~horizon_analysis_size: Option<(u32, u32)>~ — when
-        ~Some((w, h))~, horizon detection runs against
-        ~pyramid.level(w, h)~ instead of the full frame.
-      - ~segmentation_analysis_size~ — likewise for the
-        segmentation horizon detector.
-      - Centroiding and peak detection always run on
-        ~pyramid.full()~ — sub-pixel precision is the point.
-    - ~bris_vision::detect_horizon~ continues to internally
-      downsample to ~cfg.working_width~; with the pyramid
-      already at the target size the detector's own
-      downsample becomes a near-identity, amortizing the
-      work across stages reading the same pyramid level.
-    - The diagnostic snapshot grows a per-stage
-      analyzed-resolution field so the operator can see "the
-      horizon ran at 480×270 (downsampled 4× from your
-      1920×1080 capture)."
-    - The FFI ~FfiEngineConfig~ gains the new knobs;
-      Android settings UI exposes them as a single "analysis
-      resolution" slider per stage.
+    - ~bris_streaming::Storage~'s ~RingFrame~ holds a
+      ~FramePyramid~ (was bare ~Frame~). Public accessors
+      ~RingFrame::frame()~ (zero-cost source borrow) and
+      ~RingFrame::pyramid()~ (downsample-cache access).
+    - ~Storage::admit_frame(frame)~ keeps signature; new
+      ~admit_pyramid(pyramid)~ lets the engine pass a
+      pre-built pyramid through so per-stage downsamples
+      computed during process_frame survive into stage_e.
+    - ~process_frame~ takes ~&FramePyramid~. Engine builds
+      pyramid up front in push_frame, passes to process_frame
+      and admit_pyramid (single allocation per frame, single
+      downsample cache shared across stages).
+    - ~horizon::detect~ takes ~&FramePyramid~ and returns
+      ~(HorizonStageOutcome, (analyzed_w, analyzed_h))~.
+      When ~cfg.horizon_analysis_size~ is ~Some((w, h))~ it
+      requests ~pyramid.level(w, h)~ and runs every detector
+      against the downsampled frame; otherwise (default) runs
+      against the source.
+    - ~EngineConfig.horizon_analysis_size: Option<(u32, u32)>~
+      with sensible defaults (None = source-resolution).
+    - ~EngineDiagnostics.last_horizon_analysis_size~ surfaces
+      what resolution Stage C actually ran at on the most
+      recent frame.
+    - FFI: ~FfiEngineConfig~ gains
+      ~horizon_analysis_width / height: Option<u32>~ companion
+      fields (UniFFI prefers paired optional scalars over
+      optional tuples). ~DiagnosticSnapshot~ mirrors via
+      ~last_horizon_analysis_width / height~. Validation
+      enforces both-or-neither on the config side.
+    - Verified: 506 workspace tests pass; 94 vision
+      regression tests pass (corpus pixel-coordinate
+      assertions unchanged because the existing detectors
+      continue to return source-frame coordinates regardless
+      of which pyramid level fed them).
 
-    Care item: the regression-test corpus
-    (~tests/regression/*/case.toml~) currently expects
-    pixel-coordinate horizon-line outputs against the source
-    frame. Stage-level resolution changes the working-image
-    coordinates *internally* but the publicly-reported
-    HorizonLine remains in source-frame coordinates today
-    (the existing detector already maps back). This commit
-    must preserve that contract; the regression assertions
-    don't change.
+*** DONE Step 4: Camera-space stitching
+    Camera-space sibling of pixel-rigid ~track~ committed
+    (~9bab6b0~).
 
-*** TODO Step 4: Camera-space stitching
-    ~bris_vision::panorama~ today computes pixel-rigid
-    transforms between consecutive frames via
-    Harris+NCC+RANSAC. That assumes both frames are at the
-    same resolution. Cross-resolution stitching (frame N's
-    horizon at low-res + frame N+1's body centroid at
-    high-res) requires *rotations* between camera frames,
-    not pixel transforms.
+    - New ~bris_vision::RotationBetweenFrames~ carries the
+      3×3 rotation matrix mapping frame A's camera-space rays
+      onto frame B's, plus inlier counts and an RMS great-
+      circle residual in radians.
+    - New ~bris_vision::track_rotation(frame_a, frame_b, cfg)~
+      runs the same Harris+NCC pipeline as the existing
+      pixel-rigid ~track~, then converts each matched
+      (a_pixel, b_pixel) pair to a unit-ray pair via that
+      frame's intrinsics and feeds the Kabsch solver.
+    - *(DONE; commit 13ec89e)* The duplicated Jacobi-SVD
+      Kabsch implementation in ~bris-vision::kabsch~ and
+      ~bris-platesolve::kabsch~ has been extracted into a new
+      shared workspace crate ~bris-math~. Both consumers now
+      depend on ~bris-math = { workspace = true }~ and use
+      ~bris_math::kabsch::{kabsch_rotation, rotate_vec,
+      KabschError}~. ~bris-platesolve~'s public surface still
+      re-exports the three names for backwards compat with
+      external consumers; ~bris-vision~ uses ~bris_math::kabsch~
+      directly.
+    - The existing pixel-rigid ~track~ stays for same-
+      resolution same-camera fast paths where the camera-
+      space round-trip is unnecessary work.
 
-    Lift the panorama path:
-
-    - Replace the rigid-transform output with a per-pair
-      ~RotationBetweenFrames { rotation_matrix: [f64; 9],
-      rms_residual_rad: f64 }~.
-    - Compute the rotation by feature-matching pairs of
-      pixels (Harris corners or similar), converting each to
-      a camera-space ray via the source frame's intrinsics
-      (or whichever pyramid level the stitcher chose), then
-      Kabsch-fitting a rotation that maps frame-N rays onto
-      frame-(N+1) rays. The plate-solve crate already has a
-      Kabsch implementation; reuse it.
-    - ~panorama_altitude~ becomes "find body in frame B,
-      project body ray through K_B, rotate by stitcher's
-      rotation back into frame A's coordinate system, measure
-      against frame A's horizon ray." Resolution-free
-      end-to-end.
-
-    Unblocks: cross-resolution composition (Step 3b can have
-    the horizon detector run at 480p in frame N and the body
-    centroider at full-res in frame N+1; the stitcher
-    composes them in camera space without caring).
-
-    The current pixel-rigid path remains for same-resolution
-    same-frame fast paths where the camera-space round-trip
-    is unnecessary work.
+    All three deferred follow-ups have landed:
+    - *(DONE; commit 13ec89e)* Extract Kabsch + 3×3 SVD into
+      shared ~bris-math~ workspace crate.
+    - *(DONE; commit b595604)* RANSAC over the camera-space ray
+      pairs in ~track_rotation~. ~TrackConfig.ransac_inlier_rad~
+      (default 0.003 rad ≈ 10 arcmin) controls the per-pair
+      angular inlier threshold. The Kabsch fit is wrapped in a
+      3-pair sample-and-score consensus loop; only the largest
+      inlier set is refit. ~RotationBetweenFrames.inlier_count~
+      now meaningfully reports survivors (was always equal to
+      ~candidate_count~).
+    - *(DONE; commit 250aff1)*
+      ~panorama::panorama_altitude_via_rotation~ +
+      ~panorama_altitude_via_rotation_with_detector~ — the
+      camera-space sibling of ~panorama_altitude~. Builds the
+      cross-frame chain via ~track_rotation~ and the final
+      altitude via ~altitude_from_rays~. Each adjacent pair
+      runs at its own intrinsics, so a chain spanning a
+      low-resolution horizon detection and a high-resolution
+      body centroid is now natively supported.
+      ~PanoramaError~ gains ~DegenerateHorizonRay~ for the
+      (unrealistic) case where the horizon line passes
+      through the principal point and won't lift to a plane
+      normal.
 
 * Phase 2.5: Real-data validation against captured footage
   The user has captured a substantial test corpus (see ~progress.md~

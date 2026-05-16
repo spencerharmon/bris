@@ -467,6 +467,12 @@ private fun defaultEngineConfig(): FfiEngineConfig = FfiEngineConfig(
     minFixPublicationIntervalMs = 1000u,
     inputRingCapacity = 120u,
     segmentationModelPath = null,
+    // Per-stage analysis resolution (Phase 2 step 3b) — null
+    // = source-resolution detection. Operator-facing setting
+    // for this knob lands when there's a UI for camera +
+    // resolution choices.
+    horizonAnalysisWidth = null,
+    horizonAnalysisHeight = null,
 )
 
 /**

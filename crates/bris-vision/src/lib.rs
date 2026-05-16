@@ -47,7 +47,11 @@ pub use night_horizon::{
     detect_horizon_night_textured_excluding_body, detect_horizon_night_textured_with_pixel_mask,
     detect_horizon_night_with_column_mask, NightHorizonConfig, TexturedHorizonConfig,
 };
-pub use panorama::{panorama_altitude, panorama_altitude_with_detector, FrameRoles, PanoramaError};
+pub use panorama::{
+    panorama_altitude, panorama_altitude_via_rotation,
+    panorama_altitude_via_rotation_with_detector, panorama_altitude_with_detector, FrameRoles,
+    PanoramaError,
+};
 pub use peak::{detect_peaks, detect_peaks_above_horizon, Peak, PeakConfig};
 pub use pyramid::{FramePyramid, PyramidError, PyramidLevel};
 pub use ray::{altitude_from_rays, AltitudeMeasurement, BodyRay, CameraRay, HorizonRay};
@@ -57,5 +61,6 @@ pub use segment::{
     segment, segment_with_rotation, SegmentError, SegmentationMask,
 };
 pub use track::{
-    detect_corners, track, track_peaks, Corner, RigidTransform, TrackConfig, TrackError,
+    detect_corners, track, track_peaks, track_rotation, Corner, RigidTransform,
+    RotationBetweenFrames, TrackConfig, TrackError,
 };

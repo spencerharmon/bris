@@ -75,14 +75,13 @@
 
 mod altitude;
 mod hash;
-mod kabsch;
 mod solve;
 
 pub use altitude::{star_altitude, star_altitudes, StarAltitude};
+pub use bris_math::{kabsch_rotation, rotate_vec, KabschError};
 pub use hash::{
     pattern_hash, ra_dec_to_unit_vec, CatalogPattern, PatternHash, StarHashDb, StarHashDbConfig,
 };
-pub use kabsch::{kabsch_rotation, rotate_vec, KabschError};
 pub use solve::{
     plate_solve, Attitude, IdentifiedStar, PlateSolveConfig, PlateSolveError, PlateSolveResult,
 };

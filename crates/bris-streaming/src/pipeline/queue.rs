@@ -71,6 +71,15 @@ impl fmt::Display for FrameId {
 /// 4 is to retain a downscaled copy or pre-computed feature
 /// pyramid alongside the original; for commit 4 we keep things
 /// simple and store the full frame.
+///
+/// As of step 3b of the per-stage-resolution overhaul, the
+/// underlying frame is wrapped in a [`bris_vision::FramePyramid`]
+/// so downstream stages that prefer a downsampled view (e.g.
+/// horizon detection, segmentation) can request a cached
+/// pyramid level rather than re-downsampling on every read.
+/// The full-resolution frame remains available via
+/// [`RingFrame::frame`]; the pyramid is reachable via
+/// [`RingFrame::pyramid`].
 #[derive(Debug)]
 pub(crate) struct RingFrame {
     /// Engine-assigned id.
@@ -79,8 +88,25 @@ pub(crate) struct RingFrame {
     /// [`Frame::capture_tt`] so eviction checks don't need to
     /// dig into the frame to compute time gaps.
     pub(crate) frame_tt: Tt,
-    /// The raw frame.
-    pub(crate) frame: Frame,
+    /// The raw frame, wrapped in a per-stage downsample cache.
+    /// Direct field access remains crate-private; consumers
+    /// should reach the source frame through [`Self::frame`]
+    /// (zero-cost) or a downsampled level through
+    /// [`Self::pyramid`].
+    pub(crate) pyramid: bris_vision::FramePyramid,
+}
+
+impl RingFrame {
+    /// Borrow the source (full-resolution) frame. Equivalent
+    /// to `self.pyramid.full()` and zero cost.
+    pub(crate) fn frame(&self) -> &Frame {
+        self.pyramid.full()
+    }
+
+    /// Borrow the pyramid for downsampled-level access.
+    pub(crate) fn pyramid(&self) -> &bris_vision::FramePyramid {
+        &self.pyramid
+    }
 }
 
 /// One body detection retained for Stage E pairing.
@@ -332,7 +358,28 @@ impl Storage {
     /// normal operation the time-window-based [`Self::evict`]
     /// call (typically right after `admit_records`) keeps
     /// the ring well below capacity.
+    /// Admit a raw frame into the ring buffer. Wraps the
+    /// frame in a [`bris_vision::FramePyramid`] (with an
+    /// empty downsample cache) so downstream stages can
+    /// request pyramid levels via [`RingFrame::pyramid`].
+    ///
+    /// Use [`Self::admit_pyramid`] when the engine has
+    /// already constructed a pyramid for this frame (e.g.
+    /// because `process_frame` populated cached levels during
+    /// stage C); admitting via that path preserves the cache.
     pub(crate) fn admit_frame(&mut self, frame_id: FrameId, frame_tt: Tt, frame: Frame) {
+        self.admit_pyramid(frame_id, frame_tt, bris_vision::FramePyramid::new(frame));
+    }
+
+    /// Admit a frame whose pyramid was constructed upstream
+    /// (e.g. by [`crate::pipeline::process_frame`] so its
+    /// horizon-stage downsample cache survives).
+    pub(crate) fn admit_pyramid(
+        &mut self,
+        frame_id: FrameId,
+        frame_tt: Tt,
+        pyramid: bris_vision::FramePyramid,
+    ) {
         if self.ring.len() >= self.capacity {
             // Evict the oldest. Also drop any queue records
             // that referenced it, because their stitching
@@ -343,7 +390,7 @@ impl Storage {
         self.ring.push(RingFrame {
             frame_id,
             frame_tt,
-            frame,
+            pyramid,
         });
     }
 

@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/bris-core",
+    "crates/bris-math",
     "crates/bris-almanac",
     "crates/bris-vision",
     "crates/bris-platesolve",
@@ -96,6 +97,7 @@ tempfile = "3"
 
 # Internal crates (path deps).
 bris-core = { path = "crates/bris-core" }
+bris-math = { path = "crates/bris-math" }
 bris-almanac = { path = "crates/bris-almanac" }
 bris-vision = { path = "crates/bris-vision" }
 bris-platesolve = { path = "crates/bris-platesolve" }
