@@ -18,6 +18,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -36,6 +37,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
@@ -158,10 +160,59 @@ fun CalibrationScreen(
         status = "New session started."
     }
 
-    Column(modifier = Modifier.fillMaxSize()) {
-        // ---- header ----
+    Box(modifier = Modifier.fillMaxSize()) {
+        // ---- camera preview (fills the whole screen; controls overlay it) ----
+        //
+        // Mirrors LiveScreen's layout: the preview is the
+        // root and *every* control is a translucent overlay
+        // on top. Earlier this screen wrapped the preview in
+        // a Column with a fixed-height header above and a
+        // status panel below, which squeezed the 16:9
+        // ViewPort into a near-square slot and made the
+        // preview look like a square crop. The captured
+        // pixels were always the full 16:9 frame; the
+        // squeeze was purely a layout artifact, but
+        // visually misleading. Root-level preview + capped
+        // bottom overlay restores parity with LiveScreen.
+        AndroidView(
+            modifier = Modifier.fillMaxSize(),
+            factory = { ctx ->
+                val previewView = PreviewView(ctx)
+                val providerFuture = ProcessCameraProvider.getInstance(ctx)
+                providerFuture.addListener({
+                    val provider = providerFuture.get()
+                    val preview = Preview.Builder().build().also {
+                        it.setSurfaceProvider(previewView.surfaceProvider)
+                    }
+                    val viewport = ViewPort.Builder(
+                        android.util.Rational(
+                            CameraConstants.WIDTH,
+                            CameraConstants.HEIGHT,
+                        ),
+                        preview.targetRotation,
+                    )
+                        .setScaleType(ViewPort.FIT)
+                        .build()
+                    val group = UseCaseGroup.Builder()
+                        .setViewPort(viewport)
+                        .addUseCase(preview)
+                        .addUseCase(imageCapture)
+                        .build()
+                    provider.unbindAll()
+                    provider.bindToLifecycle(
+                        lifecycleOwner,
+                        cameraSelector,
+                        group,
+                    )
+                }, ContextCompat.getMainExecutor(ctx))
+                previewView
+            },
+        )
+
+        // ---- header (top overlay) ----
         Row(
             modifier = Modifier
+                .align(Alignment.TopCenter)
                 .fillMaxWidth()
                 .background(Color(0xCC000000))
                 .padding(horizontal = 12.dp, vertical = 8.dp),
@@ -176,52 +227,13 @@ fun CalibrationScreen(
             }
         }
 
-        // ---- camera preview (fills middle) ----
-        Box(
-            modifier = Modifier
-                .fillMaxWidth()
-                .weight(1f),
-        ) {
-            AndroidView(
-                modifier = Modifier.fillMaxSize(),
-                factory = { ctx ->
-                    val previewView = PreviewView(ctx)
-                    val providerFuture = ProcessCameraProvider.getInstance(ctx)
-                    providerFuture.addListener({
-                        val provider = providerFuture.get()
-                        val preview = Preview.Builder().build().also {
-                            it.setSurfaceProvider(previewView.surfaceProvider)
-                        }
-                        val viewport = ViewPort.Builder(
-                            android.util.Rational(
-                                CameraConstants.WIDTH,
-                                CameraConstants.HEIGHT,
-                            ),
-                            preview.targetRotation,
-                        )
-                            .setScaleType(ViewPort.FIT)
-                            .build()
-                        val group = UseCaseGroup.Builder()
-                            .setViewPort(viewport)
-                            .addUseCase(preview)
-                            .addUseCase(imageCapture)
-                            .build()
-                        provider.unbindAll()
-                        provider.bindToLifecycle(
-                            lifecycleOwner,
-                            cameraSelector,
-                            group,
-                        )
-                    }, ContextCompat.getMainExecutor(ctx))
-                    previewView
-                },
-            )
-        }
-
-        // ---- status + actions (fixed) ----
+        // ---- status + actions (bottom overlay; capped so the
+        //      preview keeps most of the screen) ----
         Column(
             modifier = Modifier
+                .align(Alignment.BottomCenter)
                 .fillMaxWidth()
+                .heightIn(max = 360.dp)
                 .background(Color(0xCC000000))
                 .padding(12.dp)
                 .verticalScroll(rememberScrollState()),
