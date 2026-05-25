@@ -20,7 +20,7 @@
 //! - Plate-solving database built lazily on first night frame.
 
 use bris_almanac::Observer;
-use bris_core::Sigma;
+use bris_core::{Hemisphere, Sigma};
 use bris_platesolve::{PlateSolveConfig, StarHashDbConfig};
 use bris_vision::{
     ConditionConfig, HorizonConfig, HorizonFusionConfig, NightHorizonConfig, PeakConfig,
@@ -316,6 +316,34 @@ pub struct EngineConfig {
     /// `enabled: true` rooted at `"."`; tests that don't
     /// want persistence override with `enabled: false`.
     pub store: StoreConfig,
+
+    /// Cold-start fix fallback configuration. See
+    /// [`ColdStartEngineConfig`].
+    pub cold_start: ColdStartEngineConfig,
+}
+
+/// Cold-start fix fallback knobs.
+///
+/// The cold-start solver (`bris_nav::cold_start_fix`) runs in
+/// Stage E when [`bris_nav::multi_sight_fix`] returns
+/// `SingularGeometry` (or no position prior is available at
+/// all). See `docs/design/circle_of_position.md`,
+/// "Engine integration".
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ColdStartEngineConfig {
+    /// Master switch. When `false`, Stage E never falls back to
+    /// the cold-start solver; a Saint-Hilaire failure simply
+    /// publishes nothing. Default `true`.
+    pub enabled: bool,
+    /// Optional hemisphere hint for resolving two-candidate
+    /// cold-start results. When `Some`, Stage E picks the
+    /// candidate whose latitude lies in the configured
+    /// hemisphere and publishes with
+    /// [`crate::FixProvenance::ColdStartAmbiguous`]. When
+    /// `None`, two-candidate results are not published (the
+    /// operator-prompt FFI channel is a follow-up). Default
+    /// `None`.
+    pub coarse_hemisphere: Option<Hemisphere>,
 }
 
 impl EngineConfig {
@@ -366,6 +394,10 @@ impl EngineConfig {
             vanishing_point_provider_config: bris_vision::VanishingPointConfig::default(),
             horizon_fusion: HorizonFusionConfig::default(),
             store: StoreConfig::default(),
+            cold_start: ColdStartEngineConfig {
+                enabled: true,
+                coarse_hemisphere: None,
+            },
         }
     }
 

@@ -639,6 +639,12 @@ pub struct FfiPublishedFix {
     /// some sight in the active window references them; copy
     /// promptly after receiving the fix.
     pub contributing_frame_ids: Vec<u64>,
+    /// Which solver produced this fix. Stable string label:
+    /// `"saint_hilaire"`, `"cold_start"`, or
+    /// `"cold_start_ambiguous"`. See `bris_streaming::
+    /// FixProvenance` for semantics. Surfaced so operator UIs
+    /// can advise that a cold-start fix is not yet AP-anchored.
+    pub provenance: String,
 }
 
 /// Foreign callback invoked once per published fix.
@@ -987,6 +993,7 @@ fn published_fix_to_ffi(p: &PublishedFix) -> FfiPublishedFix {
         dominant_source: p.dominant_source.label().to_owned(),
         timestamp_tt_jd: p.timestamp.julian_date(),
         contributing_frame_ids: p.contributing_frame_ids.clone(),
+        provenance: p.provenance.label().to_owned(),
     }
 }
 
