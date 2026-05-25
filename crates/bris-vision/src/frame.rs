@@ -406,6 +406,24 @@ pub struct Frame {
     /// detector consumes this so it can re-load and re-rotate the
     /// source RGB to match the internal frame.
     pub source_rotation: Rotation,
+    /// Unit gravity direction expressed in the camera frame
+    /// (image-right = +x, image-down = +y, lens-forward = +z),
+    /// when externally known (e.g. from Android `Sensor.TYPE_GRAVITY`
+    /// composed with the camera-mount rotation).
+    ///
+    /// `None` when not provided; consumers that need a gravity
+    /// axis (currently only [`crate::ReflectionPairProvider`])
+    /// fall back to image-down (`(0, 1, 0)`) — the convention
+    /// for a portrait-mounted sensor with sky-up. Callers
+    /// capturing sensor-landscape frames must populate this
+    /// field for axis-correct gravity reasoning. The vector
+    /// is expected to be approximately unit-length; consumers
+    /// renormalize defensively.
+    // clippy::struct_field_names: `_camera_frame` is the
+    // coordinate-system qualifier (not a redundant repeat of
+    // the struct name `Frame`).
+    #[allow(clippy::struct_field_names)]
+    pub gravity_camera_frame: Option<(f64, f64, f64)>,
 }
 
 impl Frame {
@@ -446,6 +464,7 @@ impl Frame {
             intrinsics,
             source_path: None,
             source_rotation: Rotation::Deg0,
+            gravity_camera_frame: None,
         })
     }
 
@@ -465,6 +484,14 @@ impl Frame {
     #[must_use]
     pub fn with_source_rotation(mut self, rotation: Rotation) -> Self {
         self.source_rotation = rotation;
+        self
+    }
+
+    /// Attach an externally-known gravity direction in the
+    /// camera frame. See [`Frame::gravity_camera_frame`].
+    #[must_use]
+    pub fn with_gravity_camera_frame(mut self, gravity: (f64, f64, f64)) -> Self {
+        self.gravity_camera_frame = Some(gravity);
         self
     }
 
