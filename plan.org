@@ -218,6 +218,12 @@ references to the regression tests that pin the behavior. See
    Bennett or Sæmundsson formula; allow temperature/pressure overrides.
 ** DONE Almanac API surface
    ~body_position(BodyId, Instant, Observer) -> ApparentPosition~
+** DONE Annual aberration (classical, Meeus Ch. 23)
+   ~apply_annual_aberration~ in ~crates/bris-almanac/src/apparent.rs~.
+   Earth heliocentric velocity from numerical derivative of VSOP87D over
+   ±30 s, classical v/c formulation, applied between nutation and
+   topocentric parallax. ~20″ maximum shift; residual σ 0.1″ (down from
+   the 20″ placeholder).
 ** TODO Benchmark on Pi Zero 2W
    Confirm <1 ms per body. Decide whether Chebyshev caching is needed.
    Likely answer: no.
