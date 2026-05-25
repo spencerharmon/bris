@@ -481,6 +481,31 @@ pub struct DiagnosticSnapshot {
     pub last_horizon_analysis_width: Option<u32>,
     /// Companion to `last_horizon_analysis_width`.
     pub last_horizon_analysis_height: Option<u32>,
+
+    /// Provenance of the horizon emitted on the most recent
+    /// processed frame, as a short stable label. Formatted by
+    /// the FFI from [`EngineDiagnostics::last_horizon_provenance`]:
+    ///
+    /// - `"Optical:Gradient"` / `"Optical:SkyRegion"` /
+    ///   `"Optical:Night"` / `"Optical:NightTextured"` /
+    ///   `"Optical:Segmentation"` — classical detectors.
+    /// - `"ReflectionPair(n)"` / `"ReflectionPair(n,prior)"`
+    ///   — auto-detected reflection-pair, `n` surviving pairs;
+    ///   `,prior` suffix when the position-prior catalog test
+    ///   was applied.
+    ///
+    /// Future provenance variants fall back to `"{:?}"` debug
+    /// formatting so adding a provider does not break this
+    /// surface.
+    ///
+    /// `None` until the first frame produces a horizon, or
+    /// when the most recent frame produced none.
+    pub last_horizon_provenance: Option<String>,
+    /// `altitude_sigma` of the horizon emitted on the most
+    /// recent processed frame, in arcminutes (1σ). Companion
+    /// to [`Self::last_horizon_provenance`]; `None` when no
+    /// horizon was emitted on the most recent frame.
+    pub last_horizon_altitude_sigma_arcmin: Option<f64>,
 }
 
 impl From<&EngineDiagnostics> for DiagnosticSnapshot {
@@ -524,7 +549,43 @@ impl From<&EngineDiagnostics> for DiagnosticSnapshot {
                 .map(bris_core::time::Tt::julian_date),
             last_horizon_analysis_width: d.last_horizon_analysis_size.map(|(w, _)| w),
             last_horizon_analysis_height: d.last_horizon_analysis_size.map(|(_, h)| h),
+            last_horizon_provenance: d.last_horizon_provenance.map(format_horizon_provenance),
+            last_horizon_altitude_sigma_arcmin: d
+                .last_horizon_altitude_sigma_rad
+                .map(|s| s.to_degrees() * 60.0),
         }
+    }
+}
+
+/// Format a [`HorizonProvenance`] into a short stable label
+/// for HUD display. Documented variants are matched
+/// exhaustively; any future variant falls back to `"{:?}"`
+/// debug formatting so adding a provider does not gate a
+/// release on this FFI shim.
+fn format_horizon_provenance(p: bris_vision::HorizonProvenance) -> String {
+    use bris_vision::{HorizonProvenance as HP, OpticalKind};
+    #[allow(unreachable_patterns, clippy::match_wildcard_for_single_variants)]
+    match p {
+        HP::Optical(OpticalKind::Gradient) => "Optical:Gradient".to_owned(),
+        HP::Optical(OpticalKind::SkyRegion) => "Optical:SkyRegion".to_owned(),
+        HP::Optical(OpticalKind::Night) => "Optical:Night".to_owned(),
+        HP::Optical(OpticalKind::NightTextured) => "Optical:NightTextured".to_owned(),
+        HP::Optical(OpticalKind::Segmentation) => "Optical:Segmentation".to_owned(),
+        HP::ReflectionPair {
+            pair_count,
+            used_position_prior,
+        } => {
+            if used_position_prior {
+                format!("ReflectionPair({pair_count},prior)")
+            } else {
+                format!("ReflectionPair({pair_count})")
+            }
+        }
+        // Catch-all for future provenance variants (vertical
+        // line, vanishing point, fused, etc.). Falls back to
+        // debug formatting so the HUD continues to render
+        // something useful without coordinating an FFI bump.
+        other => format!("{other:?}"),
     }
 }
 

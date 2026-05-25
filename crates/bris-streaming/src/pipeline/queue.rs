@@ -648,6 +648,7 @@ mod tests {
     fn horizon_outcome(sigma_rad: f64) -> HorizonStageOutcome {
         HorizonStageOutcome::Detected {
             detector: super::super::horizon::HorizonDetector::Gradient,
+            provenance: bris_vision::HorizonProvenance::Optical(bris_vision::OpticalKind::Gradient),
             line: HorizonLine {
                 slope: 0.0,
                 intercept: 4.0,

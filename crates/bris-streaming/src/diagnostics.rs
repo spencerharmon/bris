@@ -74,6 +74,18 @@ pub struct EngineDiagnostics {
     /// has completed Stage C.
     pub last_horizon_analysis_size: Option<(u32, u32)>,
 
+    /// Provenance of the horizon emitted on the most recent
+    /// processed frame (or `None` if the frame produced no
+    /// horizon, or before the first frame). Surfaced to the
+    /// FFI for HUD display so operators know which provider
+    /// the on-screen horizon came from.
+    pub last_horizon_provenance: Option<bris_vision::HorizonProvenance>,
+
+    /// `altitude_sigma` of the horizon emitted on the most
+    /// recent processed frame, in radians (1σ). `None` when
+    /// no horizon was emitted on the most recent frame.
+    pub last_horizon_altitude_sigma_rad: Option<f64>,
+
     /// Number of times the reflection-pair provider was
     /// invoked (i.e. ≥ 2 body candidates were present and
     /// the dispatched condition was actionable).
