@@ -44,9 +44,10 @@ pub enum TemporalScope {
 /// horizon providers.
 ///
 /// Constructed by the streaming engine from
-/// `BodyDetection::Day(Centroid)` (single candidate) or
-/// `BodyDetection::Night(Vec<Peak>)` (one per peak). Keeps
-/// `BodyDetection` itself private to `bris-streaming`.
+/// `BodyDetection::Day(Centroid, Vec<Centroid>)` (primary plus
+/// any secondary reflections) or `BodyDetection::Night(Vec<Peak>)`
+/// (one per peak). Keeps `BodyDetection` itself private to
+/// `bris-streaming`.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct BodyCandidate {
     /// Sub-pixel image coordinates.
