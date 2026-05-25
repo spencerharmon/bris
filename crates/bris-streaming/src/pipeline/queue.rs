@@ -647,6 +647,7 @@ mod tests {
                 residual_rms_px: 0.5,
                 altitude_sigma: Sigma::new(sigma_rad).unwrap(),
             },
+            direct_sight: None,
         }
     }
 

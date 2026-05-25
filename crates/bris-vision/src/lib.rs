@@ -9,6 +9,7 @@ pub mod condition;
 pub mod frame;
 pub mod fusion;
 pub mod horizon;
+pub mod horizon_providers;
 pub mod io;
 pub mod lens;
 pub mod measure;
@@ -35,6 +36,11 @@ pub use horizon::{
     body_column_mask, detect_horizon, detect_horizon_via_sky_region,
     detect_horizon_via_sky_region_with_column_mask, detect_horizon_with_column_mask, HorizonConfig,
     HorizonError, HorizonLine,
+};
+pub use horizon_providers::{
+    BodyCandidate, DirectSight, HorizonHypothesis, HorizonProvenance, HorizonProvider,
+    HorizonProviderContext, OpticalKind, PositionPrior, ReflectionPairConfig,
+    ReflectionPairProvider, TemporalScope,
 };
 pub use io::{
     load_frame_from_path, load_frame_from_path_with_rotation, save_frame_as_png, LoadError,

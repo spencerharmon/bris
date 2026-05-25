@@ -48,11 +48,19 @@
 //! or None."
 
 use crate::config::EngineConfig;
+use crate::pipeline::horizon_providers::{
+    optical_kind_to_detector, GradientProvider, NightProvider, NightTexturedProvider,
+    SkyRegionProvider,
+};
+use bris_core::time::Tt;
 use bris_vision::{
-    detect_horizon, detect_horizon_night, detect_horizon_night_textured,
-    detect_horizon_via_sky_region, Condition, Frame, FramePyramid, HorizonLine,
+    BodyCandidate, Condition, Frame, FramePyramid, HorizonLine, HorizonProvenance, HorizonProvider,
+    HorizonProviderContext, Intrinsics, PositionPrior,
 };
 use tracing::{debug, trace};
+
+#[cfg(feature = "segmentation")]
+use crate::pipeline::horizon_providers::SegmentationProvider;
 
 /// Outcome of one frame's pass through Stage C.
 #[derive(Debug, Clone, Copy)]
@@ -67,6 +75,11 @@ pub(crate) enum HorizonStageOutcome {
         detector: HorizonDetector,
         /// The horizon line, with its `altitude_sigma`.
         line: HorizonLine,
+        /// Direct sight emitted alongside the horizon (e.g.
+        /// reflection-pair's `Ho = θ/2`). `None` for optical
+        /// detectors. Stage E consumes this when present
+        /// instead of computing a sight via `measure_altitude`.
+        direct_sight: Option<bris_vision::DirectSight>,
     },
     /// No detector produced a horizon for this frame.
     None,
@@ -91,6 +104,10 @@ pub(crate) enum HorizonDetector {
     /// constructible when the `segmentation` feature is
     /// enabled.
     Segmentation,
+    /// Auto-detected reflection-pair provider (Phase 1 of the
+    /// horizon-providers roadmap; see
+    /// `docs/design/horizon_autodetect.md`).
+    ReflectionPair,
 }
 
 /// Run Stage C on one frame.
@@ -103,6 +120,9 @@ pub(crate) fn detect(
     pyramid: &FramePyramid,
     condition: Condition,
     cfg: &EngineConfig,
+    body_candidates: &[BodyCandidate],
+    position_prior: Option<PositionPrior>,
+    timestamp: Tt,
 ) -> (HorizonStageOutcome, (u32, u32)) {
     let mut best: Option<(HorizonDetector, HorizonLine)> = None;
 
@@ -139,31 +159,132 @@ pub(crate) fn detect(
     };
     let frame = frame_for_detect.as_ref();
     let analyzed_size = (frame.width(), frame.height());
+    let intrinsics: Intrinsics = frame.intrinsics;
+    let ctx = HorizonProviderContext {
+        frame,
+        intrinsics: &intrinsics,
+        body_candidates,
+        position_prior,
+        timestamp,
+    };
+    // Last-emitted direct sight (if any) from a provider that
+    // produced one. Phase 1 has only one such provider
+    // (reflection-pair); when more land the cheap-first /
+    // best-σ winner determines which direct sight propagates.
+    let mut best_direct_sight: Option<bris_vision::DirectSight> = None;
 
     if day_first {
-        try_gradient(frame, cfg, &mut best);
+        run_provider(
+            &GradientProvider { cfg },
+            &ctx,
+            &mut best,
+            &mut best_direct_sight,
+        );
         if early_terminate(best.as_ref(), early_term) {
-            return (finish(best), analyzed_size);
+            return (finish(best, best_direct_sight), analyzed_size);
         }
-        try_sky_region(frame, cfg, &mut best);
+        run_provider(
+            &SkyRegionProvider { cfg },
+            &ctx,
+            &mut best,
+            &mut best_direct_sight,
+        );
         if early_terminate(best.as_ref(), early_term) {
-            return (finish(best), analyzed_size);
+            return (finish(best, best_direct_sight), analyzed_size);
         }
     }
     if night_first {
-        try_night(frame, cfg, &mut best);
+        run_provider(
+            &NightProvider { cfg },
+            &ctx,
+            &mut best,
+            &mut best_direct_sight,
+        );
         if early_terminate(best.as_ref(), early_term) {
-            return (finish(best), analyzed_size);
+            return (finish(best, best_direct_sight), analyzed_size);
         }
-        try_night_textured(frame, cfg, &mut best);
+        run_provider(
+            &NightTexturedProvider { cfg },
+            &ctx,
+            &mut best,
+            &mut best_direct_sight,
+        );
         if early_terminate(best.as_ref(), early_term) {
-            return (finish(best), analyzed_size);
+            return (finish(best, best_direct_sight), analyzed_size);
+        }
+        // Reflection-pair runs when there are ≥ 2 night
+        // body candidates. Day-mode reflection-pair detection
+        // is deferred (Stage B emits one centroid; see
+        // docs/handoff/reflection-pair-phase1.md and
+        // docs/design/horizon_autodetect.md §10).
+        if body_candidates.len() >= 2 {
+            let provider = bris_vision::ReflectionPairProvider::default();
+            run_provider(&provider, &ctx, &mut best, &mut best_direct_sight);
+            if early_terminate(best.as_ref(), early_term) {
+                return (finish(best, best_direct_sight), analyzed_size);
+            }
         }
     }
     // Last resort: segmentation. Gated on the feature flag and
     // on the operator opting in by supplying a model path.
-    try_segmentation(frame, cfg, &mut best);
-    (finish(best), analyzed_size)
+    run_segmentation(&ctx, cfg, &mut best, &mut best_direct_sight);
+    (finish(best, best_direct_sight), analyzed_size)
+}
+
+/// Run one provider; update `best` (smallest σ wins) and
+/// record the winning hypothesis's direct sight, if any.
+fn run_provider<P: HorizonProvider>(
+    provider: &P,
+    ctx: &HorizonProviderContext<'_>,
+    best: &mut Option<(HorizonDetector, HorizonLine)>,
+    best_direct_sight: &mut Option<bris_vision::DirectSight>,
+) {
+    let Some(hyp) = provider.detect(ctx) else {
+        return;
+    };
+    let detector = detector_from_provenance(hyp.provenance);
+    trace!(
+        detector = ?detector,
+        sigma_rad = hyp.line.altitude_sigma.value(),
+        inliers = hyp.line.inlier_count,
+        "Stage C: provider produced hypothesis"
+    );
+    let improved = match best {
+        Some((_, existing)) => hyp.line.altitude_sigma < existing.altitude_sigma,
+        None => true,
+    };
+    if improved {
+        *best = Some((detector, hyp.line));
+        *best_direct_sight = hyp.direct_sight;
+    }
+}
+
+fn detector_from_provenance(p: HorizonProvenance) -> HorizonDetector {
+    match p {
+        HorizonProvenance::Optical(kind) => optical_kind_to_detector(kind),
+        HorizonProvenance::ReflectionPair { .. } => HorizonDetector::ReflectionPair,
+    }
+}
+
+#[cfg(feature = "segmentation")]
+fn run_segmentation(
+    ctx: &HorizonProviderContext<'_>,
+    cfg: &EngineConfig,
+    best: &mut Option<(HorizonDetector, HorizonLine)>,
+    best_direct_sight: &mut Option<bris_vision::DirectSight>,
+) {
+    let provider = SegmentationProvider { cfg };
+    run_provider(&provider, ctx, best, best_direct_sight);
+}
+
+#[cfg(not(feature = "segmentation"))]
+fn run_segmentation(
+    _ctx: &HorizonProviderContext<'_>,
+    _cfg: &EngineConfig,
+    _best: &mut Option<(HorizonDetector, HorizonLine)>,
+    _best_direct_sight: &mut Option<bris_vision::DirectSight>,
+) {
+    // Segmentation feature disabled at compile time.
 }
 
 /// Cheap copy-on-write wrapper for the analysis-resolution frame.
@@ -185,148 +306,6 @@ impl CowFrame<'_> {
     }
 }
 
-fn try_gradient(
-    frame: &Frame,
-    cfg: &EngineConfig,
-    best: &mut Option<(HorizonDetector, HorizonLine)>,
-) {
-    match detect_horizon(frame, cfg.horizon_cfg) {
-        Ok(line) => {
-            trace!(
-                detector = "gradient",
-                sigma_rad = line.altitude_sigma.value(),
-                inliers = line.inlier_count,
-                "Stage C: detector succeeded"
-            );
-            update_best(best, HorizonDetector::Gradient, line);
-        }
-        Err(e) => trace!(detector = "gradient", error = %e, "Stage C: detector failed"),
-    }
-}
-
-fn try_sky_region(
-    frame: &Frame,
-    cfg: &EngineConfig,
-    best: &mut Option<(HorizonDetector, HorizonLine)>,
-) {
-    match detect_horizon_via_sky_region(frame, cfg.horizon_cfg) {
-        Ok(line) => {
-            trace!(
-                detector = "sky_region",
-                sigma_rad = line.altitude_sigma.value(),
-                inliers = line.inlier_count,
-                "Stage C: detector succeeded"
-            );
-            update_best(best, HorizonDetector::SkyRegion, line);
-        }
-        Err(e) => trace!(detector = "sky_region", error = %e, "Stage C: detector failed"),
-    }
-}
-
-fn try_night(frame: &Frame, cfg: &EngineConfig, best: &mut Option<(HorizonDetector, HorizonLine)>) {
-    match detect_horizon_night(frame, cfg.night_horizon_cfg) {
-        Ok(line) => {
-            trace!(
-                detector = "night",
-                sigma_rad = line.altitude_sigma.value(),
-                inliers = line.inlier_count,
-                "Stage C: detector succeeded"
-            );
-            update_best(best, HorizonDetector::Night, line);
-        }
-        Err(e) => trace!(detector = "night", error = %e, "Stage C: detector failed"),
-    }
-}
-
-fn try_night_textured(
-    frame: &Frame,
-    cfg: &EngineConfig,
-    best: &mut Option<(HorizonDetector, HorizonLine)>,
-) {
-    match detect_horizon_night_textured(frame, cfg.textured_horizon_cfg) {
-        Ok(line) => {
-            trace!(
-                detector = "night_textured",
-                sigma_rad = line.altitude_sigma.value(),
-                inliers = line.inlier_count,
-                "Stage C: detector succeeded"
-            );
-            update_best(best, HorizonDetector::NightTextured, line);
-        }
-        Err(e) => trace!(detector = "night_textured", error = %e, "Stage C: detector failed"),
-    }
-}
-
-#[cfg(feature = "segmentation")]
-fn try_segmentation(
-    frame: &Frame,
-    cfg: &EngineConfig,
-    best: &mut Option<(HorizonDetector, HorizonLine)>,
-) {
-    use bris_vision::{detect_horizon_via_segmentation, load_model};
-    let Some(model_path) = cfg.segmentation_model_path.as_ref() else {
-        // Operator hasn't opted into segmentation; skip
-        // silently. This is the default state on embedded
-        // builds that don't ship the model.
-        return;
-    };
-    // Lazy load + cache. `load_model` is idempotent (uses a
-    // OnceLock internally).
-    if let Err(e) = load_model(model_path) {
-        // Loading failed — log at debug because this is an
-        // operator-facing problem (wrong path / corrupt model)
-        // and they'll see the message via the engine's tracing
-        // subscription. Don't keep retrying per-frame; the
-        // OnceLock means subsequent calls return the cached
-        // failure cheaply.
-        debug!(
-            path = %model_path.display(),
-            error = %e,
-            "Stage C: segmentation model load failed; will not retry per-frame"
-        );
-        return;
-    }
-    match detect_horizon_via_segmentation(frame, cfg.horizon_cfg) {
-        Ok(line) => {
-            trace!(
-                detector = "segmentation",
-                sigma_rad = line.altitude_sigma.value(),
-                inliers = line.inlier_count,
-                "Stage C: detector succeeded"
-            );
-            update_best(best, HorizonDetector::Segmentation, line);
-        }
-        Err(e) => trace!(detector = "segmentation", error = %e, "Stage C: detector failed"),
-    }
-}
-
-#[cfg(not(feature = "segmentation"))]
-fn try_segmentation(
-    _frame: &Frame,
-    _cfg: &EngineConfig,
-    _best: &mut Option<(HorizonDetector, HorizonLine)>,
-) {
-    // Segmentation feature disabled at compile time; nothing to
-    // do. The config field stays present so disabling the
-    // feature doesn't break the EngineConfig surface, but the
-    // engine simply never tries the detector.
-}
-
-/// Update `best` with `(detector, line)` if `line` improves on
-/// the current best (smaller σ).
-fn update_best(
-    best: &mut Option<(HorizonDetector, HorizonLine)>,
-    detector: HorizonDetector,
-    line: HorizonLine,
-) {
-    match best {
-        Some((_, existing)) if existing.altitude_sigma <= line.altitude_sigma => {
-            // Existing is at least as good. Keep it.
-        }
-        _ => *best = Some((detector, line)),
-    }
-}
-
 /// True iff the current best horizon's σ is at or below the
 /// early-termination threshold (and a best exists at all).
 fn early_terminate(
@@ -339,9 +318,16 @@ fn early_terminate(
     }
 }
 
-fn finish(best: Option<(HorizonDetector, HorizonLine)>) -> HorizonStageOutcome {
+fn finish(
+    best: Option<(HorizonDetector, HorizonLine)>,
+    direct_sight: Option<bris_vision::DirectSight>,
+) -> HorizonStageOutcome {
     match best {
-        Some((detector, line)) => HorizonStageOutcome::Detected { detector, line },
+        Some((detector, line)) => HorizonStageOutcome::Detected {
+            detector,
+            line,
+            direct_sight,
+        },
         None => HorizonStageOutcome::None,
     }
 }
@@ -407,9 +393,16 @@ mod tests {
         // gives sub-arcsec residuals).
         let cfg = EngineConfig::new(Observer::default_dev());
         let frame = synthetic_horizon(32);
-        let (outcome, _) = detect(&FramePyramid::new(frame.clone()), Condition::Day, &cfg);
+        let (outcome, _) = detect(
+            &FramePyramid::new(frame.clone()),
+            Condition::Day,
+            &cfg,
+            &[],
+            None,
+            frame.capture_tt,
+        );
         match outcome {
-            HorizonStageOutcome::Detected { detector, line } => {
+            HorizonStageOutcome::Detected { detector, line, .. } => {
                 // Detector should be one of the cheap day-path
                 // detectors; segmentation isn't enabled by path.
                 assert!(
@@ -442,7 +435,14 @@ mod tests {
     fn unusable_classification_skips_stage_c() {
         let cfg = EngineConfig::new(Observer::default_dev());
         let frame = synthetic_horizon(32);
-        let (outcome, _) = detect(&FramePyramid::new(frame.clone()), Condition::Unusable, &cfg);
+        let (outcome, _) = detect(
+            &FramePyramid::new(frame.clone()),
+            Condition::Unusable,
+            &cfg,
+            &[],
+            None,
+            frame.capture_tt,
+        );
         assert!(matches!(outcome, HorizonStageOutcome::None));
     }
 
@@ -453,7 +453,14 @@ mod tests {
         // and that the day-path detectors aren't tried.
         let cfg = EngineConfig::new(Observer::default_dev());
         let frame = dark_frame();
-        let (outcome, _) = detect(&FramePyramid::new(frame.clone()), Condition::Night, &cfg);
+        let (outcome, _) = detect(
+            &FramePyramid::new(frame.clone()),
+            Condition::Night,
+            &cfg,
+            &[],
+            None,
+            frame.capture_tt,
+        );
         // Either a Night/NightTextured detection or None;
         // never a day-path detector.
         match outcome {
@@ -483,7 +490,14 @@ mod tests {
         // the result is the gradient one.
         let cfg = EngineConfig::new(Observer::default_dev());
         let frame = synthetic_horizon(32);
-        let (outcome, _) = detect(&FramePyramid::new(frame.clone()), Condition::Day, &cfg);
+        let (outcome, _) = detect(
+            &FramePyramid::new(frame.clone()),
+            Condition::Day,
+            &cfg,
+            &[],
+            None,
+            frame.capture_tt,
+        );
         match outcome {
             HorizonStageOutcome::Detected { detector, .. } => {
                 // Allow either the gradient or sky-region

@@ -68,6 +68,7 @@ use bris_vision::{
 use tracing::{debug, trace, warn};
 
 mod horizon;
+mod horizon_providers;
 mod hysteresis;
 mod queue;
 mod stage_d;
@@ -195,8 +196,24 @@ pub(crate) fn process_frame(
     // ordering — saturated-body centroiding doesn't read the
     // horizon — but the pipeline runs C-then-B uniformly to
     // keep the stage graph simple.
-    let (horizon, horizon_analyzed_size) = horizon::detect(pyramid, dispatched_condition, cfg);
-    if let HorizonStageOutcome::Detected { detector, line } = horizon {
+    //
+    // Body candidates and the position prior are threaded
+    // through the dispatcher for the auto-horizon providers
+    // (Phase 1: reflection-pair). The optical detectors
+    // ignore them. On this first pass the candidates are
+    // empty (Stage B hasn't run yet); when Stage B yields
+    // ≥ 2 Night peaks the pipeline re-runs Stage C with the
+    // candidates so the reflection-pair provider can
+    // contribute. See docs/design/horizon_autodetect.md §3.
+    let (horizon, horizon_analyzed_size) = horizon::detect(
+        pyramid,
+        dispatched_condition,
+        cfg,
+        &[],
+        None,
+        frame.capture_tt,
+    );
+    if let HorizonStageOutcome::Detected { detector, line, .. } = horizon {
         trace!(
             detector = ?detector,
             sigma_rad = line.altitude_sigma.value(),
