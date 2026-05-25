@@ -1587,6 +1587,32 @@ references to the regression tests that pin the behavior. See
 ** TODO Phase 5: IMU provider
    Mark the IMU-prior TODO at plan.org line ~1062 PARTIAL once
    the provider trait carries the IMU implementation.
+** DONE Phase 6: Multi-source fusion of HorizonProvider hypotheses
+   Replaced winner-takes-best-σ dispatch with a weighted
+   inverse-variance fusion of concordant hypotheses
+   (`bris_vision::fuse_horizon_hypotheses`). Pairwise
+   concordance threshold defaults to `k=3` on the angular
+   distance between horizon-plane normals. Fused σ is
+   floored at `sigma_floor_rad = 1e-4` (~20 arcsec).
+   Discordant frames fall back to the lowest-σ singleton
+   and increment a diagnostic counter rather than averaging
+   silently. New `HorizonProvenance::Fused { cluster_size }`
+   variant; new `EngineConfig::horizon_fusion`
+   (`HorizonFusionConfig`) with an `enabled: bool` escape
+   hatch. New diagnostics:
+   `horizon_fusion_cluster_size_max`,
+   `horizon_fusion_clustered_frames`,
+   `horizon_fusion_discordant_frames`,
+   `horizon_fusion_singleton_frames`. Stage E now consumes
+   `Vec<DirectSight>` so multiple providers can each
+   contribute a direct sight in the same frame.
+   Implementation in
+   `crates/bris-vision/src/horizon_providers/fusion.rs`
+   (algorithm + 7 unit tests covering σ/√N tightening,
+   outlier rejection, discordance fallback, direct-sight
+   propagation, config disabled, single-provider
+   passthrough); integration in
+   `crates/bris-streaming/src/pipeline/horizon.rs`.
 
 * Phase 4: Sight reduction & fix
 ** TODO Per-stage uncertainty propagation

@@ -142,6 +142,10 @@ struct EngineState {
     vanishing_point_hypothesized: u64,
     vanishing_point_used: u64,
     vanishing_point_rejected_no_cluster: u64,
+    horizon_fusion_cluster_size_max: usize,
+    horizon_fusion_clustered_frames: u64,
+    horizon_fusion_discordant_frames: u64,
+    horizon_fusion_singleton_frames: u64,
 }
 
 /// Nautical mile in metres; for converting Fix sigma (nm) to
@@ -303,6 +307,20 @@ fn update_stage_counters(
         state.vanishing_point_used += 1;
     }
     state.vanishing_point_rejected_no_cluster += vp.stats.rejected_no_cluster;
+
+    let fs = &outcome.fusion_stats;
+    if fs.clustered {
+        state.horizon_fusion_clustered_frames += 1;
+    }
+    if fs.discordant {
+        state.horizon_fusion_discordant_frames += 1;
+    }
+    if fs.singleton {
+        state.horizon_fusion_singleton_frames += 1;
+    }
+    if fs.cluster_size > state.horizon_fusion_cluster_size_max {
+        state.horizon_fusion_cluster_size_max = fs.cluster_size;
+    }
 }
 
 impl StreamingEngine {
@@ -383,6 +401,10 @@ impl StreamingEngine {
                 vanishing_point_hypothesized: 0,
                 vanishing_point_used: 0,
                 vanishing_point_rejected_no_cluster: 0,
+                horizon_fusion_cluster_size_max: 0,
+                horizon_fusion_clustered_frames: 0,
+                horizon_fusion_discordant_frames: 0,
+                horizon_fusion_singleton_frames: 0,
             }),
             config,
             fix_tx,
@@ -632,6 +654,10 @@ impl StreamingEngine {
             vanishing_point_hypothesized: state.vanishing_point_hypothesized,
             vanishing_point_used: state.vanishing_point_used,
             vanishing_point_rejected_no_cluster: state.vanishing_point_rejected_no_cluster,
+            horizon_fusion_cluster_size_max: state.horizon_fusion_cluster_size_max,
+            horizon_fusion_clustered_frames: state.horizon_fusion_clustered_frames,
+            horizon_fusion_discordant_frames: state.horizon_fusion_discordant_frames,
+            horizon_fusion_singleton_frames: state.horizon_fusion_singleton_frames,
         }
     }
 

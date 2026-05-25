@@ -9,6 +9,31 @@ For the end-to-end pipeline architecture and data flow, see
 
 ---
 
+## Phase 3.6 Phase 6 landed (multi-source horizon fusion)
+
+Replaced the winner-takes-best-σ dispatch in
+`pipeline/horizon.rs` with a weighted inverse-variance fusion
+of concordant `HorizonHypothesis` values. When two or more
+providers agree (horizon-plane normals within `k=3` ·
+`sqrt(σ_i² + σ_j²)`), the fused estimate is tighter than
+any singleton; when none agree, the fuser honestly falls
+back to the lowest-σ singleton and increments
+`horizon_fusion_discordant_frames`. Algorithm and 7 unit
+tests live in
+`crates/bris-vision/src/horizon_providers/fusion.rs`. New
+`EngineConfig::horizon_fusion: HorizonFusionConfig` carries
+the concordance threshold, σ floor, and an `enabled` escape
+hatch. New `HorizonProvenance::Fused { cluster_size }`
+variant. Stage E now consumes `Vec<DirectSight>` so two
+providers that both emit a direct sight on the same frame
+can both flow through to `bris-nav` sight combination (the
+per-body dedup there is unchanged). Full workspace
+`cargo test --workspace --all-features` and
+`cargo clippy -- -D warnings` green;
+`cargo deny` runs in CI.
+
+---
+
 ## Phase 3.6 Phase 4b landed (vanishing-point horizon provider)
 
 `VanishingPointProvider` in
@@ -118,6 +143,7 @@ handling, and Pi Zero 2W headroom measurement are
 DR projection of stale priors remains a follow-up.
 
 ---
+
 
 ## Phase 3.6 Phase 1 landed (reflection-pair horizon provider)
 

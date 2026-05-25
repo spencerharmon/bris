@@ -175,6 +175,17 @@ pub enum HorizonProvenance {
         /// branch.
         used_vertical: bool,
     },
+    /// Multi-source fusion of two or more concordant
+    /// hypotheses. `cluster_size` is the number of source
+    /// hypotheses combined. The contributing source
+    /// provenances are not retained on this value-type
+    /// variant to keep `HorizonProvenance: Copy`; the
+    /// streaming engine carries them in its diagnostic
+    /// stream instead.
+    Fused {
+        /// Number of hypotheses combined into the fused estimate.
+        cluster_size: usize,
+    },
 }
 
 /// Discriminator for the five classical optical horizon
@@ -217,10 +228,12 @@ pub trait HorizonProvider {
     fn detect(&self, ctx: &HorizonProviderContext<'_>) -> Option<HorizonHypothesis>;
 }
 
+pub mod fusion;
 pub mod reflection_pair;
 pub mod vanishing_point;
 pub mod vertical_line;
 
+pub use fusion::{fuse_horizon_hypotheses, FusionMode, FusionOutcome, HorizonFusionConfig};
 pub use reflection_pair::{ReflectionPairConfig, ReflectionPairProvider, ReflectionPairStats};
 pub use vanishing_point::{VanishingPointConfig, VanishingPointProvider, VanishingPointStats};
 pub use vertical_line::{VerticalLineConfig, VerticalLineProvider, VerticalLineStats};

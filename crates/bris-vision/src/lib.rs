@@ -39,7 +39,8 @@ pub use horizon::{
     HorizonError, HorizonLine,
 };
 pub use horizon_providers::{
-    BodyCandidate, DirectSight, HorizonHypothesis, HorizonProvenance, HorizonProvider,
+    fuse_horizon_hypotheses, BodyCandidate, DirectSight, FusionMode, FusionOutcome,
+    HorizonFusionConfig, HorizonHypothesis, HorizonProvenance, HorizonProvider,
     HorizonProviderContext, OpticalKind, PositionPrior, ReflectionPairConfig,
     ReflectionPairProvider, ReflectionPairStats, TemporalScope, VanishingPointConfig,
     VanishingPointProvider, VanishingPointStats, VerticalLineConfig, VerticalLineProvider,
