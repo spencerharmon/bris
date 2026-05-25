@@ -23,7 +23,7 @@
     clippy::cast_possible_wrap,
     clippy::cast_precision_loss,
     clippy::cast_lossless,
-    clippy::unnecessary_wraps,
+    clippy::unnecessary_wraps
 )]
 
 use crate::fix::{DominantSource, PublishedFix};
@@ -158,7 +158,10 @@ impl SightStore {
             return Ok(());
         }
         let bytes = encode_sight(sight);
-        let mut w = self.sights.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut w = self
+            .sights
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         w.append(&bytes)
     }
 
@@ -168,7 +171,10 @@ impl SightStore {
             return Ok(());
         }
         let bytes = encode_fix(fix);
-        let mut w = self.fixes.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut w = self
+            .fixes
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         w.append(&bytes)
     }
 
@@ -337,7 +343,10 @@ impl SightStore {
         if !self.config.enabled {
             return 0;
         }
-        let w = self.sights.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let w = self
+            .sights
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         w.bytes
     }
 
