@@ -1,4 +1,8 @@
-#![allow(clippy::similar_names, clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+#![allow(
+    clippy::similar_names,
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss
+)]
 
 //! Integration: sub-pixel centroid refinement must produce a
 //! tighter position σ than the integer-fallback floor on a
