@@ -189,7 +189,7 @@ pub fn multi_sight_fix(lops: &[LineOfPosition]) -> Result<Fix, FixError> {
 
 /// Decompose a 2×2 covariance into 1σ semi-major / semi-minor axes
 /// and major-axis orientation (radians clockwise from north).
-fn ellipse_from_covariance(c: [[f64; 2]; 2]) -> (f64, f64, f64) {
+pub(crate) fn ellipse_from_covariance(c: [[f64; 2]; 2]) -> (f64, f64, f64) {
     let a = c[0][0]; // var(N)
     let b = c[1][1]; // var(E)
     let cov = c[0][1]; // cov(N, E)

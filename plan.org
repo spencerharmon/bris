@@ -1615,6 +1615,16 @@ references to the regression tests that pin the behavior. See
    `crates/bris-streaming/src/pipeline/horizon.rs`.
 
 * Phase 4: Sight reduction & fix
+** DONE Cold-start no-AP fix
+   Circle-of-position intersection solver for fixes without an
+   assumed position. Two-circle analytic intersection on the unit
+   sphere (cross-product + Gram matrix + quadratic root) returns
+   the classic two-candidate Sumner ambiguity; N ≥ 3 resolves
+   geometrically via pairwise candidates, weighted-residual
+   clustering, and a single Newton refinement step at the cluster
+   centre. Public API in `bris_nav::cold_start_fix`; spec in
+   `docs/design/circle_of_position.md`. Engine Stage-E fallback
+   wiring deferred to a follow-up PR.
 ** TODO Per-stage uncertainty propagation
    Every pipeline stage that produces a measurement also produces a 1σ
    uncertainty for that measurement, carried in the type system rather

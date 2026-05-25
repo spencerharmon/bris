@@ -9,6 +9,27 @@ For the end-to-end pipeline architecture and data flow, see
 
 ---
 
+## Phase 4: Cold-start no-AP fix landed
+
+New `bris_nav::cold_start_fix` (in
+`crates/bris-nav/src/circle_of_position.rs`) implements the
+circle-of-position intersection solver: analytic two-circle
+cartesian intersection (cross product + Gram matrix +
+quadratic root) plus N ≥ 3 cluster-and-refine with a single
+Newton step against `multi_sight_fix` at the cluster centre.
+Public surface is `CircleOfPosition`, `FixCandidate`,
+`ColdStartResult`, `ColdStartError`, `ColdStartConfig`,
+`cold_start_fix`. 12 unit tests in-module (the 10 from
+`docs/design/circle_of_position.md` plus input-validation
+guards) and 2 pure-synthetic integration tests in
+`crates/bris-streaming/tests/cold_start_fix.rs`. Zero new
+workspace dependencies. Stage-E engine fallback wiring and
+`Provenance::ColdStart` are deferred to a follow-up PR to
+avoid colliding with the parallel sight-persistence work
+on `bris-streaming/src/store.rs`.
+
+---
+
 ## Phase 3.6 Phase 6 landed (multi-source horizon fusion)
 
 Replaced the winner-takes-best-σ dispatch in
