@@ -112,6 +112,20 @@ pub struct EngineDiagnostics {
     /// Attempts that produced ≥ 1 surviving pair but no
     /// cluster met the minimum-size threshold (Test 4).
     pub reflection_pair_rejected_no_cluster: u64,
+
+    /// Number of frames where the vertical-line provider
+    /// produced a hypothesis (≥ 1 near-vertical line passed
+    /// all filters). May not have won the best-σ merge; see
+    /// [`Self::vertical_line_used`].
+    pub vertical_line_hypothesized: u64,
+    /// Number of frames where the vertical-line provider's
+    /// hypothesis won the best-σ merge and is the frame's
+    /// horizon outcome.
+    pub vertical_line_used: u64,
+    /// Number of frames where the vertical-line provider was
+    /// invoked but found no near-vertical line above the
+    /// minimum length / orientation gates.
+    pub vertical_line_rejected_no_lines: u64,
 }
 
 /// Per-stage processing statistics.

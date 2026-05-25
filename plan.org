@@ -1508,6 +1508,23 @@ references to the regression tests that pin the behavior. See
    `TemporalScope::Window` provider mode per
    `docs/design/horizon_autodetect.md` §11.
 ** TODO Phase 4: Plumb / vanishing-point providers
+*** DONE Phase 4a: VerticalLineProvider (plumb line / single near-vertical edge)
+    Implements `HorizonProvider` (intra-frame, fires Day /
+    Night / Twilight). Operator hangs a weighted string (or
+    any near-vertical edge — door frame, lamp post, building
+    corner) in the camera's FOV; detector finds the line via
+    a minimal Hough front-end restricted to ±20° of vertical;
+    `g_cam` derived from the endpoint rays in camera frame;
+    horizon synthesized via the same `ℓ = K⁻ᵀ g_cam`
+    projection as the reflection-pair provider. Three new
+    `EngineDiagnostics` counters
+    (`vertical_line_hypothesized`, `vertical_line_used`,
+    `vertical_line_rejected_no_lines`). Config:
+    `EngineConfig::vertical_line_provider_config`. Acceptance:
+    4 synthetic unit tests in
+    `bris-vision::horizon_providers::vertical_line`; full
+    workspace `fmt + clippy + test` green.
+*** TODO Phase 4b: VanishingPointProvider (multi-line statistical fusion)
 ** TODO Phase 5: IMU provider
    Mark the IMU-prior TODO at plan.org line ~1062 PARTIAL once
    the provider trait carries the IMU implementation.

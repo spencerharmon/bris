@@ -157,6 +157,13 @@ pub enum HorizonProvenance {
         /// threshold).
         used_position_prior: bool,
     },
+    /// Auto-detected single near-vertical line (plumb / edge).
+    VerticalLine {
+        /// Number of distinct lines averaged in the gravity
+        /// estimate (typically 1; > 1 when multiple
+        /// near-vertical lines pass the filter).
+        line_count: usize,
+    },
 }
 
 /// Discriminator for the five classical optical horizon
@@ -200,5 +207,7 @@ pub trait HorizonProvider {
 }
 
 pub mod reflection_pair;
+pub mod vertical_line;
 
 pub use reflection_pair::{ReflectionPairConfig, ReflectionPairProvider, ReflectionPairStats};
+pub use vertical_line::{VerticalLineConfig, VerticalLineProvider, VerticalLineStats};

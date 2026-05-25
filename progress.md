@@ -9,6 +9,31 @@ For the end-to-end pipeline architecture and data flow, see
 
 ---
 
+## Phase 3.6 Phase 4a landed (vertical-line horizon provider)
+
+Second auto-horizon source: `VerticalLineProvider`. Operator
+hangs a weighted string (or relies on any near-vertical edge:
+door frame, lamp post, building corner) in the camera's FOV;
+provider runs a minimal Hough-style detector filtered to ±20°
+of image-vertical, derives `g_cam` from the endpoint rays of
+the detected line(s), and synthesizes a `HorizonLine` via the
+same `ℓ = K⁻ᵀ g_cam` projection as the reflection-pair
+provider. Fires in all conditions (Day / Night / Twilight) and
+is independent of body candidates. Merged into the existing
+best-σ dispatch via `merge_vertical_line` in
+`bris-streaming::pipeline::horizon`. New `EngineConfig` knob
+`vertical_line_provider_config`. New diagnostic counters
+`vertical_line_hypothesized`, `vertical_line_used`,
+`vertical_line_rejected_no_lines`. New `HorizonProvenance::VerticalLine`
+variant and `HorizonDetector::VerticalLine` enum value. Four
+synthetic unit tests in
+`bris-vision::horizon_providers::vertical_line` (vertical line
+→ horizontal horizon at cy; empty frame → None; 30° tilt →
+None; short line yields larger σ than long line). Sibling PR
+for vanishing-point provider (Phase 4b) is outstanding.
+
+---
+
 ## Phase 3.6 Phase 1 landed (reflection-pair horizon provider)
 
 `HorizonProvider` trait now lives in
