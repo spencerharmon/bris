@@ -117,6 +117,9 @@ pub(crate) enum HorizonDetector {
     /// Auto-detected single near-vertical line (plumb / edge).
     /// See `docs/design/horizon_brainstorm.md` §B3.
     VerticalLine,
+    /// Auto-detected vanishing-point provider (Manhattan-world
+    /// scenes). See `docs/design/horizon_autodetect.md` §5.
+    VanishingPoint,
 }
 
 /// Run Stage C on one frame.
@@ -125,6 +128,7 @@ pub(crate) enum HorizonDetector {
 /// are tried first. The returned outcome carries the best-σ
 /// horizon found across all attempts, or
 /// [`HorizonStageOutcome::None`] if no detector succeeded.
+#[allow(clippy::too_many_lines)] // dispatch fan-out is inherently long; refactoring fragments the per-condition flow
 pub(crate) fn detect(
     pyramid: &FramePyramid,
     condition: Condition,
@@ -132,7 +136,7 @@ pub(crate) fn detect(
     body_candidates: &[BodyCandidate],
     position_prior: Option<PositionPrior>,
     timestamp: Tt,
-) -> (HorizonStageOutcome, (u32, u32)) {
+) -> (HorizonStageOutcome, (u32, u32), VanishingPointDispatch) {
     let mut best: Option<(HorizonDetector, HorizonProvenance, HorizonLine)> = None;
 
     let early_term = cfg.horizon_early_termination_sigma_rad;
@@ -146,6 +150,7 @@ pub(crate) fn detect(
         return (
             HorizonStageOutcome::None,
             (pyramid.full_width(), pyramid.full_height()),
+            VanishingPointDispatch::default(),
         );
     }
 
@@ -190,7 +195,11 @@ pub(crate) fn detect(
             &mut best_direct_sight,
         );
         if early_terminate(best.as_ref(), early_term) {
-            return (finish(best, best_direct_sight), analyzed_size);
+            return (
+                finish(best, best_direct_sight),
+                analyzed_size,
+                VanishingPointDispatch::default(),
+            );
         }
         run_provider(
             &SkyRegionProvider { cfg },
@@ -199,7 +208,11 @@ pub(crate) fn detect(
             &mut best_direct_sight,
         );
         if early_terminate(best.as_ref(), early_term) {
-            return (finish(best, best_direct_sight), analyzed_size);
+            return (
+                finish(best, best_direct_sight),
+                analyzed_size,
+                VanishingPointDispatch::default(),
+            );
         }
     }
     if night_first {
@@ -210,7 +223,11 @@ pub(crate) fn detect(
             &mut best_direct_sight,
         );
         if early_terminate(best.as_ref(), early_term) {
-            return (finish(best, best_direct_sight), analyzed_size);
+            return (
+                finish(best, best_direct_sight),
+                analyzed_size,
+                VanishingPointDispatch::default(),
+            );
         }
         run_provider(
             &NightTexturedProvider { cfg },
@@ -219,17 +236,15 @@ pub(crate) fn detect(
             &mut best_direct_sight,
         );
         if early_terminate(best.as_ref(), early_term) {
-            return (finish(best, best_direct_sight), analyzed_size);
+            return (
+                finish(best, best_direct_sight),
+                analyzed_size,
+                VanishingPointDispatch::default(),
+            );
         }
-        // Reflection-pair is run as a *second pass* after
-        // Stage B has produced body candidates; see
-        // [`merge_reflection_pair`]. The first-pass dispatcher
-        // receives `body_candidates = &[]` from `process_frame`
-        // because horizon must run before Stage B for masking.
-        let _ = body_candidates; // tracked at the second-pass site
+        let _ = body_candidates;
     }
-    // Last resort: segmentation. Gated on the feature flag and
-    // on the operator opting in by supplying a model path.
+    // Last resort optical: segmentation.
     run_segmentation(&ctx, cfg, &mut best, &mut best_direct_sight);
     // Vertical-line provider runs as a second pass via
     // [`merge_vertical_line`] so its per-frame stats land in
@@ -237,7 +252,52 @@ pub(crate) fn detect(
     // Stage B body candidates (the operator's plumb string is
     // the evidence) but the merge structure mirrors
     // [`merge_reflection_pair`] for symmetry.
-    (finish(best, best_direct_sight), analyzed_size)
+    //
+    // Vanishing-point provider runs after the cheap optical
+    // providers and segmentation: it is the most expensive of
+    // the auto-horizon providers (RANSAC over edgels). Skip
+    // entirely if a cheap detector already cleared the
+    // early-termination threshold.
+    let mut vp_stats = bris_vision::VanishingPointStats::default();
+    let mut vp_invoked = false;
+    let mut vp_used = false;
+    if !early_terminate(best.as_ref(), early_term) {
+        vp_invoked = true;
+        let provider = bris_vision::VanishingPointProvider {
+            config: cfg.vanishing_point_provider_config,
+        };
+        if let Some(hyp) = provider.detect_with_stats(&ctx, &mut vp_stats) {
+            let detector = detector_from_provenance(hyp.provenance);
+            let improved = match best {
+                Some((_, _, ref existing)) => hyp.line.altitude_sigma < existing.altitude_sigma,
+                None => true,
+            };
+            if improved {
+                best = Some((detector, hyp.provenance, hyp.line));
+                best_direct_sight = hyp.direct_sight;
+                vp_used = true;
+            }
+        }
+    }
+    (
+        finish(best, best_direct_sight),
+        analyzed_size,
+        VanishingPointDispatch {
+            stats: vp_stats,
+            invoked: vp_invoked,
+            used: vp_used,
+        },
+    )
+}
+
+/// Per-frame bookkeeping for the vanishing-point provider's
+/// participation in the dispatch. Plumbed into
+/// [`crate::EngineDiagnostics`].
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct VanishingPointDispatch {
+    pub stats: bris_vision::VanishingPointStats,
+    pub invoked: bool,
+    pub used: bool,
 }
 
 /// Run the reflection-pair provider against an already-
@@ -401,6 +461,7 @@ fn detector_from_provenance(p: HorizonProvenance) -> HorizonDetector {
         HorizonProvenance::Optical(kind) => optical_kind_to_detector(kind),
         HorizonProvenance::ReflectionPair { .. } => HorizonDetector::ReflectionPair,
         HorizonProvenance::VerticalLine { .. } => HorizonDetector::VerticalLine,
+        HorizonProvenance::VanishingPoint { .. } => HorizonDetector::VanishingPoint,
     }
 }
 
@@ -532,7 +593,7 @@ mod tests {
         // gives sub-arcsec residuals).
         let cfg = EngineConfig::new(Observer::default_dev());
         let frame = synthetic_horizon(32);
-        let (outcome, _) = detect(
+        let (outcome, _, _) = detect(
             &FramePyramid::new(frame.clone()),
             Condition::Day,
             &cfg,
@@ -574,7 +635,7 @@ mod tests {
     fn unusable_classification_skips_stage_c() {
         let cfg = EngineConfig::new(Observer::default_dev());
         let frame = synthetic_horizon(32);
-        let (outcome, _) = detect(
+        let (outcome, _, _) = detect(
             &FramePyramid::new(frame.clone()),
             Condition::Unusable,
             &cfg,
@@ -592,7 +653,7 @@ mod tests {
         // and that the day-path detectors aren't tried.
         let cfg = EngineConfig::new(Observer::default_dev());
         let frame = dark_frame();
-        let (outcome, _) = detect(
+        let (outcome, _, _) = detect(
             &FramePyramid::new(frame.clone()),
             Condition::Night,
             &cfg,
@@ -629,7 +690,7 @@ mod tests {
         // the result is the gradient one.
         let cfg = EngineConfig::new(Observer::default_dev());
         let frame = synthetic_horizon(32);
-        let (outcome, _) = detect(
+        let (outcome, _, _) = detect(
             &FramePyramid::new(frame.clone()),
             Condition::Day,
             &cfg,

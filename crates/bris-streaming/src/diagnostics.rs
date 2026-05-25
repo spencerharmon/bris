@@ -126,6 +126,20 @@ pub struct EngineDiagnostics {
     /// invoked but found no near-vertical line above the
     /// minimum length / orientation gates.
     pub vertical_line_rejected_no_lines: u64,
+
+    /// Number of frames where the vanishing-point provider
+    /// was invoked (Stage C dispatched it after cheap
+    /// detectors did not satisfy the early-termination
+    /// threshold).
+    pub vanishing_point_hypothesized: u64,
+    /// Number of frames where the vanishing-point provider's
+    /// hypothesis won the best-σ merge and was emitted as the
+    /// frame's horizon outcome.
+    pub vanishing_point_used: u64,
+    /// Number of frames where the vanishing-point provider
+    /// ran but found no VP cluster meeting the inlier and
+    /// classification gates.
+    pub vanishing_point_rejected_no_cluster: u64,
 }
 
 /// Per-stage processing statistics.

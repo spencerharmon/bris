@@ -291,6 +291,13 @@ pub struct EngineConfig {
     /// sensible (±20° from vertical, min 50 px line,
     /// 1e-3 rad floor); operator may tune.
     pub vertical_line_provider_config: bris_vision::VerticalLineConfig,
+
+    /// Configuration for the vanishing-point horizon provider
+    /// (`bris_vision::VanishingPointProvider`). The most
+    /// expensive of the auto-horizon providers; dispatched
+    /// only when cheaper providers fail to clear the
+    /// early-termination threshold.
+    pub vanishing_point_provider_config: bris_vision::VanishingPointConfig,
 }
 
 impl EngineConfig {
@@ -338,6 +345,7 @@ impl EngineConfig {
                 .expect("30 arcsec is a valid Sigma"),
             position_prior_max_age_seconds: 30.0,
             vertical_line_provider_config: bris_vision::VerticalLineConfig::default(),
+            vanishing_point_provider_config: bris_vision::VanishingPointConfig::default(),
         }
     }
 

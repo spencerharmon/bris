@@ -165,6 +165,16 @@ pub enum HorizonProvenance {
         /// near-vertical lines pass the filter).
         line_count: usize,
     },
+    /// Auto-detected vanishing points (Manhattan-world).
+    VanishingPoint {
+        /// Number of VPs retained after non-maximum
+        /// suppression (≤ 3).
+        vp_count: usize,
+        /// Whether the vertical-VP branch (one VP gives
+        /// gravity directly) was used vs the two-horizontal-VP
+        /// branch.
+        used_vertical: bool,
+    },
 }
 
 /// Discriminator for the five classical optical horizon
@@ -208,7 +218,9 @@ pub trait HorizonProvider {
 }
 
 pub mod reflection_pair;
+pub mod vanishing_point;
 pub mod vertical_line;
 
 pub use reflection_pair::{ReflectionPairConfig, ReflectionPairProvider, ReflectionPairStats};
+pub use vanishing_point::{VanishingPointConfig, VanishingPointProvider, VanishingPointStats};
 pub use vertical_line::{VerticalLineConfig, VerticalLineProvider, VerticalLineStats};
