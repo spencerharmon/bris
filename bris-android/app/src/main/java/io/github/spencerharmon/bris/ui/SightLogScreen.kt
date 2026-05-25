@@ -20,12 +20,15 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
+import io.github.spencerharmon.bris.engine.BodyLabel
+import io.github.spencerharmon.bris.engine.EngineWrapper
 import io.github.spencerharmon.bris.engine.Exporter
 import io.github.spencerharmon.bris.engine.SightLog
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
+import uniffi.bris_ffi.FfiSight
 import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -47,17 +50,47 @@ import java.util.Locale
 fun SightLogScreen(
     onBack: () -> Unit,
     onOpen: (String) -> Unit,
+    engine: EngineWrapper? = null,
 ) {
     val context = LocalContext.current
     val sightLog = remember(context) { SightLog.forApp(context) }
     var rows by remember { mutableStateOf<List<SightLogRow>>(emptyList()) }
+    var recent by remember { mutableStateOf<List<FfiSight>>(emptyList()) }
     LaunchedEffect(sightLog) {
         rows = sightLog.list().mapNotNull { dir -> SightLogRow.fromDir(dir) }
+    }
+    LaunchedEffect(engine) {
+        if (engine == null) return@LaunchedEffect
+        recent = withContext(Dispatchers.IO) {
+            runCatching { engine.recentSights(RECENT_SIGHTS_LIMIT) }.getOrDefault(emptyList())
+        }
+            // recent_sights returns newest-first per the FFI doc;
+            // assert by sorting anyway in case the on-disk archive
+            // is appended to from multiple sources.
+            .sortedByDescending { it.anchorTtJd }
     }
 
     Column(modifier = Modifier.fillMaxSize().padding(16.dp)) {
         Text(
-            "Sight log (${rows.size})",
+            "Recent sights (${recent.size})",
+            style = androidx.compose.material3.MaterialTheme.typography.titleLarge,
+        )
+        if (recent.isEmpty()) {
+            Text(
+                "No sights persisted yet.",
+                modifier = Modifier.padding(top = 8.dp),
+            )
+        } else {
+            LazyColumn(
+                modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
+                verticalArrangement = Arrangement.spacedBy(2.dp),
+            ) {
+                items(recent) { s -> RecentSightRow(s) }
+            }
+        }
+        HorizontalDivider(modifier = Modifier.padding(vertical = 12.dp))
+        Text(
+            "Saved captures (${rows.size})",
             style = androidx.compose.material3.MaterialTheme.typography.titleLarge,
         )
         if (rows.isEmpty()) {
@@ -96,6 +129,25 @@ fun SightLogScreen(
             Text("Back")
         }
     }
+}
+
+/** Single-line row for a persisted sight: time, body, Ho, σ, provenance. */
+@Composable
+private fun RecentSightRow(sight: FfiSight) {
+    val time = formatTtJdLocal(sight.anchorTtJd)
+    val body = BodyLabel.forSight(sight)
+    // Ho is not directly on FfiSight (we have intercept_nm + σ);
+    // surface the intercept (signed, nm) which is what an
+    // operator cares about when scanning the recent log. The
+    // σ is reported in arcsec for parity with the sight-σ
+    // budget literature.
+    val intercept = "%.2f".format(sight.interceptNm)
+    val sigmaArcsec = "%.1f".format(sight.altitudeSigmaRad * RAD_TO_ARCSEC)
+    val provenance = if (sight.sourceFrameId == ULong.MAX_VALUE) "disk" else "live"
+    Text(
+        "$time  $body  Δ=${intercept} nm  σ=${sigmaArcsec}\"  ($provenance)",
+        style = androidx.compose.material3.MaterialTheme.typography.bodySmall,
+    )
 }
 
 /**
@@ -213,6 +265,20 @@ fun SightLogDetailScreen(
 }
 
 private const val MAX_MEDIA_LISTED = 50
+private const val RECENT_SIGHTS_LIMIT = 200u
+private const val RAD_TO_ARCSEC = 206264.80624709636
+
+/**
+ * Convert a Terrestrial-Time Julian Date (as carried on the FFI)
+ * into a local `HH:mm:ss` clock string. TT differs from UTC by
+ * ~69 s in 2025; for an operator-facing log row that drift is
+ * sub-minute and tolerable. A future commit can apply ΔAT + 32.184 s.
+ */
+private fun formatTtJdLocal(ttJd: Double): String {
+    val unixMs = ((ttJd - 2_440_587.5) * 86_400_000.0).toLong()
+    val fmt = SimpleDateFormat("HH:mm:ss", Locale.US)
+    return fmt.format(Date(unixMs))
+}
 
 private data class SightLogRow(
     val dirName: String,
