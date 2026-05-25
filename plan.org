@@ -1551,7 +1551,26 @@ references to the regression tests that pin the behavior. See
     4 synthetic unit tests in
     `bris-vision::horizon_providers::vertical_line`; full
     workspace `fmt + clippy + test` green.
-*** TODO Phase 4b: VanishingPointProvider (multi-line statistical fusion)
+*** DONE Phase 4b: Vanishing-point provider
+    `VanishingPointProvider` in `bris-vision::horizon_providers`
+    implements the `HorizonProvider` trait with intra-frame
+    temporal scope. Minimal in-module Sobel edgel extractor +
+    RANSAC over edgel pairs (homogeneous-coordinate line
+    intersection → candidate VP) + non-maximum suppression
+    to keep top-3 clusters. Vertical-first classification
+    (`|y − cy| > 0.3·H` ⇒ gravity) then two-horizontal-VP
+    fallback (line through both ⇒ horizon). σ floors at
+    5e-4 rad and tightens as `~1/√N_inliers`. Dispatched
+    last (most expensive provider), gated on the cheap
+    detectors failing to clear the early-termination
+    threshold. `EngineDiagnostics` gains three counters
+    (`vanishing_point_hypothesized`, `vanishing_point_used`,
+    `vanishing_point_rejected_no_cluster`). Acceptance: four
+    synthetic unit tests (cube edges → vertical-VP horizon,
+    lamp-post row → gravity, random-noise frame → None,
+    σ-monotonicity). Line-detection front-end is intentionally
+    minimal pending consolidation with `VerticalLineProvider`
+    (TODO marker in `vanishing_point.rs` module doc).
 ** TODO Phase 5: IMU provider
    Mark the IMU-prior TODO at plan.org line ~1062 PARTIAL once
    the provider trait carries the IMU implementation.

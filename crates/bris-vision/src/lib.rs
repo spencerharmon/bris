@@ -41,8 +41,9 @@ pub use horizon::{
 pub use horizon_providers::{
     BodyCandidate, DirectSight, HorizonHypothesis, HorizonProvenance, HorizonProvider,
     HorizonProviderContext, OpticalKind, PositionPrior, ReflectionPairConfig,
-    ReflectionPairProvider, ReflectionPairStats, TemporalScope, VerticalLineConfig,
-    VerticalLineProvider, VerticalLineStats,
+    ReflectionPairProvider, ReflectionPairStats, TemporalScope, VanishingPointConfig,
+    VanishingPointProvider, VanishingPointStats, VerticalLineConfig, VerticalLineProvider,
+    VerticalLineStats,
 };
 pub use io::{
     load_frame_from_path, load_frame_from_path_with_rotation, save_frame_as_png, LoadError,

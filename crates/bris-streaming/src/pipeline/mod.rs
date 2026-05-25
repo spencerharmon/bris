@@ -76,7 +76,7 @@ mod stage_e;
 
 pub(crate) use horizon::{
     merge_reflection_pair, merge_vertical_line, HorizonStageOutcome, ReflectionPairMerge,
-    VerticalLineMerge,
+    VanishingPointDispatch, VerticalLineMerge,
 };
 pub(crate) use hysteresis::ClassifierHysteresis;
 pub(crate) use queue::{FrameId, Storage};
@@ -189,6 +189,11 @@ pub(crate) struct StageOutcome {
     /// Provider's hypothesis won the best-σ merge and is the
     /// horizon outcome surfaced from this frame.
     pub vertical_line_used: bool,
+    /// Vanishing-point provider dispatch bookkeeping for this
+    /// frame. Captures per-frame counters plus whether the
+    /// provider was invoked / used; folded into engine-level
+    /// diagnostics.
+    pub vanishing_point_dispatch: VanishingPointDispatch,
 }
 
 /// Process one frame through Stages A, B, and C synchronously.
@@ -240,7 +245,7 @@ pub(crate) fn process_frame(
     // ≥ 2 Night peaks the pipeline re-runs Stage C with the
     // candidates so the reflection-pair provider can
     // contribute. See docs/design/horizon_autodetect.md §3.
-    let (mut horizon, horizon_analyzed_size) = horizon::detect(
+    let (mut horizon, horizon_analyzed_size, vp_dispatch) = horizon::detect(
         pyramid,
         dispatched_condition,
         cfg,
@@ -386,6 +391,7 @@ pub(crate) fn process_frame(
         vertical_line_stats,
         vertical_line_hypothesized,
         vertical_line_used,
+        vanishing_point_dispatch: vp_dispatch,
     }
 }
 

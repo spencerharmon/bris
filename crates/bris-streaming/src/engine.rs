@@ -139,6 +139,9 @@ struct EngineState {
     vertical_line_hypothesized: u64,
     vertical_line_used: u64,
     vertical_line_rejected_no_lines: u64,
+    vanishing_point_hypothesized: u64,
+    vanishing_point_used: u64,
+    vanishing_point_rejected_no_cluster: u64,
 }
 
 /// Nautical mile in metres; for converting Fix sigma (nm) to
@@ -291,6 +294,15 @@ fn update_stage_counters(
         state.vertical_line_used += 1;
     }
     state.vertical_line_rejected_no_lines += outcome.vertical_line_stats.rejected_no_lines;
+
+    let vp = &outcome.vanishing_point_dispatch;
+    if vp.invoked && vp.stats.hypothesized > 0 {
+        state.vanishing_point_hypothesized += 1;
+    }
+    if vp.used {
+        state.vanishing_point_used += 1;
+    }
+    state.vanishing_point_rejected_no_cluster += vp.stats.rejected_no_cluster;
 }
 
 impl StreamingEngine {
@@ -368,6 +380,9 @@ impl StreamingEngine {
                 vertical_line_hypothesized: 0,
                 vertical_line_used: 0,
                 vertical_line_rejected_no_lines: 0,
+                vanishing_point_hypothesized: 0,
+                vanishing_point_used: 0,
+                vanishing_point_rejected_no_cluster: 0,
             }),
             config,
             fix_tx,
@@ -614,6 +629,9 @@ impl StreamingEngine {
             vertical_line_hypothesized: state.vertical_line_hypothesized,
             vertical_line_used: state.vertical_line_used,
             vertical_line_rejected_no_lines: state.vertical_line_rejected_no_lines,
+            vanishing_point_hypothesized: state.vanishing_point_hypothesized,
+            vanishing_point_used: state.vanishing_point_used,
+            vanishing_point_rejected_no_cluster: state.vanishing_point_rejected_no_cluster,
         }
     }
 

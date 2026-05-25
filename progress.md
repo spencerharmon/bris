@@ -9,6 +9,45 @@ For the end-to-end pipeline architecture and data flow, see
 
 ---
 
+## Phase 3.6 Phase 4b landed (vanishing-point horizon provider)
+
+`VanishingPointProvider` in
+`bris-vision::horizon_providers::vanishing_point` is the
+third auto-detected horizon source (after the reflection-pair
+and vertical-line providers). Detects Manhattan-world
+vanishing points via minimal in-module Sobel edgel extraction
++ RANSAC over edgel pairs (homogeneous-coordinate line
+intersection → candidate VP) + non-maximum suppression
+keeping the top-3 clusters. Classification: a VP whose
+image-y is far from `cy`
+(`|y − cy| > vertical_vp_min_distance_from_image_center_normalized · H`)
+is vertical and gives gravity directly (horizon from
+`horizon_brainstorm.md` §0: `ℓ = K⁻ᵀ g_cam`); otherwise two
+horizontal VPs define the horizon line through their image
+positions. σ floors at 5e-4 rad (≈1.5′) and tightens as
+`~1/√N_inliers`.
+
+Dispatched last in `bris-streaming::pipeline::horizon::detect`
+behind an early-termination gate so cheap optical providers
+(gradient / sky / night / segmentation) and the reflection-
+pair and vertical-line providers all get first crack. The
+line-detection front-end overlaps with the vertical-line
+provider's Hough-style front-end; consolidation into a
+shared utility is a follow-up (TODO marker in
+`vanishing_point.rs` module doc).
+
+Three new `EngineDiagnostics` counters
+(`vanishing_point_hypothesized`, `vanishing_point_used`,
+`vanishing_point_rejected_no_cluster`); a new
+`HorizonProvenance::VanishingPoint { vp_count, used_vertical }`
+variant; a new `EngineConfig::vanishing_point_provider_config:
+VanishingPointConfig`. Four synthetic unit tests pass
+(cube-edges scene, lamp-post row, random-noise rejection,
+σ-monotonicity). Full local `cargo fmt + clippy + test`
+workspace clean.
+
+---
+
 ## Phase 3.6 Phase 4a landed (vertical-line horizon provider)
 
 Second auto-horizon source: `VerticalLineProvider`. Operator
@@ -29,8 +68,10 @@ variant and `HorizonDetector::VerticalLine` enum value. Four
 synthetic unit tests in
 `bris-vision::horizon_providers::vertical_line` (vertical line
 → horizontal horizon at cy; empty frame → None; 30° tilt →
-None; short line yields larger σ than long line). Sibling PR
-for vanishing-point provider (Phase 4b) is outstanding.
+None; short line yields larger σ than long line). The
+vanishing-point provider (Phase 4b) landed alongside; see
+the section above.
+
 ---
 
 ## Phase 3.6 Phase 2 landed (Day-mode reflection-pair)
