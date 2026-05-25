@@ -538,7 +538,7 @@ fn body_record_from_detection(
     detection: BodyDetection,
 ) -> Option<BodyRecord> {
     let sigma_key = match &detection {
-        BodyDetection::Day(c) => SigmaKey::from_sigma(c.position_sigma_px),
+        BodyDetection::Day(c, _) => SigmaKey::from_sigma(c.position_sigma_px),
         BodyDetection::Night(peaks) => {
             // Night-path priority (peaks not yet plate-solved):
             // more peaks → smaller key. The `1 / sqrt(N)` form
@@ -636,13 +636,16 @@ mod tests {
     }
 
     fn day_centroid(sigma_px: f64) -> BodyDetection {
-        BodyDetection::Day(Centroid {
-            x: 4.0,
-            y: 4.0,
-            area_px: 100,
-            mean_intensity: 50_000.0,
-            position_sigma_px: Sigma::new(sigma_px).unwrap(),
-        })
+        BodyDetection::Day(
+            Centroid {
+                x: 4.0,
+                y: 4.0,
+                area_px: 100,
+                mean_intensity: 50_000.0,
+                position_sigma_px: Sigma::new(sigma_px).unwrap(),
+            },
+            Vec::new(),
+        )
     }
 
     fn horizon_outcome(sigma_rad: f64) -> HorizonStageOutcome {

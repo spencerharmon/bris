@@ -93,7 +93,7 @@ pub(crate) fn run(
     // pass &[Peak] to plate_solve and reassemble afterwards.
     let peaks = match body {
         BodyDetection::Night(peaks) => std::mem::take(peaks),
-        BodyDetection::Day(_) | BodyDetection::IdentifiedStars(_) | BodyDetection::None => {
+        BodyDetection::Day(_, _) | BodyDetection::IdentifiedStars(_) | BodyDetection::None => {
             return StageDOutcome::Skipped
         }
     };
@@ -157,13 +157,16 @@ mod tests {
             ..StarHashDbConfig::default()
         };
         let db = StarHashDb::build(cfg);
-        let mut body = BodyDetection::Day(bris_vision::Centroid {
-            x: 0.0,
-            y: 0.0,
-            area_px: 100,
-            mean_intensity: 50_000.0,
-            position_sigma_px: bris_core::Sigma::new(0.5).unwrap(),
-        });
+        let mut body = BodyDetection::Day(
+            bris_vision::Centroid {
+                x: 0.0,
+                y: 0.0,
+                area_px: 100,
+                mean_intensity: 50_000.0,
+                position_sigma_px: bris_core::Sigma::new(0.5).unwrap(),
+            },
+            Vec::new(),
+        );
         let outcome = run(
             &mut body,
             &dummy_frame(),
@@ -171,7 +174,7 @@ mod tests {
             PlateSolveConfig::default(),
         );
         assert_eq!(outcome, StageDOutcome::Skipped);
-        assert!(matches!(body, BodyDetection::Day(_)));
+        assert!(matches!(body, BodyDetection::Day(_, _)));
     }
 
     #[test]

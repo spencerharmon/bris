@@ -515,7 +515,7 @@ fn reduce_to_sight(
     let jd_ut1 = c.body.frame_tt.julian_date();
 
     match &c.body.detection {
-        BodyDetection::Day(centroid) => {
+        BodyDetection::Day(centroid, _) => {
             // Day path: Sun (commit 5 simplification — see
             // module docs for the deferred Moon/planet work).
             let body = SolarSystemBody::Sun;

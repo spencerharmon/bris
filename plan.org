@@ -1500,10 +1500,19 @@ references to the regression tests that pin the behavior. See
    `bris-vision::horizon_providers::reflection_pair` plus
    counter-increment coverage; full workspace `fmt + clippy +
    test` green.
-** TODO Phase 2: Day-mode multi-centroid support
-   Extend Stage B to expose ≥ 2 candidates per Day frame; add
-   DR projection of stale position prior so the catalog test
-   stays available between fixes.
+** DONE Phase 2: Day-mode multi-centroid support
+   `BodyDetection::Day` carries a primary `Centroid` plus a
+   `Vec<Centroid>` of secondary saturated components
+   (largest-first), produced by
+   `bris_vision::extract_multi_saturated_centroids`. The
+   reflection-pair dispatcher gates on Day in addition to
+   Night/Twilight; provider machinery itself unchanged — the
+   `BodyCandidate` plumbing is generic. Acceptance: new
+   centroid-extraction unit tests + Day-mode integration tests
+   in `bris-streaming::pipeline` (two-blob frame invokes
+   provider; single-blob frame does not); existing 9+
+   reflection-pair tests still pass. DR projection of stale
+   position prior is still deferred to a follow-up.
 ** TODO Phase 3: Cross-frame registration
    `TemporalScope::Window` provider mode per
    `docs/design/horizon_autodetect.md` §11.

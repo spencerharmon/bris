@@ -201,7 +201,9 @@ fn update_stage_counters(
     } else {
         state.stages[STAGE_B].entered += 1;
         match &outcome.body {
-            BodyDetection::Day(_) | BodyDetection::Night(_) | BodyDetection::IdentifiedStars(_) => {
+            BodyDetection::Day(_, _)
+            | BodyDetection::Night(_)
+            | BodyDetection::IdentifiedStars(_) => {
                 state.stages[STAGE_B].produced += 1;
             }
             BodyDetection::None => {

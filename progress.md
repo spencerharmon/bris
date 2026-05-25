@@ -31,6 +31,28 @@ synthetic unit tests in
 → horizontal horizon at cy; empty frame → None; 30° tilt →
 None; short line yields larger σ than long line). Sibling PR
 for vanishing-point provider (Phase 4b) is outstanding.
+---
+
+## Phase 3.6 Phase 2 landed (Day-mode reflection-pair)
+
+`BodyDetection::Day` now exposes a primary `Centroid` plus a
+`Vec<Centroid>` of secondary saturated components, produced by
+the new `bris_vision::extract_multi_saturated_centroids` (one
+connected-components pass, area-gated, sorted largest-first).
+The reflection-pair dispatch in `pipeline/mod.rs` gates on
+Day in addition to Night/Twilight; the provider itself is
+unchanged (the `BodyCandidate` plumbing was already generic).
+
+Acceptance: new centroid-extraction unit tests in
+`bris-vision::centroid` (multi-component largest-first +
+empty-when-no-saturation); two new integration tests in
+`bris-streaming::pipeline` (Day frame with direct + reflection
+saturated disks invokes the provider; single-disk Day frame
+does not); existing reflection-pair + workspace tests still
+clean. `cargo fmt + clippy --all-targets --all-features
+-D warnings + test --workspace --all-features` all green.
+
+DR projection of stale position prior remains a follow-up.
 
 ---
 

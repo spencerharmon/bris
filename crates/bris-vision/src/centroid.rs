@@ -251,6 +251,95 @@ pub fn centroid_brightest_body_in_mask(
     })
 }
 
+/// Detect *all* saturated bright components in a frame.
+///
+/// Like [`centroid_saturated_body_in_mask`], but returns one
+/// [`Centroid`] per surviving connected component that meets
+/// the minimum-area threshold, sorted by descending area
+/// (largest first). Used by the reflection-pair horizon
+/// provider's Day path, where the direct image of the body
+/// and its reflection on a horizontal surface (water, hood,
+/// puddle) both appear as bright blobs and the provider needs
+/// at least two candidates per frame.
+///
+/// Returns an empty `Vec` (not an error) when no component
+/// passes the area gate — the caller treats this as "no
+/// secondary present" and falls back to single-centroid
+/// behaviour.
+///
+/// # Errors
+///
+/// [`CentroidError::MaskShapeMismatch`] if the mask length
+/// doesn't match the frame.
+pub fn extract_multi_saturated_centroids(
+    frame: &Frame,
+    cfg: SaturatedBodyConfig,
+    mask: Option<&[bool]>,
+) -> Result<Vec<Centroid>, CentroidError> {
+    let pixel_count = (frame.width() as usize) * (frame.height() as usize);
+    if let Some(m) = mask {
+        if m.len() != pixel_count {
+            return Err(CentroidError::MaskShapeMismatch {
+                expected: pixel_count,
+                actual: m.len(),
+            });
+        }
+    }
+
+    let labels = label_components_masked(frame, cfg.saturation_threshold, mask);
+    let n_labels = labels.next_label as usize;
+    if n_labels <= 1 {
+        return Ok(Vec::new());
+    }
+
+    // Accumulate per-label moments in a single pass.
+    let mut areas: Vec<u32> = vec![0; n_labels];
+    let mut sum_x: Vec<f64> = vec![0.0; n_labels];
+    let mut sum_y: Vec<f64> = vec![0.0; n_labels];
+    let mut sum_w: Vec<f64> = vec![0.0; n_labels];
+    let mut sum_i: Vec<f64> = vec![0.0; n_labels];
+    let w = frame.width();
+    for y in 0..frame.height() {
+        for x in 0..w {
+            let idx = (y as usize) * (w as usize) + (x as usize);
+            let lbl = labels.labels[idx] as usize;
+            if lbl == 0 {
+                continue;
+            }
+            let intensity = f64::from(frame.pixels()[idx]);
+            areas[lbl] += 1;
+            sum_x[lbl] += f64::from(x) * intensity;
+            sum_y[lbl] += f64::from(y) * intensity;
+            sum_w[lbl] += intensity;
+            sum_i[lbl] += intensity;
+        }
+    }
+
+    let mut out: Vec<Centroid> = (1..n_labels)
+        .filter(|&l| areas[l] >= cfg.min_area_px && sum_w[l] > 0.0)
+        .map(|l| {
+            let area = areas[l];
+            let cx = sum_x[l] / sum_w[l];
+            let cy = sum_y[l] / sum_w[l];
+            let mean_intensity = sum_i[l] / f64::from(area);
+            let stat = 1.0 / (area as f64).sqrt();
+            let bias = 0.5;
+            let sigma = (stat * stat + bias * bias).sqrt();
+            Centroid {
+                x: cx,
+                y: cy,
+                area_px: area,
+                mean_intensity,
+                position_sigma_px: Sigma::new(sigma).unwrap_or(Sigma::ZERO),
+            }
+        })
+        .collect();
+    // Largest first. Stable on equal areas (preserves label
+    // order).
+    out.sort_by(|a, b| b.area_px.cmp(&a.area_px));
+    Ok(out)
+}
+
 /// Centroid the brightest *saturated* body inside a mask.
 ///
 /// Distinct from [`centroid_brightest_body_in_mask`] in that the
@@ -866,5 +955,62 @@ mod tests {
             centroid_saturated_body_in_mask(&frame, SaturatedBodyConfig::default(), Some(&mask))
                 .unwrap_err();
         assert!(matches!(err, CentroidError::MaskShapeMismatch { .. }));
+    }
+
+    #[test]
+    fn multi_saturated_returns_each_component_largest_first() {
+        // Two saturated disks: A at (100, 100) radius 18
+        // (area ≈ 1017), B at (300, 200) radius 10 (area ≈
+        // 314). Plus a 3-pixel saturated speck that must be
+        // gated out by `min_area_px`.
+        let mut pixels = vec![1_000u16; 400 * 300];
+        for y in 0..300 {
+            for x in 0..400 {
+                let in_a =
+                    (f64::from(x) - 100.0).powi(2) + (f64::from(y) - 100.0).powi(2) <= 18.0 * 18.0;
+                let in_b =
+                    (f64::from(x) - 300.0).powi(2) + (f64::from(y) - 200.0).powi(2) <= 10.0 * 10.0;
+                if in_a || in_b {
+                    pixels[(y as usize) * 400 + (x as usize)] = u16::MAX;
+                }
+            }
+        }
+        // Tiny noise speck.
+        for &(x, y) in &[(380_usize, 10_usize), (381, 10), (380, 11)] {
+            pixels[y * 400 + x] = u16::MAX;
+        }
+        let frame = Frame::new(
+            400,
+            300,
+            pixels,
+            Tt::from_julian_date(JD_J2000),
+            1000,
+            Intrinsics::placeholder(400, 300),
+        )
+        .unwrap();
+        let centroids =
+            extract_multi_saturated_centroids(&frame, SaturatedBodyConfig::default(), None)
+                .unwrap();
+        assert_eq!(centroids.len(), 2, "speck must be gated by min_area_px");
+        assert!(
+            centroids[0].area_px >= centroids[1].area_px,
+            "largest first"
+        );
+        assert_relative_eq!(centroids[0].x, 100.0, epsilon = 1.0);
+        assert_relative_eq!(centroids[0].y, 100.0, epsilon = 1.0);
+        assert_relative_eq!(centroids[1].x, 300.0, epsilon = 1.0);
+        assert_relative_eq!(centroids[1].y, 200.0, epsilon = 1.0);
+        for c in &centroids {
+            assert!(c.position_sigma_px.value() > 0.0);
+        }
+    }
+
+    #[test]
+    fn multi_saturated_empty_when_no_saturation() {
+        let frame = synth_disk_frame(200, 150, 100.0, 75.0, 12.0);
+        let centroids =
+            extract_multi_saturated_centroids(&frame, SaturatedBodyConfig::default(), None)
+                .unwrap();
+        assert!(centroids.is_empty());
     }
 }
