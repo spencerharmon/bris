@@ -23,10 +23,6 @@ use crate::horizon::HorizonLine;
 use bris_core::time::Tt;
 use bris_core::Uncertain;
 
-pub mod reflection_pair;
-
-pub use reflection_pair::{ReflectionPairConfig, ReflectionPairProvider};
-
 /// Temporal scope a provider operates over.
 ///
 /// Phase 1 implementations all return [`TemporalScope::IntraFrame`].
@@ -60,6 +56,15 @@ pub struct BodyCandidate {
     pub brightness: f64,
     /// 1σ pixel-position uncertainty.
     pub position_sigma_px: f64,
+    /// Predicted altitude (radians, with 1σ) for this candidate
+    /// if it has been identified against the star / body
+    /// catalog (post-plate-solve). `None` when the candidate
+    /// is unidentified — the reflection-pair provider then
+    /// skips its catalog-consistency test (Test 3) for this
+    /// candidate. Populated by the streaming engine from
+    /// `BodyDetection::IdentifiedStars` and (eventually) from
+    /// the Day-mode body identification work.
+    pub predicted_altitude: Option<Uncertain<f64>>,
 }
 
 /// Position prior threaded into a horizon-provider context.
@@ -193,3 +198,7 @@ pub trait HorizonProvider {
     /// best-σ rule.
     fn detect(&self, ctx: &HorizonProviderContext<'_>) -> Option<HorizonHypothesis>;
 }
+
+pub mod reflection_pair;
+
+pub use reflection_pair::{ReflectionPairConfig, ReflectionPairProvider};

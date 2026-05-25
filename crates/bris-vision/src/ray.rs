@@ -270,6 +270,67 @@ pub struct AltitudeMeasurement {
     pub altitude_sigma: Sigma,
 }
 
+/// Compute the angular bisector of two camera rays, normalized.
+///
+/// `(a + b).normalize()`. Returns `None` if the vectors are
+/// anti-parallel (sum is zero). Used by the reflection-pair
+/// horizon provider to infer the local vertical from a body
+/// and its reflection: the bisector points from the camera
+/// toward the horizon plane, so `-bisector` is the inferred
+/// gravity direction in camera frame.
+#[must_use]
+pub fn bisector_normal(a: &CameraRay, b: &CameraRay) -> Option<CameraRay> {
+    CameraRay {
+        x: a.x + b.x,
+        y: a.y + b.y,
+        z: a.z + b.z,
+    }
+    .normalize()
+}
+
+/// Build a pixel-coordinate [`HorizonLine`] from a horizon-plane
+/// normal expressed in the camera frame.
+///
+/// `normal` should point toward the sky. The line is
+/// parameterised as `y = slope * x + intercept`; pixels on the
+/// line have rays perpendicular to `normal` under the pinhole
+/// model. Tangential / radial distortion are ignored at the
+/// line-construction step (the reflection-pair provider uses
+/// this on near-axis horizons where the small-distortion
+/// approximation is good to well under an arcminute on the
+/// `Intrinsics::placeholder` used by tests).
+///
+/// `altitude_sigma` is propagated unchanged into the resulting
+/// line.
+///
+/// Returns `None` when the line is degenerate (vertical in the
+/// image, i.e. `normal.y` is zero), which doesn't correspond to
+/// any horizon a forward-pointing camera could see.
+#[must_use]
+pub fn horizon_line_from_normal(
+    normal: &CameraRay,
+    intrinsics: &Intrinsics,
+    altitude_sigma: Sigma,
+) -> Option<HorizonLine> {
+    if normal.y.abs() < 1e-12 {
+        return None;
+    }
+    // ray·normal = 0  with ray = ((x-cx)/fx, (y-cy)/fy, 1)
+    //   nx*(x-cx)/fx + ny*(y-cy)/fy + nz = 0
+    //   y = cy - (fy/ny) * (nx*(x-cx)/fx + nz)
+    let slope = -(normal.x * intrinsics.fy) / (normal.y * intrinsics.fx);
+    let intercept = intrinsics.cy
+        - (intrinsics.fy / normal.y) * (-normal.x * intrinsics.cx / intrinsics.fx + normal.z);
+    Some(HorizonLine {
+        slope,
+        intercept,
+        inlier_count: 0,
+        candidate_count: 0,
+        residual_rms_px: 0.0,
+        altitude_sigma,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

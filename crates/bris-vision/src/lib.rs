@@ -60,7 +60,10 @@ pub use panorama::{
 };
 pub use peak::{detect_peaks, detect_peaks_above_horizon, Peak, PeakConfig};
 pub use pyramid::{FramePyramid, PyramidError, PyramidLevel};
-pub use ray::{altitude_from_rays, AltitudeMeasurement, BodyRay, CameraRay, HorizonRay};
+pub use ray::{
+    altitude_from_rays, bisector_normal, horizon_line_from_normal, AltitudeMeasurement, BodyRay,
+    CameraRay, HorizonRay,
+};
 #[cfg(feature = "segmentation")]
 pub use segment::{
     detect_horizon_via_segmentation, detect_horizon_via_segmentation_with_column_mask, load_model,
