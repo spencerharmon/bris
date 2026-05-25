@@ -71,6 +71,51 @@ pub struct PublishedFix {
     /// [`crate::StreamingEngine::frame_by_id`] before the
     /// frames evict naturally as the sight window ages.
     pub contributing_frame_ids: Vec<u64>,
+
+    /// Which solver produced this fix. Differentiates the
+    /// Saint-Hilaire intercept-method (the normal path, requires
+    /// a position prior) from the cold-start circle-of-position
+    /// solver (fallback when no prior is available). Surfaced to
+    /// the FFI so operator UIs can show "cold-start, not yet
+    /// AP-anchored" advisories.
+    pub provenance: FixProvenance,
+}
+
+/// Which solver produced a [`PublishedFix`].
+///
+/// See `docs/design/circle_of_position.md` for the cold-start
+/// solver contract.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FixProvenance {
+    /// Normal path: [`bris_nav::multi_sight_fix`] (Saint-Hilaire
+    /// intercept method) succeeded against a sight window
+    /// referenced to the engine's position prior or assumed
+    /// position.
+    SaintHilaire,
+    /// Cold-start: [`bris_nav::cold_start_fix`] produced a
+    /// unique fix from circle-of-position intersection, without
+    /// a position prior.
+    ColdStart,
+    /// Cold-start with hemisphere-resolved ambiguity: the
+    /// two-candidate `cold_start_fix` result was disambiguated
+    /// by the configured
+    /// [`crate::EngineConfig::cold_start.coarse_hemisphere`]
+    /// hint. The chosen candidate may still be wrong if the
+    /// hint was wrong; operator UIs should flag this for
+    /// confirmation.
+    ColdStartAmbiguous,
+}
+
+impl FixProvenance {
+    /// Stable string label for FFI / NMEA surfaces.
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::SaintHilaire => "saint_hilaire",
+            Self::ColdStart => "cold_start",
+            Self::ColdStartAmbiguous => "cold_start_ambiguous",
+        }
+    }
 }
 
 /// Per-sight σ source attribution.
@@ -206,6 +251,7 @@ mod tests {
             dominant_source: dominant,
             timestamp: Tt::from_julian_date(JD_J2000),
             contributing_frame_ids: Vec::new(),
+            provenance: FixProvenance::SaintHilaire,
         }
     }
 

@@ -11,6 +11,6 @@ pub mod angle;
 pub mod time;
 pub mod uncertainty;
 
-pub use angle::{Angle, AngleError, Latitude, Longitude};
+pub use angle::{Angle, AngleError, Hemisphere, Latitude, Longitude};
 pub use time::{Tai, TimeError, Tt, Ut1, JD_J2000, LEAP_TABLE_EXPIRES};
 pub use uncertainty::{Sigma, Uncertain, UncertaintyError};

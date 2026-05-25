@@ -179,6 +179,22 @@ pub struct EngineDiagnostics {
     pub store_archive_files_pruned: u64,
     /// Current size of `sights/current.log` in bytes.
     pub store_current_log_bytes: u64,
+
+    /// Number of times Stage E attempted the cold-start fix
+    /// solver as a fallback to `multi_sight_fix`.
+    pub cold_start_attempts: u64,
+    /// Cold-start fallback runs that produced a fix that was
+    /// published (either `Fix` or hemisphere-resolved
+    /// `TwoCandidates`).
+    pub cold_start_published: u64,
+    /// Cold-start runs that returned `TwoCandidates` with no
+    /// configured hemisphere hint; nothing was published.
+    pub cold_start_ambiguous_skipped: u64,
+    /// Cold-start runs that returned `Inconsistent`.
+    pub cold_start_inconsistent_count: u64,
+    /// Cold-start runs that errored with `Disjoint` (two
+    /// circles with coincident / antipodal GPs).
+    pub cold_start_disjoint_count: u64,
 }
 
 /// Per-stage processing statistics.

@@ -26,7 +26,7 @@
     clippy::unnecessary_wraps
 )]
 
-use crate::fix::{DominantSource, PublishedFix};
+use crate::fix::{DominantSource, FixProvenance, PublishedFix};
 use crate::pipeline::{FrameId, Sight, SightBody};
 use bris_almanac::{Body, SolarSystemBody};
 use bris_core::time::Tt;
@@ -692,7 +692,8 @@ fn encode_fix(p: &PublishedFix) -> [u8; RECORD_SIZE] {
     let n_sights = u32::try_from(p.n_sights).unwrap_or(u32::MAX);
     buf[84..88].copy_from_slice(&n_sights.to_le_bytes());
     buf[88] = dominant_source_code(p.dominant_source);
-    // bytes 89..96 reserved
+    buf[89] = fix_provenance_code(p.provenance);
+    // bytes 90..96 reserved
     buf
 }
 
@@ -712,6 +713,7 @@ fn decode_fix(buf: &[u8; RECORD_SIZE]) -> Option<PublishedFix> {
     let sight_count = u32::from_le_bytes(buf[80..84].try_into().ok()?);
     let n_sights = u32::from_le_bytes(buf[84..88].try_into().ok()?);
     let dom = code_to_dominant_source(buf[88]);
+    let provenance = code_to_fix_provenance(buf[89]);
     let lat = Latitude::from_radians(lat_rad).ok()?;
     let lon = Longitude::from_radians(lon_rad).ok()?;
     let fix = Fix {
@@ -734,6 +736,7 @@ fn decode_fix(buf: &[u8; RECORD_SIZE]) -> Option<PublishedFix> {
         dominant_source: dom,
         timestamp: Tt::from_julian_date(ts_jd),
         contributing_frame_ids: Vec::new(),
+        provenance,
     })
 }
 
@@ -818,6 +821,22 @@ fn code_to_dominant_source(c: u8) -> DominantSource {
     }
 }
 
+fn fix_provenance_code(p: FixProvenance) -> u8 {
+    match p {
+        FixProvenance::SaintHilaire => 0,
+        FixProvenance::ColdStart => 1,
+        FixProvenance::ColdStartAmbiguous => 2,
+    }
+}
+
+fn code_to_fix_provenance(c: u8) -> FixProvenance {
+    match c {
+        1 => FixProvenance::ColdStart,
+        2 => FixProvenance::ColdStartAmbiguous,
+        _ => FixProvenance::SaintHilaire,
+    }
+}
+
 /// Convenience: log + count an append failure without panicking.
 pub(crate) fn record_append_failure(kind: &'static str, err: &StoreError) {
     error!(kind, error = ?err, "store: append failed (record dropped)");
@@ -875,6 +894,7 @@ mod tests {
             dominant_source: DominantSource::Horizon,
             timestamp: Tt::from_julian_date(jd),
             contributing_frame_ids: Vec::new(),
+            provenance: FixProvenance::SaintHilaire,
         }
     }
 

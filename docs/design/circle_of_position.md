@@ -329,6 +329,11 @@ produced and matches the synthetic truth within tolerance.
 
 ## Engine integration
 
+**Status: IMPLEMENTED** as of
+`crates/bris-streaming/src/pipeline/stage_e.rs::try_publish`
+(see also `circles_from_sights` /
+`body_geographic_position` in the same module).
+
 Stage E (`crates/bris-streaming/src/pipeline/stage_e.rs`)
 gains a fallback path: when `multi_sight_fix` returns
 `FixError::SingularGeometry` *and* no `PositionPrior` is
@@ -339,14 +344,19 @@ flag for the FFI surface (operator-visible "this is a
 cold-start fix, not yet AP-anchored").
 
 When `cold_start_fix` returns `TwoCandidates` with a
-configured `coarse_hemisphere` hint, the engine picks
-automatically. Without a hint, the engine publishes a
-`PublishedFixCandidates` enum variant on a separate FFI
-channel and waits for operator input via a new
-`Engine::resolve_cold_start(choice: CandidateChoice)` FFI
-method. The chosen candidate then becomes the
-`PositionPrior` and Saint-Hilaire takes over for subsequent
-fixes.
+configured `coarse_hemisphere` hint
+([`bris_streaming::ColdStartEngineConfig::coarse_hemisphere`]),
+the engine picks the candidate in the matching hemisphere
+and publishes with
+[`bris_streaming::FixProvenance::ColdStartAmbiguous`].
+Without a hint, the engine logs and skips publication; the
+operator-prompt FFI channel + `Engine::resolve_cold_start`
+are follow-up work (tracked TODO inline in `try_publish`).
+Diagnostics counters `cold_start_attempts`,
+`cold_start_published`, `cold_start_ambiguous_skipped`,
+`cold_start_inconsistent_count`, and
+`cold_start_disjoint_count` on `EngineDiagnostics` expose
+the path's per-session frequency.
 
 ## Out of scope
 

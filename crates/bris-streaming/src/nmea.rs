@@ -80,7 +80,7 @@ pub fn format_fix_as_nmea(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::DominantSource;
+    use crate::{DominantSource, FixProvenance};
     use bris_core::time::{Tt, JD_J2000};
     use bris_core::{Latitude, Longitude};
     use bris_nav::Fix;
@@ -103,6 +103,7 @@ mod tests {
             dominant_source: DominantSource::Horizon,
             timestamp: Tt::from_julian_date(JD_J2000),
             contributing_frame_ids: Vec::new(),
+            provenance: FixProvenance::SaintHilaire,
         }
     }
 

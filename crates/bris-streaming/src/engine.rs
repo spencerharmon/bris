@@ -224,6 +224,11 @@ struct EngineState {
     store_append_failures: u64,
     store_corrupted_records_skipped: u64,
     store_archive_files_pruned: u64,
+    cold_start_attempts: u64,
+    cold_start_published: u64,
+    cold_start_ambiguous_skipped: u64,
+    cold_start_inconsistent_count: u64,
+    cold_start_disjoint_count: u64,
 }
 
 /// Nautical mile in metres; for converting Fix sigma (nm) to
@@ -423,6 +428,7 @@ impl StreamingEngine {
     /// that switching to it later is non-breaking, but using
     /// it now is a programming error.
     #[must_use]
+    #[allow(clippy::too_many_lines)]
     pub fn new(config: EngineConfig) -> Self {
         let (fix_tx, fix_rx) = mpsc::channel();
         let plate_db = OnceLock::new();
@@ -527,6 +533,11 @@ impl StreamingEngine {
                 store_append_failures: 0,
                 store_corrupted_records_skipped: corrupted,
                 store_archive_files_pruned: 0,
+                cold_start_attempts: 0,
+                cold_start_published: 0,
+                cold_start_ambiguous_skipped: 0,
+                cold_start_inconsistent_count: 0,
+                cold_start_disjoint_count: 0,
             }),
             config,
             fix_tx,
@@ -567,6 +578,7 @@ impl StreamingEngine {
         // names; suffixing with _d / _e is exactly what makes
         // them clear at the call sites.
         clippy::similar_names,
+        clippy::too_many_lines,
     )]
     pub fn push_frame(&self, frame: Frame) -> Result<(), PushError> {
         // Serialize the whole pipeline run for this frame:
@@ -687,6 +699,21 @@ impl StreamingEngine {
             run_stage_e(storage, sight_window, &self.config, last_publication)
         };
         state.stages[STAGE_E].entered += 1;
+        if stage_e_outcome.cold_start_attempted {
+            state.cold_start_attempts += 1;
+        }
+        if stage_e_outcome.cold_start_published {
+            state.cold_start_published += 1;
+        }
+        if stage_e_outcome.cold_start_ambiguous_skipped {
+            state.cold_start_ambiguous_skipped += 1;
+        }
+        if stage_e_outcome.cold_start_inconsistent {
+            state.cold_start_inconsistent_count += 1;
+        }
+        if stage_e_outcome.cold_start_disjoint {
+            state.cold_start_disjoint_count += 1;
+        }
         // Persist newly-inserted sights to disk. Sync on the
         // Stage E thread per design; failures are logged and
         // counted, never panicked.
@@ -807,6 +834,11 @@ impl StreamingEngine {
             store_corrupted_records_skipped: state.store_corrupted_records_skipped,
             store_archive_files_pruned: state.store_archive_files_pruned,
             store_current_log_bytes: self.store.current_sights_log_bytes(),
+            cold_start_attempts: state.cold_start_attempts,
+            cold_start_published: state.cold_start_published,
+            cold_start_ambiguous_skipped: state.cold_start_ambiguous_skipped,
+            cold_start_inconsistent_count: state.cold_start_inconsistent_count,
+            cold_start_disjoint_count: state.cold_start_disjoint_count,
         }
     }
 
@@ -952,7 +984,7 @@ pub enum PushError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::fix::DominantSource;
+    use crate::fix::{DominantSource, FixProvenance};
     use bris_almanac::Observer;
     use bris_core::time::{Tt, JD_J2000};
     use bris_core::{Latitude, Longitude};
@@ -988,6 +1020,7 @@ mod tests {
             dominant_source: DominantSource::None,
             timestamp: Tt::from_julian_date(JD_J2000),
             contributing_frame_ids: Vec::new(),
+            provenance: FixProvenance::SaintHilaire,
         }
     }
 

@@ -76,8 +76,31 @@ Public surface is `CircleOfPosition`, `FixCandidate`,
 `docs/design/circle_of_position.md` plus input-validation
 guards) and 2 pure-synthetic integration tests in
 `crates/bris-streaming/tests/cold_start_fix.rs`. Zero new
-workspace dependencies. Stage-E engine fallback wiring and
-`Provenance::ColdStart` are deferred to a follow-up PR.
+workspace dependencies.
+
+## Phase 4: Stage E cold-start fallback landed
+
+Stage E (`crates/bris-streaming/src/pipeline/stage_e.rs`)
+falls back to `bris_nav::cold_start_fix` when
+`multi_sight_fix` returns `SingularGeometry`.
+`circles_from_sights` reconstructs `CircleOfPosition`
+records from the active sight window by re-running
+`body_apparent_place` / `star_apparent_place` to recover
+each body's geographic position. Two-candidate results are
+resolved against the new
+`ColdStartEngineConfig::coarse_hemisphere` hint or skipped
+with an `info!` log + diagnostics increment. Operator-
+prompt FFI channel is marked as follow-up work in-source.
+New `FixProvenance::{SaintHilaire,ColdStart,ColdStart
+Ambiguous}` on `PublishedFix` and surfaced as the
+`provenance` string on `FfiPublishedFix`. New `Hemisphere`
+enum in `bris-core`. Diagnostics counters
+`cold_start_{attempts,published,ambiguous_skipped,
+inconsistent_count,disjoint_count}` on
+`EngineDiagnostics`. Two new in-module unit tests +
+surface-wiring integration test in
+`crates/bris-streaming/tests/cold_start_engine_fallback.rs`.
+Zero new workspace deps.
 
 ---
 

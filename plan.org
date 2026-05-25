@@ -1686,7 +1686,16 @@ references to the regression tests that pin the behavior. See
    clustering, and a single Newton refinement step at the cluster
    centre. Public API in `bris_nav::cold_start_fix`; spec in
    `docs/design/circle_of_position.md`. Engine Stage-E fallback
-   wiring deferred to a follow-up PR.
+   wired in `crates/bris-streaming/src/pipeline/stage_e.rs::
+   try_publish`: when `multi_sight_fix` returns
+   `SingularGeometry`, Stage E reconstructs `CircleOfPosition`
+   records from the sight window and falls back to
+   `cold_start_fix`; `TwoCandidates` resolved against the
+   configured `ColdStartEngineConfig::coarse_hemisphere` hint or
+   skipped with `cold_start_ambiguous_skipped` increment.
+   `FixProvenance::{SaintHilaire,ColdStart,ColdStartAmbiguous}`
+   surfaced through `PublishedFix` and the FFI
+   `FfiPublishedFix.provenance` string.
 ** TODO Per-stage uncertainty propagation
    Every pipeline stage that produces a measurement also produces a 1σ
    uncertainty for that measurement, carried in the type system rather

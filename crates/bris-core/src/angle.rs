@@ -247,6 +247,30 @@ impl fmt::Display for Longitude {
     }
 }
 
+/// Coarse geographic hemisphere hint.
+///
+/// Used to disambiguate two-candidate cold-start fixes when no
+/// position prior is available but the operator has indicated
+/// roughly which side of the equator they are on. Not a fix.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Hemisphere {
+    /// Northern hemisphere (lat ≥ 0).
+    North,
+    /// Southern hemisphere (lat < 0).
+    South,
+}
+
+impl Hemisphere {
+    /// True iff `lat` lies in this hemisphere. Equator is North.
+    #[must_use]
+    pub fn contains(self, lat: Latitude) -> bool {
+        match self {
+            Self::North => lat.radians() >= 0.0,
+            Self::South => lat.radians() < 0.0,
+        }
+    }
+}
+
 /// Errors constructing an angle-typed value.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum AngleError {
