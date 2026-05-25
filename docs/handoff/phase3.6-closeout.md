@@ -85,19 +85,27 @@ remaining error is split between operator-input quality
 Ordered by expected impact on corpus intercept residual.
 Each item carries an estimated post-fix residual contribution.
 
-### 1. Sub-pixel centroid refinement (~3 nm → ~0.3 nm)
+### 1. Sub-pixel centroid refinement (~3 nm → ~0.3 nm) — DONE
 
-Current corpus centroids are operator-hand-thresholded at
-`>200/255`, accurate to ±1 px. Real centroid σ on a saturated
-Moon disk with halo is ~0.3 px from a 2D Gaussian fit
-weighted by the non-saturated halo (the existing
-`mean_intensity` halo machinery from #8 has the boundary
-pixels already). Halve the per-ray angular σ from ~1.1′ to
-~0.3′. Expected corpus intercept: drops from 8.18 nm to ~2–
-3 nm, dominated by other terms below.
+Landed on `feat/subpixel-centroid`. A 2D Gaussian fit on the
+non-saturated halo (the existing `mean_intensity` boundary
+machinery from #8) recovers the body centre to sub-pixel
+resolution and reports a fit-covariance position σ.
 
-Lever: `crates/bris-vision/src/centroid.rs` or `body.rs` —
-add a refinement pass after the threshold-component step.
+On the saturated-disk integration synth
+(`crates/bris-vision/tests/subpixel_centroid_regression.rs`),
+the refined per-axis σ drops well below the 0.5 px integer
+floor and the recovered centre lands within 0.5 px of truth.
+Projected corpus contribution: integer-centroid residual
+~3 nm → refined-centroid residual ~0.3 nm (driven by
+the σ reduction from ~1 px to <0.3 px on a well-sampled
+halo). The Austin corpus replay needs the refined fit
+threaded through the per-stage σ chain (item 4) before the
+LOP-residual drop can be measured end-to-end.
+
+Lever lived in `crates/bris-vision/src/centroid_refine.rs`;
+Stage A wiring is in
+`crates/bris-streaming/src/pipeline/mod.rs::detect_day_body`.
 
 ### 2. Annual aberration (~0.3 nm)
 
