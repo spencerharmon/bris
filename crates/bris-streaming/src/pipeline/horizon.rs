@@ -73,6 +73,12 @@ pub(crate) enum HorizonStageOutcome {
         /// estimate (different detectors have different
         /// per-frame jitter).
         detector: HorizonDetector,
+        /// Provenance of the winning hypothesis, preserved
+        /// for diagnostics surfaces (HUD / submissions) that
+        /// want the provider-specific payload (e.g.
+        /// reflection-pair pair count) rather than just the
+        /// detector discriminant.
+        provenance: HorizonProvenance,
         /// The horizon line, with its `altitude_sigma`.
         line: HorizonLine,
         /// Direct sight emitted alongside the horizon (e.g.
@@ -124,7 +130,7 @@ pub(crate) fn detect(
     position_prior: Option<PositionPrior>,
     timestamp: Tt,
 ) -> (HorizonStageOutcome, (u32, u32)) {
-    let mut best: Option<(HorizonDetector, HorizonLine)> = None;
+    let mut best: Option<(HorizonDetector, HorizonProvenance, HorizonLine)> = None;
 
     let early_term = cfg.horizon_early_termination_sigma_rad;
     let day_first = matches!(condition, Condition::Day | Condition::Twilight);
@@ -262,8 +268,13 @@ pub(crate) fn merge_reflection_pair(
     };
     // Seed `best` from the previous outcome (if any) and use
     // the same best-σ merge as the first-pass dispatcher.
-    let mut best: Option<(HorizonDetector, HorizonLine)> = match prev {
-        HorizonStageOutcome::Detected { detector, line, .. } => Some((detector, line)),
+    let mut best: Option<(HorizonDetector, HorizonProvenance, HorizonLine)> = match prev {
+        HorizonStageOutcome::Detected {
+            detector,
+            provenance,
+            line,
+            ..
+        } => Some((detector, provenance, line)),
         HorizonStageOutcome::None => None,
     };
     let mut best_direct_sight: Option<bris_vision::DirectSight> = match prev {
@@ -272,11 +283,11 @@ pub(crate) fn merge_reflection_pair(
     };
     let detector = detector_from_provenance(hyp.provenance);
     let improved = match best {
-        Some((_, ref existing)) => hyp.line.altitude_sigma < existing.altitude_sigma,
+        Some((_, _, ref existing)) => hyp.line.altitude_sigma < existing.altitude_sigma,
         None => true,
     };
     if improved {
-        best = Some((detector, hyp.line));
+        best = Some((detector, hyp.provenance, hyp.line));
         best_direct_sight = hyp.direct_sight;
     }
     let used = improved;
@@ -294,7 +305,7 @@ pub(crate) fn merge_reflection_pair(
 fn run_provider<P: HorizonProvider>(
     provider: &P,
     ctx: &HorizonProviderContext<'_>,
-    best: &mut Option<(HorizonDetector, HorizonLine)>,
+    best: &mut Option<(HorizonDetector, HorizonProvenance, HorizonLine)>,
     best_direct_sight: &mut Option<bris_vision::DirectSight>,
 ) {
     let Some(hyp) = provider.detect(ctx) else {
@@ -308,11 +319,11 @@ fn run_provider<P: HorizonProvider>(
         "Stage C: provider produced hypothesis"
     );
     let improved = match best {
-        Some((_, existing)) => hyp.line.altitude_sigma < existing.altitude_sigma,
+        Some((_, _, existing)) => hyp.line.altitude_sigma < existing.altitude_sigma,
         None => true,
     };
     if improved {
-        *best = Some((detector, hyp.line));
+        *best = Some((detector, hyp.provenance, hyp.line));
         *best_direct_sight = hyp.direct_sight;
     }
 }
@@ -328,7 +339,7 @@ fn detector_from_provenance(p: HorizonProvenance) -> HorizonDetector {
 fn run_segmentation(
     ctx: &HorizonProviderContext<'_>,
     cfg: &EngineConfig,
-    best: &mut Option<(HorizonDetector, HorizonLine)>,
+    best: &mut Option<(HorizonDetector, HorizonProvenance, HorizonLine)>,
     best_direct_sight: &mut Option<bris_vision::DirectSight>,
 ) {
     let provider = SegmentationProvider { cfg };
@@ -339,7 +350,7 @@ fn run_segmentation(
 fn run_segmentation(
     _ctx: &HorizonProviderContext<'_>,
     _cfg: &EngineConfig,
-    _best: &mut Option<(HorizonDetector, HorizonLine)>,
+    _best: &mut Option<(HorizonDetector, HorizonProvenance, HorizonLine)>,
     _best_direct_sight: &mut Option<bris_vision::DirectSight>,
 ) {
     // Segmentation feature disabled at compile time.
@@ -367,22 +378,23 @@ impl CowFrame<'_> {
 /// True iff the current best horizon's σ is at or below the
 /// early-termination threshold (and a best exists at all).
 fn early_terminate(
-    best: Option<&(HorizonDetector, HorizonLine)>,
+    best: Option<&(HorizonDetector, HorizonProvenance, HorizonLine)>,
     early_term_sigma_rad: f64,
 ) -> bool {
     match best {
-        Some((_, line)) => line.altitude_sigma.value() <= early_term_sigma_rad,
+        Some((_, _, line)) => line.altitude_sigma.value() <= early_term_sigma_rad,
         None => false,
     }
 }
 
 fn finish(
-    best: Option<(HorizonDetector, HorizonLine)>,
+    best: Option<(HorizonDetector, HorizonProvenance, HorizonLine)>,
     direct_sight: Option<bris_vision::DirectSight>,
 ) -> HorizonStageOutcome {
     match best {
-        Some((detector, line)) => HorizonStageOutcome::Detected {
+        Some((detector, provenance, line)) => HorizonStageOutcome::Detected {
             detector,
+            provenance,
             line,
             direct_sight,
         },

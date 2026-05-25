@@ -107,6 +107,8 @@ struct EngineState {
     /// processed frame. Mirrors
     /// [`crate::EngineDiagnostics::last_horizon_analysis_size`].
     last_horizon_analysis_size: Option<(u32, u32)>,
+    last_horizon_provenance: Option<bris_vision::HorizonProvenance>,
+    last_horizon_altitude_sigma_rad: Option<f64>,
     /// Ring buffer + body/horizon queues + eviction. Owns the
     /// retained raw frames and detection records.
     storage: Storage,
@@ -249,6 +251,19 @@ fn update_stage_counters(
     state.last_processed_frame_tt = Some(outcome.frame_tt);
     state.last_horizon_analysis_size = Some(outcome.horizon_analyzed_size);
 
+    match &outcome.horizon {
+        HorizonStageOutcome::Detected {
+            provenance, line, ..
+        } => {
+            state.last_horizon_provenance = Some(*provenance);
+            state.last_horizon_altitude_sigma_rad = Some(line.altitude_sigma.value());
+        }
+        HorizonStageOutcome::None => {
+            state.last_horizon_provenance = None;
+            state.last_horizon_altitude_sigma_rad = None;
+        }
+    }
+
     if outcome.reflection_pair_invoked {
         state.reflection_pair_attempts += 1;
     }
@@ -324,6 +339,8 @@ impl StreamingEngine {
                 last_published_fix_tt: None,
                 last_published_fix: None,
                 last_horizon_analysis_size: None,
+                last_horizon_provenance: None,
+                last_horizon_altitude_sigma_rad: None,
                 storage: Storage::new(config.input_ring_capacity),
                 sight_window: SightWindow::default(),
                 last_publication: None,
@@ -569,6 +586,8 @@ impl StreamingEngine {
             last_processed_frame_tt: state.last_processed_frame_tt,
             last_published_fix_tt: state.last_published_fix_tt,
             last_horizon_analysis_size: state.last_horizon_analysis_size,
+            last_horizon_provenance: state.last_horizon_provenance,
+            last_horizon_altitude_sigma_rad: state.last_horizon_altitude_sigma_rad,
             reflection_pair_attempts: state.reflection_pair_attempts,
             reflection_pair_hypothesized: state.reflection_pair_hypothesized,
             reflection_pair_used: state.reflection_pair_used,

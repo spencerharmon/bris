@@ -235,6 +235,8 @@ fun LiveScreen(
                 framesDropped = snapshot?.framesDropped ?: 0u,
                 bodyQueueDepth = snapshot?.bodyQueueDepth ?: 0u,
                 horizonQueueDepth = snapshot?.horizonQueueDepth ?: 0u,
+                horizonProvenance = snapshot?.lastHorizonProvenance,
+                horizonAltitudeSigmaArcmin = snapshot?.lastHorizonAltitudeSigmaArcmin,
                 ringBufferDepth = snapshot?.ringBufferDepth ?: 0u,
                 sightWindowDepth = snapshot?.sightWindowDepth ?: 0u,
                 calibrationSource = calibration,
@@ -451,6 +453,8 @@ private fun DiagnosticOverlay(
     framesDropped: ULong,
     bodyQueueDepth: UInt,
     horizonQueueDepth: UInt,
+    horizonProvenance: String?,
+    horizonAltitudeSigmaArcmin: Double?,
     ringBufferDepth: UInt,
     sightWindowDepth: UInt,
     calibrationSource: CalibrationSource,
@@ -539,6 +543,19 @@ private fun DiagnosticOverlay(
                 "  ring=$ringBufferDepth  sights=$sightWindowDepth",
             color = Color.White,
         )
+        // Horizon provenance + 1σ (arcmin). Visible whenever
+        // the engine has produced a horizon on the most
+        // recent processed frame; em-dash placeholder
+        // otherwise. Standard HUD typography — no new style.
+        val horizonLine = if (horizonProvenance != null) {
+            val sigmaText = horizonAltitudeSigmaArcmin
+                ?.let { "%.2f".format(it) + "'" }
+                ?: "—"
+            "horizon: $horizonProvenance  σ=$sigmaText"
+        } else {
+            "horizon: —"
+        }
+        Text(horizonLine, color = Color.White)
     }
 }
 
