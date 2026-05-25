@@ -15,8 +15,10 @@
 //! 2. Light-time correction (one iteration; planets/Moon).
 //! 3. Convert to equatorial of date via [`coord::ecliptic_to_equatorial`].
 //! 4. Apply nutation (rotates mean → true equator).
-//! 5. Apply annual aberration (TODO: stub returning zero correction
-//!    with a small documented sigma, see plan.org Phase 1 follow-up).
+//! 5. Apply annual aberration (Meeus Ch. 23, classical formulation):
+//!    apparent direction ≈ normalize(`u + v_earth / c`), with Earth's
+//!    heliocentric velocity in equatorial-of-date cartesian frame.
+//!    See [`apply_annual_aberration`].
 //! 6. Convert geocentric → topocentric in equatorial coordinates
 //!    (diurnal parallax; only the Moon is large, but applied to Sun
 //!    and planets uniformly for consistency). Uses Meeus Ch. 40.
@@ -32,7 +34,9 @@
 //! 2. Linear proper motion to epoch (`catalog::position_at`).
 //! 3. Apply precession (J2000 → mean of date).
 //! 4. Apply nutation (mean → true).
-//! 5. Apply annual aberration (same TODO).
+//! 5. Apply annual aberration (same classical formulation; for stars
+//!    the body direction is at infinity so the v/c shift is
+//!    independent of distance).
 //! 6. Equatorial → horizontal.
 //! 7. Horizon dip + refraction.
 
@@ -77,14 +81,21 @@ pub enum ApparentPlaceError {
     NonFinite,
 }
 
-/// Apparent-place uncertainty contribution from annual aberration when
-/// not yet applied. Aberration is a ~20″ effect; if we're returning a
-/// position without applying it, we must add ~20″ to the uncertainty
-/// budget so callers don't believe a precision they aren't getting.
+/// Residual 1σ uncertainty after applying classical annual aberration.
 ///
-/// Once aberration is implemented this becomes a much smaller residual
-/// (~0.1″) and the constant changes accordingly.
-const ABERRATION_PLACEHOLDER_SIGMA_RAD: f64 = 20.0 * std::f64::consts::PI / (180.0 * 3600.0);
+/// The classical formulation accounts for Earth's heliocentric orbital
+/// velocity (~30 km/s, peak shift ~20″). Unmodelled terms include
+/// diurnal aberration (observer rotation about Earth's axis, ≤ 0.32″),
+/// relativistic second-order terms (~v²/c², sub-mas), and the small
+/// difference between geocenter and observer in the velocity. Lump
+/// these into a 0.1″ residual.
+const ABERRATION_RESIDUAL_SIGMA_RAD: f64 = 0.1 * std::f64::consts::PI / (180.0 * 3600.0);
+
+/// Speed of light in m/s.
+const C_M_PER_S: f64 = 299_792_458.0;
+
+/// Seconds per day.
+const SECS_PER_DAY: f64 = 86_400.0;
 
 /// Compute the apparent place of a Solar System body.
 ///
@@ -123,10 +134,13 @@ pub fn star_apparent_place(
     let nu = nutation(tt);
     let true_eq = apply_nutation(mean_eq, nu.delta_psi, nu.delta_epsilon, tt);
 
-    // Step 5: aberration (TODO; counted in sigma).
+    // Step 5: annual aberration (classical). For stars the direction
+    // is at infinity so the shift is independent of distance.
+    let aberrated_eq = apply_annual_aberration(true_eq, tt);
+
     // Stars: stellar parallax is handled (or omitted at mas level) via
     // the catalog `parallax_mas` field — do NOT apply diurnal parallax.
-    finalize_to_horizontal(true_eq, None, tt, jd_ut1, observer, nu.delta_psi)
+    finalize_to_horizontal(aberrated_eq, None, tt, jd_ut1, observer, nu.delta_psi)
 }
 
 /// All Solar System bodies the apparent-place pipeline supports.
@@ -266,7 +280,103 @@ fn common_apparent_place(
     let nu = nutation(tt);
     let true_eq = apply_nutation(mean_eq, nu.delta_psi, nu.delta_epsilon, tt);
 
-    finalize_to_horizontal(true_eq, distance_au, tt, jd_ut1, observer, nu.delta_psi)
+    // Annual aberration (classical). Applied to the geocentric direction
+    // before topocentric parallax; parallax must be the last shift since
+    // it is the rotation from geocenter to surface viewpoint.
+    let aberrated_eq = apply_annual_aberration(true_eq, tt);
+
+    finalize_to_horizontal(
+        aberrated_eq,
+        distance_au,
+        tt,
+        jd_ut1,
+        observer,
+        nu.delta_psi,
+    )
+}
+
+/// Apply classical annual aberration (Meeus Ch. 23).
+///
+/// Given a geocentric true-equatorial-of-date direction `true_eq` and
+/// the instant `tt`, returns the apparent direction shifted by Earth's
+/// heliocentric velocity v\: `u_apparent = normalize(u + v / c)`.
+///
+/// Units\: Earth heliocentric velocity is computed in AU/day via a
+/// centered numerical derivative of VSOP87 over `dt = 60` s and
+/// converted to m/s; `c = 299_792_458` m/s. The classical
+/// (non-relativistic) form is accurate to `v²/c²` ≈ 1e-8 rad
+/// (sub-mas), well below the residual `σ` floor we attach.
+#[must_use]
+pub fn apply_annual_aberration(true_eq: Equatorial, tt: Tt) -> Equatorial {
+    // Earth heliocentric velocity in ecliptic-of-date rectangular AU/day.
+    let (vxe, vye, vze) = earth_heliocentric_velocity_ecliptic_au_per_day(tt);
+
+    // Convert AU/day → m/s.
+    let au_per_day_to_m_per_s = AU_M / SECS_PER_DAY;
+    let vxe = vxe * au_per_day_to_m_per_s;
+    let vye = vye * au_per_day_to_m_per_s;
+    let vze = vze * au_per_day_to_m_per_s;
+
+    // Rotate ecliptic → equatorial of date by +ε about x-axis.
+    let eps = mean_obliquity(tt);
+    let (se, ce) = eps.sin_cos();
+    let vx = vxe;
+    let vy = ce * vye - se * vze;
+    let vz = se * vye + ce * vze;
+
+    // Unit vector toward body in equatorial of date.
+    let (sa, ca) = true_eq.ra.sin_cos();
+    let (sdec, cdec) = true_eq.dec.sin_cos();
+    let ux = cdec * ca;
+    let uy = cdec * sa;
+    let uz = sdec;
+
+    // Classical aberration: apparent direction ≈ normalize(u + v / c).
+    // Sign convention: Earth moving toward apex shifts a star toward the
+    // apex by v/c (Meeus 23.2-23.4 equivalent).
+    let dx = ux + vx / C_M_PER_S;
+    let dy = uy + vy / C_M_PER_S;
+    let dz = uz + vz / C_M_PER_S;
+    let inv_len = 1.0 / (dx * dx + dy * dy + dz * dz).sqrt();
+    let dx = dx * inv_len;
+    let dy = dy * inv_len;
+    let dz = dz * inv_len;
+
+    let ra = dy.atan2(dx).rem_euclid(std::f64::consts::TAU);
+    let dec = dz.clamp(-1.0, 1.0).asin();
+    Equatorial { ra, dec }
+}
+
+/// Earth's heliocentric velocity in ecliptic-of-date rectangular AU/day.
+///
+/// VSOP87D exposes positions only; we take a centered finite difference
+/// over ±30 s (60 s total span). At Earth's orbital speed (~30 km/s)
+/// over 30 s the truncation error of a centered difference is
+/// O((dt)² · jerk), well below 10⁻¹⁰ AU/day.
+fn earth_heliocentric_velocity_ecliptic_au_per_day(tt: Tt) -> (f64, f64, f64) {
+    let dt_days = 30.0 / SECS_PER_DAY;
+    let tt_plus = Tt::from_julian_date(tt.julian_date() + dt_days);
+    let tt_minus = Tt::from_julian_date(tt.julian_date() - dt_days);
+    let e_plus = earth_helio_rect(tt_plus);
+    let e_minus = earth_helio_rect(tt_minus);
+    let inv_2dt = 1.0 / (2.0 * dt_days);
+    (
+        (e_plus.0 - e_minus.0) * inv_2dt,
+        (e_plus.1 - e_minus.1) * inv_2dt,
+        (e_plus.2 - e_minus.2) * inv_2dt,
+    )
+}
+
+/// Earth heliocentric ecliptic-of-date rectangular coordinates (AU).
+fn earth_helio_rect(tt: Tt) -> (f64, f64, f64) {
+    let e = heliocentric(Body::EarthMoonBarycenter, tt);
+    let (sin_l, cos_l) = e.longitude.sin_cos();
+    let (sin_b, cos_b) = e.latitude.sin_cos();
+    (
+        e.radius_au * cos_b * cos_l,
+        e.radius_au * cos_b * sin_l,
+        e.radius_au * sin_b,
+    )
 }
 
 /// One astronomical unit, in meters (IAU 2012 definition).
@@ -367,7 +477,7 @@ fn finalize_to_horizontal(
     // Sigma budget: refraction sigma + horizon dip sigma + aberration
     // placeholder. Combined in quadrature.
     let dip_sigma = observer.horizon_dip_sigma();
-    let aberration_sigma = Sigma::new(ABERRATION_PLACEHOLDER_SIGMA_RAD).unwrap();
+    let aberration_sigma = Sigma::new(ABERRATION_RESIDUAL_SIGMA_RAD).unwrap();
     let sigma = refraction
         .sigma
         .combine(dip_sigma)
@@ -534,16 +644,55 @@ mod tests {
     }
 
     #[test]
-    fn aberration_placeholder_sigma_present() {
-        // Until aberration is properly applied, every fix carries a
-        // ~20" placeholder sigma. Check that's at least the floor.
+    fn aberration_residual_sigma_is_small() {
+        // After applying classical annual aberration, the contribution
+        // is ~0.1″. The historical placeholder was 20″; verify it is
+        // no longer combined into the altitude sigma by checking the
+        // total is below the old floor (refraction + dip alone is
+        // ~19.6″ at default_dev; adding 20″ in quadrature would push
+        // past 28″).
         let (tt, jd_ut1) = june_solstice_noon_at_greenwich();
         let obs = Observer::default_dev();
         let ap = body_apparent_place(SolarSystemBody::Sun, tt, jd_ut1, obs).unwrap();
         let arcsec = ap.altitude_sigma.value() * 180.0 * 3600.0 / std::f64::consts::PI;
         assert!(
-            arcsec >= 19.0,
-            "altitude sigma {arcsec}\" should include aberration placeholder ≥ 19\""
+            arcsec < 25.0,
+            "altitude sigma {arcsec}\" should no longer carry a 20\" \
+             aberration placeholder (combined with dip+refraction ≈ 19.6\", \
+             the placeholder would push this past 28\")"
+        );
+    }
+
+    #[test]
+    fn annual_aberration_shifts_perpendicular_star_by_about_twenty_arcsec() {
+        // Pick a star at the ecliptic pole at J2000: ecliptic longitude
+        // irrelevant, latitude +90°. In equatorial of date this is
+        // approximately (α=18h, δ=90°−ε). Aberration from Earth's
+        // ~30 km/s orbital motion (perpendicular to the pole) shifts the
+        // apparent direction by v/c ≈ 1e-4 rad ≈ 20.5″.
+        let utc = chrono::Utc
+            .with_ymd_and_hms(2024, 3, 21, 0, 0, 0)
+            .single()
+            .unwrap();
+        let tt = utc_to_tt(utc).unwrap();
+        let eps = crate::frame::mean_obliquity(tt);
+        let true_eq = Equatorial {
+            ra: 1.5 * std::f64::consts::PI, // 18h
+            dec: std::f64::consts::FRAC_PI_2 - eps,
+        };
+        let app = apply_annual_aberration(true_eq, tt);
+        let (sa0, ca0) = true_eq.ra.sin_cos();
+        let (sdec0, cdec0) = true_eq.dec.sin_cos();
+        let (sa1, ca1) = app.ra.sin_cos();
+        let (sdec1, cdec1) = app.dec.sin_cos();
+        let dot = (cdec0 * ca0) * (cdec1 * ca1)
+            + (cdec0 * sa0) * (cdec1 * sa1)
+            + sdec0 * sdec1;
+        let angle = dot.clamp(-1.0, 1.0).acos();
+        let arcsec = angle * 180.0 * 3600.0 / std::f64::consts::PI;
+        assert!(
+            (15.0..=25.0).contains(&arcsec),
+            "aberration shift {arcsec}\" out of expected ~20.5\" band"
         );
     }
 }

@@ -182,16 +182,20 @@ hitting 0.14°).
 
 ## Followups
 
-These are NOT implemented in this commit; each has a separate
-plan.org line:
+These are NOT all implemented in this commit; each has a separate
+plan.org line. Items marked DONE in subsequent commits are noted.
 
 1. **Oblateness-corrected geocentric latitude** (`φ′`,
    `ρ`). Would tighten the Moon parallax model from
    spherical-Earth to WGS-84-ish. Magnitude: tens of
    arcseconds in altitude near 45° geodetic latitude.
-2. **Annual aberration**. ~20″ direction shift from Earth's
-   orbital velocity; currently a fixed σ placeholder. Meeus
-   Ch. 23.
+2. **Annual aberration**. DONE — see
+   `crates/bris-almanac/src/apparent.rs::apply_annual_aberration`
+   (classical formulation, Meeus Ch. 23). Earth's heliocentric
+   velocity comes from a centered numerical derivative of VSOP87D
+   over ±30 s, converted to equatorial-of-date cartesian via the
+   obliquity of date. Residual σ after application is 0.1″
+   (down from the 20″ placeholder).
 3. **Light-time correction for planets**. Currently TODO at
    `apparent.rs:155`. ~1–2″ for Mars at opposition; larger
    for Jupiter and beyond. Required only when planets

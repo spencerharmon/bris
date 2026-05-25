@@ -224,6 +224,16 @@ fn moonlight_pond_produces_moon_lop() {
     // The Ho/Hc/intercept below comes from running the *same*
     // provider with the operator's measured centroids; it is
     // the real-world load-bearing measurement.
+    //
+    // Historical intercept values for this scene:
+    //   pre-parallax        : -61.13 nm
+    //   post-parallax       :  -8.18 nm
+    //   post-aberration (this commit): expected ~-7.9 nm
+    //     (annual-aberration shift on the Moon is at most ~20″, of which
+    //      only the component along the LOP azimuth feeds the intercept;
+    //      see docs/design/topocentric_parallax.md "Followups").
+    // The 5° bound is loose enough that none of these fail; track the
+    // *value*, not the bound.
     assert!(
         diag.reflection_pair_attempts >= 1,
         "engine did not invoke reflection-pair on frame 10. \
