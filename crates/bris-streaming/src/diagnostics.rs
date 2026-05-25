@@ -140,6 +140,23 @@ pub struct EngineDiagnostics {
     /// ran but found no VP cluster meeting the inlier and
     /// classification gates.
     pub vanishing_point_rejected_no_cluster: u64,
+
+    /// Highest cluster size produced by the horizon-fusion
+    /// layer across the session.
+    pub horizon_fusion_cluster_size_max: usize,
+    /// Frames where ≥ 2 providers produced concordant
+    /// hypotheses and were fused for a tighter σ.
+    pub horizon_fusion_clustered_frames: u64,
+    /// Frames where ≥ 2 providers produced hypotheses but
+    /// none were concordant; outcome fell back to the
+    /// lowest-σ singleton. Non-zero values are an operator-
+    /// visible signal that something is wrong (bad
+    /// calibration, false-positive provider, multi-modal
+    /// scene).
+    pub horizon_fusion_discordant_frames: u64,
+    /// Frames where only one provider produced any hypothesis;
+    /// no fusion was possible.
+    pub horizon_fusion_singleton_frames: u64,
 }
 
 /// Per-stage processing statistics.

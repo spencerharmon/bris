@@ -592,6 +592,7 @@ fn format_horizon_provenance(p: bris_vision::HorizonProvenance) -> String {
                 format!("VanishingPoint({vp_count})")
             }
         }
+        HP::Fused { cluster_size } => format!("Fused({cluster_size})"),
         // Catch-all for future provenance variants. Falls
         // back to debug formatting so the HUD continues to
         // render something useful without coordinating an

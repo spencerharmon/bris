@@ -469,6 +469,27 @@ fn is_same_frame(c: &PairCandidate<'_>) -> bool {
     c.body.frame_id == c.horizon.frame_id
 }
 
+/// Pick the direct sight from `sights` whose `body_pixel` is
+/// closest to `target_pixel`. Returns `None` if `sights` is
+/// empty. Used by Stage E to attribute the right direct sight
+/// (when several providers each emitted one) to the body
+/// candidate being reduced.
+fn pick_direct_sight_for(
+    sights: &[bris_vision::DirectSight],
+    target_pixel: (f64, f64),
+) -> Option<bris_vision::DirectSight> {
+    sights
+        .iter()
+        .min_by(|a, b| {
+            let da = (a.body_pixel.0 - target_pixel.0).powi(2)
+                + (a.body_pixel.1 - target_pixel.1).powi(2);
+            let db = (b.body_pixel.0 - target_pixel.0).powi(2)
+                + (b.body_pixel.1 - target_pixel.1).powi(2);
+            da.partial_cmp(&db).unwrap_or(std::cmp::Ordering::Equal)
+        })
+        .copied()
+}
+
 /// Reduce one same-frame candidate into a [`Sight`].
 ///
 /// Returns `Err` for non-actionable candidates: night-path
@@ -532,7 +553,9 @@ fn reduce_to_sight(
             // one provider wins per frame so the
             // double-counting risk is hypothetical; documented
             // here so it stays visible as more providers land.
-            let observed = if let Some(direct) = c.horizon.direct_sight {
+            let observed = if let Some(direct) =
+                pick_direct_sight_for(&c.horizon.direct_sights, (centroid.x, centroid.y))
+            {
                 direct.observed_altitude
             } else {
                 measure_altitude(intrinsics, c.horizon.line, *centroid)

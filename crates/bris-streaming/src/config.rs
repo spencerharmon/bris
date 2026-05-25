@@ -23,8 +23,8 @@ use bris_almanac::Observer;
 use bris_core::Sigma;
 use bris_platesolve::{PlateSolveConfig, StarHashDbConfig};
 use bris_vision::{
-    ConditionConfig, HorizonConfig, NightHorizonConfig, PeakConfig, SaturatedBodyConfig,
-    TexturedHorizonConfig,
+    ConditionConfig, HorizonConfig, HorizonFusionConfig, NightHorizonConfig, PeakConfig,
+    SaturatedBodyConfig, TexturedHorizonConfig,
 };
 use std::path::PathBuf;
 
@@ -298,6 +298,16 @@ pub struct EngineConfig {
     /// only when cheaper providers fail to clear the
     /// early-termination threshold.
     pub vanishing_point_provider_config: bris_vision::VanishingPointConfig,
+
+    /// Stage C: multi-source horizon fusion configuration.
+    /// When two or more providers produce concordant
+    /// hypotheses on the same frame the fuser combines them
+    /// for a tighter σ; when they disagree the fuser falls
+    /// back to the lowest-σ singleton and increments the
+    /// `horizon_fusion_discordant_frames` diagnostic.
+    /// `enabled = false` reverts to the pre-fusion best-σ
+    /// behavior.
+    pub horizon_fusion: HorizonFusionConfig,
 }
 
 impl EngineConfig {
@@ -346,6 +356,7 @@ impl EngineConfig {
             position_prior_max_age_seconds: 30.0,
             vertical_line_provider_config: bris_vision::VerticalLineConfig::default(),
             vanishing_point_provider_config: bris_vision::VanishingPointConfig::default(),
+            horizon_fusion: HorizonFusionConfig::default(),
         }
     }
 

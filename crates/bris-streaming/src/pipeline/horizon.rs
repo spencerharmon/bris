@@ -1,51 +1,27 @@
-//! Stage C: horizon detection in cheap-first order with
-//! per-detector early termination.
+//! Stage C: horizon detection, multi-source fusion.
 //!
-//! The design doc lists the cost ordering:
+//! All providers compatible with the dispatched condition run
+//! in cheap-first order; each contributes (or declines) a
+//! [`bris_vision::HorizonHypothesis`]. The collected vector
+//! is then handed to
+//! [`bris_vision::fuse_horizon_hypotheses`], which either
+//! produces a fused [`Fused`][bris_vision::HorizonProvenance::Fused]
+//! estimate (when ≥ 2 hypotheses are concordant) or falls back
+//! to the lowest-σ singleton.
 //!
-//! | Detector                                                                                                | Approx. cost | Regime          |
-//! |---------------------------------------------------------------------------------------------------------|--------------|-----------------|
-//! | [`bris_vision::detect_horizon`] (gradient)                                                              | ~5 ms        | Day             |
-//! | [`bris_vision::detect_horizon_via_sky_region`]                                                          | ~10 ms       | Day             |
-//! | [`bris_vision::detect_horizon_night`]                                                                   | ~10 ms       | Night/Twilight  |
-//! | [`bris_vision::detect_horizon_night_textured`]                                                          | ~15 ms       | Night/Twilight  |
-//! | `bris_vision::detect_horizon_via_segmentation` (feature-gated)                                          | ~100 ms      | Last resort     |
+//! Cheap-first ordering and early-termination are preserved:
+//! once a cheap provider produces a hypothesis below
+//! [`crate::EngineConfig::horizon_early_termination_sigma_rad`],
+//! more expensive providers are *not* invoked. This keeps the
+//! Pi Zero 2W budget intact. Early-termination operates on the
+//! best-σ-so-far, the same condition as before; fusion runs over
+//! whatever hypotheses were collected at that point.
 //!
-//! Cheap-first ordering:
-//!
-//! 1. Run the cheap detectors appropriate to the classifier
-//!    verdict (Day → gradient + sky-region; Night/Twilight →
-//!    night + night-textured; Twilight tries both day and night
-//!    variants because the regime is ambiguous by definition).
-//! 2. If any successful detector produced a horizon with σ at or
-//!    below [`crate::EngineConfig::horizon_early_termination_sigma_rad`],
-//!    stop and return the best.
-//! 3. Otherwise (no detector succeeded, or σ above threshold)
-//!    fall through to the segmentation detector when
-//!    [`crate::EngineConfig::segmentation_model_path`] is set
-//!    and the `segmentation` feature is enabled.
-//! 4. Return the best-σ horizon across all attempts, or
-//!    [`HorizonStageOutcome::None`] if every attempt failed.
-//!
-//! # Why "best across all attempts" rather than "first success"
-//!
-//! A cheap detector can return a successful horizon with σ above
-//! the early-termination threshold. We still want segmentation to
-//! run in that case (because it might do much better). The match
-//! returns the *better* of the two — we don't throw away the
-//! cheap result just because we ran segmentation, and we don't
-//! commit to the cheap result just because it was first.
-//!
-//! # Failure handling
-//!
-//! Every detector returns a typed `Result`. The `Err` variants
-//! carry rich diagnostic context but for Stage C's purposes
-//! they're all equivalent: "this detector did not produce a
-//! horizon for this frame." We log at `trace!` (per failure) so
-//! that operators inspecting frame-level logs can see exactly
-//! which detectors failed where, but we don't surface the
-//! errors upward — Stage C's contract is "best horizon found,
-//! or None."
+//! The reflection-pair provider still runs as a second pass —
+//! it depends on Stage B body candidates that are not available
+//! when Stage C first runs. The second-pass entry point
+//! [`merge_reflection_pair`] re-runs the fuser over the prior
+//! hypotheses plus the new one.
 
 use crate::config::EngineConfig;
 use crate::pipeline::horizon_providers::{
@@ -54,7 +30,8 @@ use crate::pipeline::horizon_providers::{
 };
 use bris_core::time::Tt;
 use bris_vision::{
-    BodyCandidate, Condition, Frame, FramePyramid, HorizonLine, HorizonProvenance, HorizonProvider,
+    fuse_horizon_hypotheses, BodyCandidate, Condition, DirectSight, Frame, FramePyramid,
+    FusionMode, HorizonHypothesis, HorizonLine, HorizonProvenance, HorizonProvider,
     HorizonProviderContext, Intrinsics, PositionPrior,
 };
 use tracing::{debug, trace};
@@ -63,39 +40,31 @@ use tracing::{debug, trace};
 use crate::pipeline::horizon_providers::SegmentationProvider;
 
 /// Outcome of one frame's pass through Stage C.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub(crate) enum HorizonStageOutcome {
     /// A horizon line was detected. Carries the detector that
     /// produced it (for diagnostics) and the line itself.
     Detected {
-        /// Which detector produced the line. Useful for
-        /// diagnostics and for the eventual stitching σ
-        /// estimate (different detectors have different
-        /// per-frame jitter).
+        /// Which detector produced the line.
         detector: HorizonDetector,
         /// Provenance of the winning hypothesis, preserved
         /// for diagnostics surfaces (HUD / submissions) that
-        /// want the provider-specific payload (e.g.
-        /// reflection-pair pair count) rather than just the
-        /// detector discriminant.
+        /// want the provider-specific payload rather than just
+        /// the detector discriminant.
         provenance: HorizonProvenance,
         /// The horizon line, with its `altitude_sigma`.
         line: HorizonLine,
-        /// Direct sight emitted alongside the horizon (e.g.
-        /// reflection-pair's `Ho = θ/2`). `None` for optical
-        /// detectors. Stage E consumes this when present
-        /// instead of computing a sight via `measure_altitude`.
-        direct_sight: Option<bris_vision::DirectSight>,
+        /// Direct sights from any providers that contributed
+        /// to this outcome. Empty for purely-optical outcomes;
+        /// non-empty when the reflection-pair provider (or any
+        /// future direct-sight-emitting provider) participated.
+        direct_sights: Vec<DirectSight>,
     },
     /// No detector produced a horizon for this frame.
     None,
 }
 
 /// Identifier for the horizon detector that produced a line.
-///
-/// Numbered in order of evaluation so the diagnostics surface
-/// can summarize "the cheap detectors are sufficient" vs "we
-/// keep falling through to segmentation."
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum HorizonDetector {
     /// [`bris_vision::detect_horizon`] (gradient).
@@ -106,28 +75,62 @@ pub(crate) enum HorizonDetector {
     Night,
     /// [`bris_vision::detect_horizon_night_textured`].
     NightTextured,
-    /// `bris_vision::detect_horizon_via_segmentation`. Only
-    /// constructible when the `segmentation` feature is
-    /// enabled.
+    /// `bris_vision::detect_horizon_via_segmentation`.
     Segmentation,
-    /// Auto-detected reflection-pair provider (Phase 1 of the
-    /// horizon-providers roadmap; see
-    /// `docs/design/horizon_autodetect.md`).
+    /// Auto-detected reflection-pair provider.
     ReflectionPair,
     /// Auto-detected single near-vertical line (plumb / edge).
-    /// See `docs/design/horizon_brainstorm.md` §B3.
     VerticalLine,
-    /// Auto-detected vanishing-point provider (Manhattan-world
-    /// scenes). See `docs/design/horizon_autodetect.md` §5.
+    /// Auto-detected vanishing-point provider (Manhattan-world).
     VanishingPoint,
+    /// Multi-source fusion of ≥ 2 concordant hypotheses.
+    Fused,
+}
+
+/// Per-frame fusion bookkeeping. Returned to the engine for
+/// folding into [`crate::EngineDiagnostics`].
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct FusionStats {
+    /// Cluster size on this frame (≥ 2 means a fused result).
+    /// Zero if no hypothesis was produced.
+    pub cluster_size: usize,
+    /// True iff ≥ 2 providers produced concordant hypotheses
+    /// and were fused.
+    pub clustered: bool,
+    /// True iff ≥ 2 providers produced hypotheses but none
+    /// were concordant; outcome is the lowest-σ singleton.
+    pub discordant: bool,
+    /// True iff exactly one provider produced a hypothesis.
+    pub singleton: bool,
+}
+
+/// Per-frame bookkeeping for the vanishing-point provider's
+/// participation in the dispatch.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct VanishingPointDispatch {
+    pub stats: bris_vision::VanishingPointStats,
+    pub invoked: bool,
+    pub used: bool,
+}
+
+/// Per-frame bookkeeping for the vertical-line provider.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct VerticalLineDispatch {
+    pub stats: bris_vision::VerticalLineStats,
+    pub hypothesized: bool,
+    pub used: bool,
+}
+
+/// Aggregate per-frame Stage C diagnostics that are not the
+/// horizon outcome itself.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct StageCStats {
+    pub fusion: FusionStats,
+    pub vertical_line: VerticalLineDispatch,
+    pub vanishing_point: VanishingPointDispatch,
 }
 
 /// Run Stage C on one frame.
-///
-/// `condition` is the Stage A verdict; it gates which detectors
-/// are tried first. The returned outcome carries the best-σ
-/// horizon found across all attempts, or
-/// [`HorizonStageOutcome::None`] if no detector succeeded.
 #[allow(clippy::too_many_lines)] // dispatch fan-out is inherently long; refactoring fragments the per-condition flow
 pub(crate) fn detect(
     pyramid: &FramePyramid,
@@ -136,21 +139,14 @@ pub(crate) fn detect(
     body_candidates: &[BodyCandidate],
     position_prior: Option<PositionPrior>,
     timestamp: Tt,
-) -> (HorizonStageOutcome, (u32, u32), VanishingPointDispatch) {
-    let mut best: Option<(HorizonDetector, HorizonProvenance, HorizonLine)> = None;
-
-    let early_term = cfg.horizon_early_termination_sigma_rad;
-    let day_first = matches!(condition, Condition::Day | Condition::Twilight);
-    let night_first = matches!(condition, Condition::Night | Condition::Twilight);
-    // Unusable: skip Stage C entirely. The classifier said the
-    // frame has nothing actionable; running the heavy detectors
-    // would just waste time.
+) -> (HorizonStageOutcome, (u32, u32), StageCStats) {
+    let analyzed_size_full = (pyramid.full_width(), pyramid.full_height());
     if matches!(condition, Condition::Unusable) {
         debug!("Stage C skipped: classifier reported Unusable");
         return (
             HorizonStageOutcome::None,
-            (pyramid.full_width(), pyramid.full_height()),
-            VanishingPointDispatch::default(),
+            analyzed_size_full,
+            StageCStats::default(),
         );
     }
 
@@ -181,279 +177,167 @@ pub(crate) fn detect(
         position_prior,
         timestamp,
     };
-    // Last-emitted direct sight (if any) from a provider that
-    // produced one. Phase 1 has only one such provider
-    // (reflection-pair); when more land the cheap-first /
-    // best-σ winner determines which direct sight propagates.
-    let mut best_direct_sight: Option<bris_vision::DirectSight> = None;
+
+    let early_term = cfg.horizon_early_termination_sigma_rad;
+    let day_first = matches!(condition, Condition::Day | Condition::Twilight);
+    let night_first = matches!(condition, Condition::Night | Condition::Twilight);
+
+    let mut hypotheses: Vec<HorizonHypothesis> = Vec::with_capacity(6);
+    let mut stats = StageCStats::default();
 
     if day_first {
-        run_provider(
-            &GradientProvider { cfg },
-            &ctx,
-            &mut best,
-            &mut best_direct_sight,
-        );
-        if early_terminate(best.as_ref(), early_term) {
-            return (
-                finish(best, best_direct_sight),
+        run_provider(&GradientProvider { cfg }, &ctx, &mut hypotheses);
+        if best_below(&hypotheses, early_term) {
+            return finish(
+                &hypotheses,
+                &intrinsics,
+                frame.width(),
+                cfg,
                 analyzed_size,
-                VanishingPointDispatch::default(),
+                stats,
             );
         }
-        run_provider(
-            &SkyRegionProvider { cfg },
-            &ctx,
-            &mut best,
-            &mut best_direct_sight,
-        );
-        if early_terminate(best.as_ref(), early_term) {
-            return (
-                finish(best, best_direct_sight),
+        run_provider(&SkyRegionProvider { cfg }, &ctx, &mut hypotheses);
+        if best_below(&hypotheses, early_term) {
+            return finish(
+                &hypotheses,
+                &intrinsics,
+                frame.width(),
+                cfg,
                 analyzed_size,
-                VanishingPointDispatch::default(),
+                stats,
             );
         }
     }
     if night_first {
-        run_provider(
-            &NightProvider { cfg },
-            &ctx,
-            &mut best,
-            &mut best_direct_sight,
-        );
-        if early_terminate(best.as_ref(), early_term) {
-            return (
-                finish(best, best_direct_sight),
+        run_provider(&NightProvider { cfg }, &ctx, &mut hypotheses);
+        if best_below(&hypotheses, early_term) {
+            return finish(
+                &hypotheses,
+                &intrinsics,
+                frame.width(),
+                cfg,
                 analyzed_size,
-                VanishingPointDispatch::default(),
+                stats,
             );
         }
-        run_provider(
-            &NightTexturedProvider { cfg },
-            &ctx,
-            &mut best,
-            &mut best_direct_sight,
-        );
-        if early_terminate(best.as_ref(), early_term) {
-            return (
-                finish(best, best_direct_sight),
+        run_provider(&NightTexturedProvider { cfg }, &ctx, &mut hypotheses);
+        if best_below(&hypotheses, early_term) {
+            return finish(
+                &hypotheses,
+                &intrinsics,
+                frame.width(),
+                cfg,
                 analyzed_size,
-                VanishingPointDispatch::default(),
+                stats,
             );
         }
-        let _ = body_candidates;
     }
-    // Last resort optical: segmentation.
-    run_segmentation(&ctx, cfg, &mut best, &mut best_direct_sight);
-    // Vertical-line provider runs as a second pass via
-    // [`merge_vertical_line`] so its per-frame stats land in
-    // a single, consistent counter path. It is independent of
-    // Stage B body candidates (the operator's plumb string is
-    // the evidence) but the merge structure mirrors
-    // [`merge_reflection_pair`] for symmetry.
-    //
-    // Vanishing-point provider runs after the cheap optical
-    // providers and segmentation: it is the most expensive of
-    // the auto-horizon providers (RANSAC over edgels). Skip
-    // entirely if a cheap detector already cleared the
-    // early-termination threshold.
-    let mut vp_stats = bris_vision::VanishingPointStats::default();
-    let mut vp_invoked = false;
-    let mut vp_used = false;
-    if !early_terminate(best.as_ref(), early_term) {
-        vp_invoked = true;
+    run_segmentation(&ctx, cfg, &mut hypotheses);
+    if best_below(&hypotheses, early_term) {
+        return finish(
+            &hypotheses,
+            &intrinsics,
+            frame.width(),
+            cfg,
+            analyzed_size,
+            stats,
+        );
+    }
+
+    // Vertical-line provider: independent of body candidates.
+    {
+        let provider = bris_vision::VerticalLineProvider {
+            config: cfg.vertical_line_provider_config,
+        };
+        if let Some(hyp) = provider.detect_with_stats(&ctx, &mut stats.vertical_line.stats) {
+            trace!(
+                provider = "vertical-line",
+                sigma_rad = hyp.line.altitude_sigma.value(),
+                "Stage C: provider produced hypothesis"
+            );
+            stats.vertical_line.hypothesized = true;
+            hypotheses.push(hyp);
+        }
+    }
+    if best_below(&hypotheses, early_term) {
+        return finish(
+            &hypotheses,
+            &intrinsics,
+            frame.width(),
+            cfg,
+            analyzed_size,
+            stats,
+        );
+    }
+
+    // Vanishing-point provider (most expensive).
+    {
+        stats.vanishing_point.invoked = true;
         let provider = bris_vision::VanishingPointProvider {
             config: cfg.vanishing_point_provider_config,
         };
-        if let Some(hyp) = provider.detect_with_stats(&ctx, &mut vp_stats) {
-            let detector = detector_from_provenance(hyp.provenance);
-            let improved = match best {
-                Some((_, _, ref existing)) => hyp.line.altitude_sigma < existing.altitude_sigma,
-                None => true,
-            };
-            if improved {
-                best = Some((detector, hyp.provenance, hyp.line));
-                best_direct_sight = hyp.direct_sight;
-                vp_used = true;
-            }
+        if let Some(hyp) = provider.detect_with_stats(&ctx, &mut stats.vanishing_point.stats) {
+            trace!(
+                provider = "vanishing-point",
+                sigma_rad = hyp.line.altitude_sigma.value(),
+                "Stage C: provider produced hypothesis"
+            );
+            hypotheses.push(hyp);
         }
     }
-    (
-        finish(best, best_direct_sight),
+
+    finish(
+        &hypotheses,
+        &intrinsics,
+        frame.width(),
+        cfg,
         analyzed_size,
-        VanishingPointDispatch {
-            stats: vp_stats,
-            invoked: vp_invoked,
-            used: vp_used,
-        },
+        stats,
     )
 }
 
-/// Per-frame bookkeeping for the vanishing-point provider's
-/// participation in the dispatch. Plumbed into
-/// [`crate::EngineDiagnostics`].
-#[derive(Debug, Clone, Copy, Default)]
-pub(crate) struct VanishingPointDispatch {
-    pub stats: bris_vision::VanishingPointStats,
-    pub invoked: bool,
-    pub used: bool,
+/// Returns true iff the smallest-σ hypothesis collected so far
+/// is at or below the early-termination threshold.
+fn best_below(hypotheses: &[HorizonHypothesis], early_term_sigma_rad: f64) -> bool {
+    hypotheses
+        .iter()
+        .map(|h| h.line.altitude_sigma.value())
+        .fold(f64::INFINITY, f64::min)
+        <= early_term_sigma_rad
 }
 
-/// Run the reflection-pair provider against an already-
-/// computed [`HorizonStageOutcome`] and merge by best-σ.
-///
-/// The first-pass `detect()` runs the *optical* providers
-/// with empty body candidates (horizon must run before Stage
-/// B to mask night peaks). Once Stage B has populated body
-/// candidates this helper runs the reflection-pair provider
-/// with them and merges its hypothesis into the existing
-/// outcome under the same trait-driven best-σ rule used by
-/// [`run_provider`]. Returns the (possibly updated) outcome
-/// plus per-frame stats and merge bookkeeping.
-pub(crate) struct ReflectionPairMerge {
-    pub outcome: HorizonStageOutcome,
-    pub stats: bris_vision::ReflectionPairStats,
-    /// Provider returned `Some(hypothesis)`.
-    pub hypothesized: bool,
-    /// Hypothesis won the merge (smallest σ) and is the
-    /// new outcome.
-    pub used: bool,
-}
-
-pub(crate) fn merge_reflection_pair(
-    prev: HorizonStageOutcome,
-    ctx: &HorizonProviderContext<'_>,
-) -> ReflectionPairMerge {
-    let mut stats = bris_vision::ReflectionPairStats::default();
-    let provider = bris_vision::ReflectionPairProvider::default();
-    let Some(hyp) = provider.detect_with_stats(ctx, &mut stats) else {
-        return ReflectionPairMerge {
-            outcome: prev,
-            stats,
-            hypothesized: false,
-            used: false,
-        };
-    };
-    // Seed `best` from the previous outcome (if any) and use
-    // the same best-σ merge as the first-pass dispatcher.
-    let mut best: Option<(HorizonDetector, HorizonProvenance, HorizonLine)> = match prev {
-        HorizonStageOutcome::Detected {
-            detector,
-            provenance,
-            line,
-            ..
-        } => Some((detector, provenance, line)),
-        HorizonStageOutcome::None => None,
-    };
-    let mut best_direct_sight: Option<bris_vision::DirectSight> = match prev {
-        HorizonStageOutcome::Detected { direct_sight, .. } => direct_sight,
-        HorizonStageOutcome::None => None,
-    };
-    let detector = detector_from_provenance(hyp.provenance);
-    let improved = match best {
-        Some((_, _, ref existing)) => hyp.line.altitude_sigma < existing.altitude_sigma,
-        None => true,
-    };
-    if improved {
-        best = Some((detector, hyp.provenance, hyp.line));
-        best_direct_sight = hyp.direct_sight;
-    }
-    let used = improved;
-    let outcome = finish(best, best_direct_sight);
-    ReflectionPairMerge {
-        outcome,
-        stats,
-        hypothesized: true,
-        used,
-    }
-}
-
-/// Outcome of a [`merge_vertical_line`] call.
-pub(crate) struct VerticalLineMerge {
-    pub outcome: HorizonStageOutcome,
-    pub stats: bris_vision::VerticalLineStats,
-    /// Provider returned a hypothesis.
-    pub hypothesized: bool,
-    /// Hypothesis won the best-σ merge.
-    pub used: bool,
-}
-
-/// Run the vertical-line provider against an already-computed
-/// [`HorizonStageOutcome`] and merge by best-σ.
-pub(crate) fn merge_vertical_line(
-    prev: HorizonStageOutcome,
-    ctx: &HorizonProviderContext<'_>,
-    cfg: &EngineConfig,
-) -> VerticalLineMerge {
-    let mut stats = bris_vision::VerticalLineStats::default();
-    let provider = bris_vision::VerticalLineProvider {
-        config: cfg.vertical_line_provider_config,
-    };
-    let Some(hyp) = provider.detect_with_stats(ctx, &mut stats) else {
-        return VerticalLineMerge {
-            outcome: prev,
-            stats,
-            hypothesized: false,
-            used: false,
-        };
-    };
-    let mut best: Option<(HorizonDetector, HorizonProvenance, HorizonLine)> = match prev {
-        HorizonStageOutcome::Detected {
-            detector,
-            provenance,
-            line,
-            ..
-        } => Some((detector, provenance, line)),
-        HorizonStageOutcome::None => None,
-    };
-    let mut best_direct_sight: Option<bris_vision::DirectSight> = match prev {
-        HorizonStageOutcome::Detected { direct_sight, .. } => direct_sight,
-        HorizonStageOutcome::None => None,
-    };
-    let detector = detector_from_provenance(hyp.provenance);
-    let improved = match best {
-        Some((_, _, ref existing)) => hyp.line.altitude_sigma < existing.altitude_sigma,
-        None => true,
-    };
-    if improved {
-        best = Some((detector, hyp.provenance, hyp.line));
-        best_direct_sight = hyp.direct_sight;
-    }
-    VerticalLineMerge {
-        outcome: finish(best, best_direct_sight),
-        stats,
-        hypothesized: true,
-        used: improved,
-    }
-}
-
-/// Run one provider; update `best` (smallest σ wins) and
-/// record the winning hypothesis's direct sight, if any.
 fn run_provider<P: HorizonProvider>(
     provider: &P,
     ctx: &HorizonProviderContext<'_>,
-    best: &mut Option<(HorizonDetector, HorizonProvenance, HorizonLine)>,
-    best_direct_sight: &mut Option<bris_vision::DirectSight>,
+    out: &mut Vec<HorizonHypothesis>,
 ) {
-    let Some(hyp) = provider.detect(ctx) else {
-        return;
-    };
-    let detector = detector_from_provenance(hyp.provenance);
-    trace!(
-        detector = ?detector,
-        sigma_rad = hyp.line.altitude_sigma.value(),
-        inliers = hyp.line.inlier_count,
-        "Stage C: provider produced hypothesis"
-    );
-    let improved = match best {
-        Some((_, _, existing)) => hyp.line.altitude_sigma < existing.altitude_sigma,
-        None => true,
-    };
-    if improved {
-        *best = Some((detector, hyp.provenance, hyp.line));
-        *best_direct_sight = hyp.direct_sight;
+    if let Some(hyp) = provider.detect(ctx) {
+        trace!(
+            provider = provider.name(),
+            sigma_rad = hyp.line.altitude_sigma.value(),
+            inliers = hyp.line.inlier_count,
+            "Stage C: provider produced hypothesis"
+        );
+        out.push(hyp);
     }
+}
+
+#[cfg(feature = "segmentation")]
+fn run_segmentation(
+    ctx: &HorizonProviderContext<'_>,
+    cfg: &EngineConfig,
+    out: &mut Vec<HorizonHypothesis>,
+) {
+    run_provider(&SegmentationProvider { cfg }, ctx, out);
+}
+
+#[cfg(not(feature = "segmentation"))]
+fn run_segmentation(
+    _ctx: &HorizonProviderContext<'_>,
+    _cfg: &EngineConfig,
+    _out: &mut Vec<HorizonHypothesis>,
+) {
 }
 
 fn detector_from_provenance(p: HorizonProvenance) -> HorizonDetector {
@@ -462,35 +346,141 @@ fn detector_from_provenance(p: HorizonProvenance) -> HorizonDetector {
         HorizonProvenance::ReflectionPair { .. } => HorizonDetector::ReflectionPair,
         HorizonProvenance::VerticalLine { .. } => HorizonDetector::VerticalLine,
         HorizonProvenance::VanishingPoint { .. } => HorizonDetector::VanishingPoint,
+        HorizonProvenance::Fused { .. } => HorizonDetector::Fused,
     }
 }
 
-#[cfg(feature = "segmentation")]
-fn run_segmentation(
-    ctx: &HorizonProviderContext<'_>,
+fn finish(
+    hypotheses: &[HorizonHypothesis],
+    intrinsics: &Intrinsics,
+    image_width: u32,
     cfg: &EngineConfig,
-    best: &mut Option<(HorizonDetector, HorizonProvenance, HorizonLine)>,
-    best_direct_sight: &mut Option<bris_vision::DirectSight>,
-) {
-    let provider = SegmentationProvider { cfg };
-    run_provider(&provider, ctx, best, best_direct_sight);
+    analyzed_size: (u32, u32),
+    mut stats: StageCStats,
+) -> (HorizonStageOutcome, (u32, u32), StageCStats) {
+    let (outcome, fusion) = fuse_to_outcome(hypotheses, intrinsics, image_width, cfg);
+    // Mark which optional providers actually won.
+    if let HorizonStageOutcome::Detected { detector, .. } = &outcome {
+        if *detector == HorizonDetector::VerticalLine {
+            stats.vertical_line.used = true;
+        }
+        if *detector == HorizonDetector::VanishingPoint {
+            stats.vanishing_point.used = true;
+        }
+    }
+    stats.fusion = fusion;
+    (outcome, analyzed_size, stats)
 }
 
-#[cfg(not(feature = "segmentation"))]
-fn run_segmentation(
-    _ctx: &HorizonProviderContext<'_>,
-    _cfg: &EngineConfig,
-    _best: &mut Option<(HorizonDetector, HorizonProvenance, HorizonLine)>,
-    _best_direct_sight: &mut Option<bris_vision::DirectSight>,
-) {
-    // Segmentation feature disabled at compile time.
+/// Run the fuser and translate its result into the engine's
+/// [`HorizonStageOutcome`] + [`FusionStats`].
+fn fuse_to_outcome(
+    hypotheses: &[HorizonHypothesis],
+    intrinsics: &Intrinsics,
+    image_width: u32,
+    cfg: &EngineConfig,
+) -> (HorizonStageOutcome, FusionStats) {
+    if hypotheses.is_empty() {
+        return (HorizonStageOutcome::None, FusionStats::default());
+    }
+    let fused = fuse_horizon_hypotheses(hypotheses, intrinsics, image_width, &cfg.horizon_fusion);
+    let Some(hyp) = fused.hypothesis else {
+        return (HorizonStageOutcome::None, FusionStats::default());
+    };
+    let detector = detector_from_provenance(hyp.provenance);
+    let mut direct_sights = fused.direct_sights;
+    if direct_sights.is_empty() {
+        if let Some(ds) = hyp.direct_sight {
+            direct_sights.push(ds);
+        }
+    }
+    let stats = FusionStats {
+        cluster_size: fused.cluster_size,
+        clustered: fused.mode == FusionMode::Clustered,
+        discordant: fused.mode == FusionMode::Discordant,
+        singleton: matches!(fused.mode, FusionMode::Singleton | FusionMode::Disabled)
+            && hypotheses.len() == 1,
+    };
+    (
+        HorizonStageOutcome::Detected {
+            detector,
+            provenance: hyp.provenance,
+            line: hyp.line,
+            direct_sights,
+        },
+        stats,
+    )
+}
+
+/// Merge the reflection-pair provider's hypothesis into a
+/// previously-computed Stage C outcome.
+pub(crate) struct ReflectionPairMerge {
+    pub outcome: HorizonStageOutcome,
+    pub stats: bris_vision::ReflectionPairStats,
+    pub hypothesized: bool,
+    pub used: bool,
+    pub fusion: FusionStats,
+}
+
+pub(crate) fn merge_reflection_pair(
+    prev: HorizonStageOutcome,
+    ctx: &HorizonProviderContext<'_>,
+    cfg: &EngineConfig,
+) -> ReflectionPairMerge {
+    let mut stats = bris_vision::ReflectionPairStats::default();
+    let provider = bris_vision::ReflectionPairProvider::default();
+    let Some(hyp) = provider.detect_with_stats(ctx, &mut stats) else {
+        let fusion = FusionStats {
+            singleton: matches!(prev, HorizonStageOutcome::Detected { .. }),
+            ..FusionStats::default()
+        };
+        return ReflectionPairMerge {
+            outcome: prev,
+            stats,
+            hypothesized: false,
+            used: false,
+            fusion,
+        };
+    };
+    // Build a hypotheses list from prev (if any) + the new
+    // reflection-pair hypothesis. `prev` may already be a fused
+    // result; we treat it as a single "best-evidence" hypothesis
+    // with its own σ and provenance.
+    let mut hypotheses: Vec<HorizonHypothesis> = Vec::with_capacity(2);
+    if let HorizonStageOutcome::Detected {
+        line,
+        direct_sights,
+        provenance,
+        ..
+    } = &prev
+    {
+        hypotheses.push(HorizonHypothesis {
+            line: *line,
+            provenance: *provenance,
+            direct_sight: direct_sights.first().copied(),
+        });
+    }
+    let rp_sigma = hyp.line.altitude_sigma.value();
+    hypotheses.push(hyp);
+    let (outcome, fusion) = fuse_to_outcome(&hypotheses, ctx.intrinsics, ctx.frame.width(), cfg);
+    let used = match &outcome {
+        HorizonStageOutcome::Detected { detector, line, .. } => {
+            *detector == HorizonDetector::ReflectionPair
+                || *detector == HorizonDetector::Fused
+                || line.altitude_sigma.value() <= rp_sigma
+        }
+        HorizonStageOutcome::None => false,
+    };
+    ReflectionPairMerge {
+        outcome,
+        stats,
+        hypothesized: true,
+        used,
+        fusion,
+    }
 }
 
 /// Cheap copy-on-write wrapper for the analysis-resolution frame.
-/// Either we borrow the pyramid's full frame (no downsample) or
-/// own a freshly-cloned downsampled level. Both expose the same
-/// `&Frame` view to the per-detector helpers, which already
-/// take `&Frame` and don't care about ownership.
 enum CowFrame<'a> {
     Borrowed(&'a Frame),
     Owned(Frame),
@@ -502,33 +492,6 @@ impl CowFrame<'_> {
             Self::Borrowed(f) => f,
             Self::Owned(f) => f,
         }
-    }
-}
-
-/// True iff the current best horizon's σ is at or below the
-/// early-termination threshold (and a best exists at all).
-fn early_terminate(
-    best: Option<&(HorizonDetector, HorizonProvenance, HorizonLine)>,
-    early_term_sigma_rad: f64,
-) -> bool {
-    match best {
-        Some((_, _, line)) => line.altitude_sigma.value() <= early_term_sigma_rad,
-        None => false,
-    }
-}
-
-fn finish(
-    best: Option<(HorizonDetector, HorizonProvenance, HorizonLine)>,
-    direct_sight: Option<bris_vision::DirectSight>,
-) -> HorizonStageOutcome {
-    match best {
-        Some((detector, provenance, line)) => HorizonStageOutcome::Detected {
-            detector,
-            provenance,
-            line,
-            direct_sight,
-        },
-        None => HorizonStageOutcome::None,
     }
 }
 
@@ -547,10 +510,6 @@ mod tests {
     use bris_core::time::{Tt, JD_J2000};
     use bris_vision::{Frame, Intrinsics};
 
-    /// A synthetic 64×64 frame with a sharp horizontal sky/sea
-    /// boundary at row `horizon_y`: bright above, dark below.
-    /// The gradient detector should find a horizontal line at
-    /// (or very close to) `y = horizon_y`.
     fn synthetic_horizon(horizon_y: u32) -> Frame {
         let w = 64_u32;
         let h = 64_u32;
@@ -587,10 +546,6 @@ mod tests {
 
     #[test]
     fn day_synthetic_horizon_detected_by_cheap_detector() {
-        // The synthetic horizon is a textbook case for the
-        // gradient detector. Stage C should detect it; the
-        // returned horizon's σ should be small (synthetic data
-        // gives sub-arcsec residuals).
         let cfg = EngineConfig::new(Observer::default_dev());
         let frame = synthetic_horizon(32);
         let (outcome, _, _) = detect(
@@ -603,24 +558,20 @@ mod tests {
         );
         match outcome {
             HorizonStageOutcome::Detected { detector, line, .. } => {
-                // Detector should be one of the cheap day-path
-                // detectors; segmentation isn't enabled by path.
                 assert!(
                     matches!(
                         detector,
-                        HorizonDetector::Gradient | HorizonDetector::SkyRegion
+                        HorizonDetector::Gradient
+                            | HorizonDetector::SkyRegion
+                            | HorizonDetector::Fused
                     ),
-                    "expected a day-path detector, got {detector:?}"
+                    "expected a day-path detector or fused, got {detector:?}"
                 );
-                // Intercept should be near the true horizon row
-                // (32). Tolerance generous because the gradient
-                // detector centers between bright and dark rows.
                 assert!(
                     (line.intercept - 32.0).abs() < 5.0,
                     "horizon intercept {} too far from synthetic 32",
                     line.intercept
                 );
-                // σ should be small for a synthetic frame.
                 assert!(
                     line.altitude_sigma.value() < 0.01,
                     "σ {} unexpectedly large for synthetic horizon",
@@ -648,9 +599,6 @@ mod tests {
 
     #[test]
     fn night_path_dispatched_for_night_classification() {
-        // Night detectors have a hard time with synthetic
-        // textureless frames; we mostly assert they don't panic
-        // and that the day-path detectors aren't tried.
         let cfg = EngineConfig::new(Observer::default_dev());
         let frame = dark_frame();
         let (outcome, _, _) = detect(
@@ -661,67 +609,28 @@ mod tests {
             None,
             frame.capture_tt,
         );
-        // Either a Night/NightTextured detection or None;
-        // never a day-path detector.
         match outcome {
             HorizonStageOutcome::Detected { detector, .. } => {
                 assert!(
                     matches!(
                         detector,
-                        HorizonDetector::Night | HorizonDetector::NightTextured
+                        HorizonDetector::Night
+                            | HorizonDetector::NightTextured
+                            | HorizonDetector::VerticalLine
+                            | HorizonDetector::VanishingPoint
+                            | HorizonDetector::Fused
                     ),
                     "night classification should not select day detectors, got {detector:?}"
                 );
             }
             HorizonStageOutcome::None => {
-                // Acceptable: textureless dark frame, neither
-                // night detector finds anything.
+                // Acceptable: textureless dark frame.
             }
-        }
-    }
-
-    #[test]
-    fn early_termination_skips_more_expensive_detectors() {
-        // With a synthetic horizon and the default 1-arcmin
-        // early-termination threshold, the gradient detector
-        // alone should produce a horizon below threshold and
-        // sky-region/segmentation should not be invoked. We
-        // verify by checking that the detector that produced
-        // the result is the gradient one.
-        let cfg = EngineConfig::new(Observer::default_dev());
-        let frame = synthetic_horizon(32);
-        let (outcome, _, _) = detect(
-            &FramePyramid::new(frame.clone()),
-            Condition::Day,
-            &cfg,
-            &[],
-            None,
-            frame.capture_tt,
-        );
-        match outcome {
-            HorizonStageOutcome::Detected { detector, .. } => {
-                // Allow either the gradient or sky-region
-                // detector to claim the win — both are cheap;
-                // both terminate early. The point is that
-                // segmentation never ran (asserted by the
-                // detector identity).
-                assert_ne!(
-                    detector,
-                    HorizonDetector::Segmentation,
-                    "segmentation should not run when a cheap detector terminated early"
-                );
-            }
-            HorizonStageOutcome::None => panic!("expected synthetic horizon to be detected"),
         }
     }
 
     #[test]
     fn segmentation_skipped_when_path_unset() {
-        // Default config has segmentation_model_path = None;
-        // the segmentation detector must not be tried.
-        // Engineering check: the helper `try_segmentation`
-        // returns early on None path (verified above by the
-        // early-termination test, but make it explicit here).
         let cfg = EngineConfig::new(Observer::default_dev());
         assert!(
             cfg.segmentation_model_path.is_none(),

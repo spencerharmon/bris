@@ -75,8 +75,8 @@ mod stage_d;
 mod stage_e;
 
 pub(crate) use horizon::{
-    merge_reflection_pair, merge_vertical_line, HorizonStageOutcome, ReflectionPairMerge,
-    VanishingPointDispatch, VerticalLineMerge,
+    merge_reflection_pair, FusionStats, HorizonStageOutcome, ReflectionPairMerge,
+    VanishingPointDispatch,
 };
 pub(crate) use hysteresis::ClassifierHysteresis;
 pub(crate) use queue::{FrameId, Storage};
@@ -190,10 +190,12 @@ pub(crate) struct StageOutcome {
     /// horizon outcome surfaced from this frame.
     pub vertical_line_used: bool,
     /// Vanishing-point provider dispatch bookkeeping for this
-    /// frame. Captures per-frame counters plus whether the
-    /// provider was invoked / used; folded into engine-level
-    /// diagnostics.
+    /// frame.
     pub vanishing_point_dispatch: VanishingPointDispatch,
+    /// Fusion-layer per-frame stats. Folded into engine
+    /// diagnostics so operators can see how often providers
+    /// agree / disagree.
+    pub fusion_stats: FusionStats,
 }
 
 /// Process one frame through Stages A, B, and C synchronously.
@@ -245,7 +247,7 @@ pub(crate) fn process_frame(
     // ≥ 2 Night peaks the pipeline re-runs Stage C with the
     // candidates so the reflection-pair provider can
     // contribute. See docs/design/horizon_autodetect.md §3.
-    let (mut horizon, horizon_analyzed_size, vp_dispatch) = horizon::detect(
+    let (mut horizon, horizon_analyzed_size, mut stage_c_stats) = horizon::detect(
         pyramid,
         dispatched_condition,
         cfg,
@@ -253,7 +255,7 @@ pub(crate) fn process_frame(
         position_prior,
         frame.capture_tt,
     );
-    if let HorizonStageOutcome::Detected { detector, line, .. } = horizon {
+    if let HorizonStageOutcome::Detected { detector, line, .. } = &horizon {
         trace!(
             detector = ?detector,
             sigma_rad = line.altitude_sigma.value(),
@@ -271,8 +273,8 @@ pub(crate) fn process_frame(
     // sky-pointed frames legitimately contain no horizon, and
     // the cross-frame stitching layer attaches such frames to a
     // horizon measured on a neighbouring frame.
-    let horizon_line = match horizon {
-        HorizonStageOutcome::Detected { line, .. } => Some(line),
+    let horizon_line = match &horizon {
+        HorizonStageOutcome::Detected { line, .. } => Some(*line),
         HorizonStageOutcome::None => None,
     };
     let body = match dispatched_condition {
@@ -333,48 +335,19 @@ pub(crate) fn process_frame(
             timestamp: frame.capture_tt,
         };
         reflection_pair_invoked = true;
-        let merge = merge_reflection_pair(horizon, &ctx);
+        let merge = merge_reflection_pair(horizon, &ctx, cfg);
         let ReflectionPairMerge {
             outcome,
             stats,
             hypothesized,
             used,
+            fusion,
         } = merge;
         horizon = outcome;
         reflection_pair_stats = stats;
         reflection_pair_hypothesized = hypothesized;
         reflection_pair_used = used;
-    }
-
-    // ---- Stage C (third pass): vertical-line provider ----
-    //
-    // Fires in all conditions (Day, Night, Twilight) and is
-    // independent of body candidates — the operator's plumb
-    // string / vertical edge is the evidence. Merged by best-σ
-    // through the same path used by the optical providers and
-    // the reflection-pair provider.
-    let mut vertical_line_stats = bris_vision::VerticalLineStats::default();
-    let mut vertical_line_hypothesized = false;
-    let mut vertical_line_used = false;
-    if !matches!(dispatched_condition, Condition::Unusable) {
-        let ctx = bris_vision::HorizonProviderContext {
-            frame,
-            intrinsics: &frame.intrinsics,
-            body_candidates: &body_candidates,
-            position_prior,
-            timestamp: frame.capture_tt,
-        };
-        let merge = merge_vertical_line(horizon, &ctx, cfg);
-        let VerticalLineMerge {
-            outcome,
-            stats,
-            hypothesized,
-            used,
-        } = merge;
-        horizon = outcome;
-        vertical_line_stats = stats;
-        vertical_line_hypothesized = hypothesized;
-        vertical_line_used = used;
+        stage_c_stats.fusion = fusion;
     }
 
     StageOutcome {
@@ -388,10 +361,11 @@ pub(crate) fn process_frame(
         reflection_pair_invoked,
         reflection_pair_hypothesized,
         reflection_pair_used,
-        vertical_line_stats,
-        vertical_line_hypothesized,
-        vertical_line_used,
-        vanishing_point_dispatch: vp_dispatch,
+        vertical_line_stats: stage_c_stats.vertical_line.stats,
+        vertical_line_hypothesized: stage_c_stats.vertical_line.hypothesized,
+        vertical_line_used: stage_c_stats.vertical_line.used,
+        vanishing_point_dispatch: stage_c_stats.vanishing_point,
+        fusion_stats: stage_c_stats.fusion,
     }
 }
 
@@ -938,11 +912,20 @@ mod tests {
         match outcome.horizon {
             HorizonStageOutcome::Detected {
                 detector,
-                direct_sight,
+                direct_sights,
                 ..
             } => {
-                assert_eq!(detector, horizon::HorizonDetector::ReflectionPair);
-                let sight = direct_sight.expect("reflection-pair must emit a direct sight");
+                assert!(
+                    matches!(
+                        detector,
+                        horizon::HorizonDetector::ReflectionPair | horizon::HorizonDetector::Fused
+                    ),
+                    "expected ReflectionPair or Fused, got {detector:?}"
+                );
+                let sight = direct_sights
+                    .first()
+                    .copied()
+                    .expect("reflection-pair must emit a direct sight");
                 let v = sight.observed_altitude.value;
                 assert!(
                     (0.04..=0.08).contains(&v),
@@ -1060,11 +1043,14 @@ mod tests {
         match outcome.horizon {
             HorizonStageOutcome::Detected {
                 detector,
-                direct_sight,
+                direct_sights,
                 ..
             } => {
                 assert_eq!(detector, horizon::HorizonDetector::ReflectionPair);
-                let sight = direct_sight.expect("reflection-pair must emit a direct sight");
+                let sight = direct_sights
+                    .first()
+                    .copied()
+                    .expect("reflection-pair must emit a direct sight");
                 let v = sight.observed_altitude.value;
                 assert!(
                     (alt * 0.5..alt * 1.5).contains(&v),
