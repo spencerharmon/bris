@@ -62,9 +62,12 @@ mod engine;
 mod fix;
 mod nmea;
 mod pipeline;
+mod store;
 
 pub use config::{EngineConfig, PlateSolverInit};
 pub use diagnostics::{EngineDiagnostics, PipelineStageStats};
+pub use engine::PoolSight;
 pub use engine::{FixReceiver, PushError, StreamingEngine};
 pub use fix::{DominantSource, PublishedFix};
 pub use nmea::format_fix_as_nmea;
+pub use store::{SightStore, StoreConfig, StoreError};

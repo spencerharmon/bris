@@ -124,6 +124,10 @@ pub(crate) struct StageEOutcome {
     /// all candidates worse than the worst sight already in
     /// the window).
     pub sights_inserted: usize,
+    /// Sight values that were inserted into the window this
+    /// run, in insertion order. The engine persists each of
+    /// these via `SightStore::append_sight`.
+    pub inserted_sights: Vec<Sight>,
     /// Number of sights age-evicted from the window during
     /// this run.
     pub sights_evicted: usize,
@@ -222,6 +226,26 @@ pub(crate) struct SightWindow {
 }
 
 impl SightWindow {
+    /// Bulk-insert pre-existing sights (e.g. from on-disk
+    /// hydration) without bumping `pending_inserts` or
+    /// honouring capacity. Truncates to `capacity` keeping
+    /// the lowest-σ entries.
+    pub(crate) fn hydrate(&mut self, mut sights: Vec<Sight>, capacity: usize) {
+        sights.sort_by(|a, b| {
+            a.altitude_sigma_rad
+                .partial_cmp(&b.altitude_sigma_rad)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        sights.truncate(capacity);
+        self.sights = sights;
+    }
+
+    /// Snapshot the current sight list (copy). For external
+    /// surfaces (FFI `pool_sights`).
+    pub(crate) fn snapshot(&self) -> Vec<Sight> {
+        self.sights.clone()
+    }
+
     /// Insert a sight; honour the cap with replace-worst-on-
     /// insertion. Returns `true` if the insert took (either
     /// because the window had room or the new sight was
@@ -368,6 +392,7 @@ pub(crate) fn run(
                 for sight in sights {
                     if window.try_insert(sight, cfg.sight_window_capacity) {
                         inserted += 1;
+                        out.inserted_sights.push(sight);
                     }
                 }
             }

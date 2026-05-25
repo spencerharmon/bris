@@ -185,6 +185,7 @@ fn moonlight_pond_produces_moon_lop() {
     // observe a fix; we *will* observe the per-frame reflection-
     // pair counters increment if Phase 1 detected the pair.
     let mut cfg = EngineConfig::new(observer);
+    cfg.store.enabled = false;
     // We don't have a prior fix in the engine's window, but the
     // reflection-pair provider works in cold-start mode too —
     // we feed it the direct centroids and let Test 4 carry it.
