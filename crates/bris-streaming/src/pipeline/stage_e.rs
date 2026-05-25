@@ -522,8 +522,22 @@ fn reduce_to_sight(
             let apparent: ApparentPlace =
                 body_apparent_place(body, c.body.frame_tt, jd_ut1, observer)
                     .map_err(ReduceError::Apparent)?;
-            let observed = measure_altitude(intrinsics, c.horizon.line, *centroid)
-                .map_err(ReduceError::Measure)?;
+            // Prefer the horizon record's direct sight when
+            // one is present (Phase 1: reflection-pair
+            // provider emits `Ho = θ/2` directly). The sight-
+            // combination stage in `bris-nav` de-duplicates
+            // per-body sights in a window so the same body's
+            // direct sight and a separately-derived horizon-
+            // based sight cannot both contribute. Today only
+            // one provider wins per frame so the
+            // double-counting risk is hypothetical; documented
+            // here so it stays visible as more providers land.
+            let observed = if let Some(direct) = c.horizon.direct_sight {
+                direct.observed_altitude
+            } else {
+                measure_altitude(intrinsics, c.horizon.line, *centroid)
+                    .map_err(ReduceError::Measure)?
+            };
             let computed = Uncertain::new(apparent.direction.altitude, apparent.altitude_sigma);
             let lop = line_of_position(
                 observer.latitude,

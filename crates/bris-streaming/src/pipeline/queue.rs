@@ -151,6 +151,12 @@ pub(crate) struct HorizonRecord {
     /// Priority key. Smaller = better. Always finite,
     /// non-negative.
     pub(crate) sigma_key: SigmaKey,
+    /// Optional direct sight emitted alongside this horizon
+    /// (Phase 1 of the horizon-providers roadmap: the
+    /// reflection-pair provider). When present, Stage E uses
+    /// it directly instead of computing an altitude via
+    /// `measure_altitude` for the participating body.
+    pub(crate) direct_sight: Option<bris_vision::DirectSight>,
 }
 
 /// Total-ordered, NaN-free σ used as priority-queue key.
@@ -583,13 +589,16 @@ fn horizon_record_from_outcome(
     outcome: HorizonStageOutcome,
 ) -> Option<HorizonRecord> {
     match outcome {
-        HorizonStageOutcome::Detected { line, .. } => {
+        HorizonStageOutcome::Detected {
+            line, direct_sight, ..
+        } => {
             let sigma_key = SigmaKey::from_sigma(line.altitude_sigma);
             Some(HorizonRecord {
                 frame_id,
                 frame_tt,
                 line,
                 sigma_key,
+                direct_sight,
             })
         }
         HorizonStageOutcome::None => None,

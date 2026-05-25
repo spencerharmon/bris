@@ -63,7 +63,7 @@ use bris_core::time::Tt;
 use bris_core::Sigma;
 use bris_vision::{
     centroid_saturated_body_in_mask, classify, detect_peaks, detect_peaks_above_horizon, Centroid,
-    Classification, Condition, Frame, HorizonLine, Peak, SaturatedBodyConfig,
+    Classification, Condition, Frame, HorizonLine, HorizonProvider, Peak, SaturatedBodyConfig,
 };
 use tracing::{debug, trace, warn};
 
@@ -206,7 +206,7 @@ pub(crate) fn process_frame(
     // ≥ 2 Night peaks the pipeline re-runs Stage C with the
     // candidates so the reflection-pair provider can
     // contribute. See docs/design/horizon_autodetect.md §3.
-    let (horizon, horizon_analyzed_size) = horizon::detect(
+    let (mut horizon, horizon_analyzed_size) = horizon::detect(
         pyramid,
         dispatched_condition,
         cfg,
@@ -247,6 +247,46 @@ pub(crate) fn process_frame(
     };
     log_body_outcome(&body);
 
+    // ---- Stage C (second pass): reflection-pair provider ----
+    //
+    // Now that Stage B has produced body candidates, run the
+    // reflection-pair provider with them. If it returns a
+    // hypothesis with smaller σ than whatever optical
+    // detector won the first pass, replace the horizon
+    // outcome. The optical detectors do not need re-running
+    // — they ignore body candidates.
+    //
+    // Phase 1 is Night-mode only. Day yields a single centroid
+    // so cannot form a pair; Twilight is treated like Night
+    // when peaks were produced. See
+    // docs/handoff/reflection-pair-phase1.md.
+    let body_candidates = body_candidates_from_detection(&body);
+    if body_candidates.len() >= 2 && !matches!(dispatched_condition, Condition::Unusable) {
+        let provider = bris_vision::ReflectionPairProvider::default();
+        let ctx = bris_vision::HorizonProviderContext {
+            frame,
+            intrinsics: &frame.intrinsics,
+            body_candidates: &body_candidates,
+            position_prior,
+            timestamp: frame.capture_tt,
+        };
+        if let Some(hyp) = provider.detect(&ctx) {
+            let replace = match horizon {
+                HorizonStageOutcome::Detected { line, .. } => {
+                    hyp.line.altitude_sigma < line.altitude_sigma
+                }
+                HorizonStageOutcome::None => true,
+            };
+            if replace {
+                horizon = HorizonStageOutcome::Detected {
+                    detector: super::pipeline::horizon::HorizonDetector::ReflectionPair,
+                    line: hyp.line,
+                    direct_sight: hyp.direct_sight,
+                };
+            }
+        }
+    }
+
     StageOutcome {
         classification,
         dispatched_condition,
@@ -265,6 +305,37 @@ pub(crate) fn process_frame(
 /// A mask shape mismatch would be a genuine bug and is logged at
 /// `warn!` — but cannot occur with `mask: None`, so it's a
 /// defense-in-depth log.
+/// Project a [`BodyDetection`] into the narrow read-only view
+/// consumed by horizon providers.
+fn body_candidates_from_detection(body: &BodyDetection) -> Vec<bris_vision::BodyCandidate> {
+    match body {
+        BodyDetection::Day(c) => vec![bris_vision::BodyCandidate {
+            pixel: (c.x, c.y),
+            brightness: c.mean_intensity,
+            position_sigma_px: c.position_sigma_px.value(),
+            // Day-mode body identification (Sun) is implicit
+            // but a predicted altitude here would require an
+            // almanac call; deferred to Phase 2 with the
+            // Day-mode multi-centroid work.
+            predicted_altitude: None,
+        }],
+        BodyDetection::Night(peaks) => peaks
+            .iter()
+            .map(|p| bris_vision::BodyCandidate {
+                pixel: (p.x, p.y),
+                brightness: p.intensity,
+                // Peak detector doesn't report a per-peak
+                // pixel σ today; use a 0.5 px placeholder
+                // consistent with the plate-solver's
+                // `per_star_sigma`-derived defaults.
+                position_sigma_px: 0.5,
+                predicted_altitude: None,
+            })
+            .collect(),
+        BodyDetection::IdentifiedStars(_) | BodyDetection::None => Vec::new(),
+    }
+}
+
 fn detect_day_body(frame: &Frame, cfg: SaturatedBodyConfig) -> BodyDetection {
     match centroid_saturated_body_in_mask(frame, cfg, None) {
         Ok(centroid) => BodyDetection::Day(centroid),
