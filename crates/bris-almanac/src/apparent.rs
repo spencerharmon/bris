@@ -17,7 +17,10 @@
 //! 4. Apply nutation (rotates mean → true equator).
 //! 5. Apply annual aberration (TODO: stub returning zero correction
 //!    with a small documented sigma, see plan.org Phase 1 follow-up).
-//! 6. Convert geocentric → topocentric (parallax; only Moon matters).
+//! 6. Convert geocentric → topocentric in equatorial coordinates
+//!    (diurnal parallax; only the Moon is large, but applied to Sun
+//!    and planets uniformly for consistency). Uses Meeus Ch. 40.
+//!    See [`topocentric_equatorial`].
 //! 7. Equatorial → horizontal via [`coord::equatorial_to_horizontal`]
 //!    using local apparent sidereal time.
 //! 8. Subtract horizon dip from altitude (eye-height effect).
@@ -95,7 +98,8 @@ pub fn body_apparent_place(
     observer: Observer,
 ) -> Result<ApparentPlace, ApparentPlaceError> {
     let geocentric_ecliptic = body_geocentric_ecliptic(body, tt);
-    common_apparent_place(geocentric_ecliptic, tt, jd_ut1, observer)
+    let distance_au = Some(geocentric_ecliptic.radius_au);
+    common_apparent_place(geocentric_ecliptic, distance_au, tt, jd_ut1, observer)
 }
 
 /// Compute the apparent place of a catalog star.
@@ -120,7 +124,9 @@ pub fn star_apparent_place(
     let true_eq = apply_nutation(mean_eq, nu.delta_psi, nu.delta_epsilon, tt);
 
     // Step 5: aberration (TODO; counted in sigma).
-    finalize_to_horizontal(true_eq, tt, jd_ut1, observer, nu.delta_psi)
+    // Stars: stellar parallax is handled (or omitted at mas level) via
+    // the catalog `parallax_mas` field — do NOT apply diurnal parallax.
+    finalize_to_horizontal(true_eq, None, tt, jd_ut1, observer, nu.delta_psi)
 }
 
 /// All Solar System bodies the apparent-place pipeline supports.
@@ -140,13 +146,14 @@ fn body_geocentric_ecliptic(body: SolarSystemBody, tt: Tt) -> Heliocentric {
         SolarSystemBody::Sun => sun_geocentric(tt),
         SolarSystemBody::Moon => {
             let m = lunar_position(tt);
-            // Lunar position returns geocentric ecliptic of date already;
-            // distance is in km but we use it only as a non-zero placeholder
-            // here because the topocentric correction in this commit is a stub.
+            // Lunar position returns geocentric ecliptic of date already.
+            // Distance is converted to AU so the downstream topocentric
+            // parallax step (see `finalize_to_horizontal`) has a real
+            // geocentric distance to work with.
             Heliocentric {
                 longitude: m.longitude,
                 latitude: m.latitude,
-                radius_au: m.distance_km / 149_597_870.7,
+                radius_au: m.distance_km * 1000.0 / AU_M,
             }
         }
         SolarSystemBody::Planet(b) => {
@@ -240,6 +247,7 @@ fn apply_nutation(p: Equatorial, dpsi_rad: f64, deps_rad: f64, tt: Tt) -> Equato
 /// uncertainty.
 fn common_apparent_place(
     geocentric_ecliptic_of_date: Heliocentric,
+    distance_au: Option<f64>,
     tt: Tt,
     jd_ut1: f64,
     observer: Observer,
@@ -258,12 +266,63 @@ fn common_apparent_place(
     let nu = nutation(tt);
     let true_eq = apply_nutation(mean_eq, nu.delta_psi, nu.delta_epsilon, tt);
 
-    finalize_to_horizontal(true_eq, tt, jd_ut1, observer, nu.delta_psi)
+    finalize_to_horizontal(true_eq, distance_au, tt, jd_ut1, observer, nu.delta_psi)
+}
+
+/// One astronomical unit, in meters (IAU 2012 definition).
+const AU_M: f64 = 149_597_870_700.0;
+
+/// WGS-84 Earth equatorial radius, meters.
+const EARTH_EQUATORIAL_RADIUS_M: f64 = 6_378_137.0;
+
+/// WGS-84 flattening.
+const EARTH_FLATTENING: f64 = 1.0 / 298.257_223_563;
+
+/// Convert geocentric equatorial (α, δ) at the observer's instant to
+/// topocentric (α', δ') via the diurnal-parallax rotation. Meeus
+/// (1998) *Astronomical Algorithms* Ch. 40, eqs. 40.6–40.7, with the
+/// observer's geocentric `(ρ sin φ′, ρ cos φ′)` derived from WGS-84
+/// oblateness plus eye height.
+///
+/// `distance_m` is the geocentric distance to the body in meters.
+fn topocentric_equatorial(
+    geo_eq: Equatorial,
+    last_rad_val: f64,
+    observer: Observer,
+    distance_m: f64,
+) -> Equatorial {
+    let phi = observer.latitude.radians();
+    let h_over_a = observer.eye_height_m.max(0.0) / EARTH_EQUATORIAL_RADIUS_M;
+    let one_minus_f = 1.0 - EARTH_FLATTENING;
+    let u = (one_minus_f * phi.tan()).atan();
+    let (sin_u, cos_u) = u.sin_cos();
+    let (sin_phi, cos_phi) = phi.sin_cos();
+    let rho_sin_phip = one_minus_f * sin_u + h_over_a * sin_phi;
+    let rho_cos_phip = cos_u + h_over_a * cos_phi;
+
+    let sin_parallax = EARTH_EQUATORIAL_RADIUS_M / distance_m;
+
+    let h_angle = (last_rad_val - geo_eq.ra).rem_euclid(std::f64::consts::TAU);
+    let (sin_h, cos_h) = h_angle.sin_cos();
+    let (sin_d, cos_d) = geo_eq.dec.sin_cos();
+
+    // Meeus 40.6
+    let num = -rho_cos_phip * sin_parallax * sin_h;
+    let den = cos_d - rho_cos_phip * sin_parallax * cos_h;
+    let dalpha = num.atan2(den);
+    let alpha_topo = (geo_eq.ra + dalpha).rem_euclid(std::f64::consts::TAU);
+    // Meeus 40.7
+    let dec_topo = ((sin_d - rho_sin_phip * sin_parallax) * dalpha.cos()).atan2(den);
+    Equatorial {
+        ra: alpha_topo,
+        dec: dec_topo,
+    }
 }
 
 /// Final stage shared by Solar-System and stellar paths.
 fn finalize_to_horizontal(
     true_eq: Equatorial,
+    distance_au: Option<f64>,
     tt: Tt,
     jd_ut1: f64,
     observer: Observer,
@@ -273,8 +332,14 @@ fn finalize_to_horizontal(
     let eps = mean_obliquity(tt);
     let last = last_rad(jd_ut1, observer.longitude.radians(), delta_psi_rad, eps);
 
+    // Geocentric → topocentric (diurnal parallax). Stars skip this.
+    let topo_eq = match distance_au {
+        Some(d_au) if d_au > 0.0 => topocentric_equatorial(true_eq, last, observer, d_au * AU_M),
+        _ => true_eq,
+    };
+
     // Equatorial → horizontal.
-    let mut horizontal = equatorial_to_horizontal(true_eq, last, observer.latitude.radians());
+    let mut horizontal = equatorial_to_horizontal(topo_eq, last, observer.latitude.radians());
 
     if !horizontal.altitude.is_finite() || !horizontal.azimuth.is_finite() {
         return Err(ApparentPlaceError::NonFinite);
@@ -422,6 +487,49 @@ mod tests {
         assert!(
             (40.0..=45.0).contains(&alt_deg),
             "Polaris altitude at Boston = {alt_deg}°, expected ~42.4°"
+        );
+    }
+
+    #[test]
+    fn moon_topocentric_matches_skyfield_at_austin() {
+        // Moonlight-pond regression case: 2026-05-25T06:29:06.752Z,
+        // observer at (30.150588 N, -97.844170 E), 1.7 m eye height,
+        // standard atmosphere.
+        //
+        // Skyfield/JPL DE421 reference (topocentric apparent, including
+        // refraction):
+        //   alt = 18.9431°, az = 257.9499°
+        // Without diurnal parallax bris reported 19.8354° (≈54′ high).
+        //
+        // After applying topocentric correction (this commit) Hc must
+        // agree with Skyfield to better than 1′ in altitude. Tighter
+        // residuals (a few arcseconds) are limited by the truncated
+        // ELP series and our aberration stub; do not weaken below 1′.
+        let utc = chrono::Utc
+            .timestamp_millis_opt(1_779_690_546_752)
+            .single()
+            .unwrap();
+        let tt = utc_to_tt(utc).unwrap();
+        let jd_ut1 = chrono_to_jd_utc(utc);
+        let obs = Observer {
+            latitude: bris_core::Latitude::from_degrees(30.150_588).unwrap(),
+            longitude: bris_core::Longitude::from_degrees(-97.844_170).unwrap(),
+            eye_height_m: 1.7,
+            eye_height_sigma_m: 0.5,
+            atmosphere: crate::refraction::Atmosphere::STANDARD,
+        };
+        let ap = body_apparent_place(SolarSystemBody::Moon, tt, jd_ut1, obs).unwrap();
+        let alt_deg = ap.direction.altitude.to_degrees();
+        let az_deg = ap.direction.azimuth.to_degrees();
+        let dalt_arcmin = (alt_deg - 18.9431) * 60.0;
+        let daz_arcmin = (az_deg - 257.9499) * 60.0;
+        assert!(
+            dalt_arcmin.abs() < 1.0,
+            "Moon topocentric altitude {alt_deg}° differs from Skyfield 18.9431° by {dalt_arcmin:.2}′ (>1′)"
+        );
+        assert!(
+            daz_arcmin.abs() < 2.0,
+            "Moon topocentric azimuth {az_deg}° differs from Skyfield 257.9499° by {daz_arcmin:.2}′ (>2′)"
         );
     }
 
