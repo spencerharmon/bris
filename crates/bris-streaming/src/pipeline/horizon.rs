@@ -212,23 +212,81 @@ pub(crate) fn detect(
         if early_terminate(best.as_ref(), early_term) {
             return (finish(best, best_direct_sight), analyzed_size);
         }
-        // Reflection-pair runs when there are ≥ 2 night
-        // body candidates. Day-mode reflection-pair detection
-        // is deferred (Stage B emits one centroid; see
-        // docs/handoff/reflection-pair-phase1.md and
-        // docs/design/horizon_autodetect.md §10).
-        if body_candidates.len() >= 2 {
-            let provider = bris_vision::ReflectionPairProvider::default();
-            run_provider(&provider, &ctx, &mut best, &mut best_direct_sight);
-            if early_terminate(best.as_ref(), early_term) {
-                return (finish(best, best_direct_sight), analyzed_size);
-            }
-        }
+        // Reflection-pair is run as a *second pass* after
+        // Stage B has produced body candidates; see
+        // [`merge_reflection_pair`]. The first-pass dispatcher
+        // receives `body_candidates = &[]` from `process_frame`
+        // because horizon must run before Stage B for masking.
+        let _ = body_candidates; // tracked at the second-pass site
     }
     // Last resort: segmentation. Gated on the feature flag and
     // on the operator opting in by supplying a model path.
     run_segmentation(&ctx, cfg, &mut best, &mut best_direct_sight);
     (finish(best, best_direct_sight), analyzed_size)
+}
+
+/// Run the reflection-pair provider against an already-
+/// computed [`HorizonStageOutcome`] and merge by best-σ.
+///
+/// The first-pass `detect()` runs the *optical* providers
+/// with empty body candidates (horizon must run before Stage
+/// B to mask night peaks). Once Stage B has populated body
+/// candidates this helper runs the reflection-pair provider
+/// with them and merges its hypothesis into the existing
+/// outcome under the same trait-driven best-σ rule used by
+/// [`run_provider`]. Returns the (possibly updated) outcome
+/// plus per-frame stats and merge bookkeeping.
+pub(crate) struct ReflectionPairMerge {
+    pub outcome: HorizonStageOutcome,
+    pub stats: bris_vision::ReflectionPairStats,
+    /// Provider returned `Some(hypothesis)`.
+    pub hypothesized: bool,
+    /// Hypothesis won the merge (smallest σ) and is the
+    /// new outcome.
+    pub used: bool,
+}
+
+pub(crate) fn merge_reflection_pair(
+    prev: HorizonStageOutcome,
+    ctx: &HorizonProviderContext<'_>,
+) -> ReflectionPairMerge {
+    let mut stats = bris_vision::ReflectionPairStats::default();
+    let provider = bris_vision::ReflectionPairProvider::default();
+    let Some(hyp) = provider.detect_with_stats(ctx, &mut stats) else {
+        return ReflectionPairMerge {
+            outcome: prev,
+            stats,
+            hypothesized: false,
+            used: false,
+        };
+    };
+    // Seed `best` from the previous outcome (if any) and use
+    // the same best-σ merge as the first-pass dispatcher.
+    let mut best: Option<(HorizonDetector, HorizonLine)> = match prev {
+        HorizonStageOutcome::Detected { detector, line, .. } => Some((detector, line)),
+        HorizonStageOutcome::None => None,
+    };
+    let mut best_direct_sight: Option<bris_vision::DirectSight> = match prev {
+        HorizonStageOutcome::Detected { direct_sight, .. } => direct_sight,
+        HorizonStageOutcome::None => None,
+    };
+    let detector = detector_from_provenance(hyp.provenance);
+    let improved = match best {
+        Some((_, ref existing)) => hyp.line.altitude_sigma < existing.altitude_sigma,
+        None => true,
+    };
+    if improved {
+        best = Some((detector, hyp.line));
+        best_direct_sight = hyp.direct_sight;
+    }
+    let used = improved;
+    let outcome = finish(best, best_direct_sight);
+    ReflectionPairMerge {
+        outcome,
+        stats,
+        hypothesized: true,
+        used,
+    }
 }
 
 /// Run one provider; update `best` (smallest σ wins) and

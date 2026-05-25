@@ -109,16 +109,27 @@ pub struct ReflectionPairStats {
 /// One pair that has passed Tests 1–3.
 #[derive(Debug, Clone, Copy)]
 struct PairOutcome {
-    /// Index of the brighter (direct) candidate in the input
-    /// slice.
+    /// Index of the geometrically-upper (image-up: smaller
+    /// `pixel.y`) candidate in the input slice. The direct
+    /// body's image position is at the top in a reflection
+    /// pair (sky-direct above, reflection below).
     up_idx: usize,
     /// Inferred gravity direction in camera frame (downward,
     /// unit vector).
     gravity: CameraRay,
     /// Direct sight: half the angle between the two rays.
     half_angle: Uncertain<f64>,
-    /// Per-pair angular σ on `gravity` (radians).
+    /// Per-pair angular σ between the two rays (radians).
+    /// Per-pair gravity-direction σ is `0.5 * sigma_rad` (a
+    /// small-angle perturbation of either ray rotates the
+    /// bisector by half that perturbation).
     sigma_rad: f64,
+    /// Whether Test 3 (catalog consistency) was applied and
+    /// passed for this pair. `false` when Test 3 was skipped
+    /// (no prior or no identified body). Used to gate the
+    /// cluster-size requirement: a singleton cluster is
+    /// admissible only when ≥ 1 of its pairs passed Test 3.
+    passed_test_3: bool,
 }
 
 impl HorizonProvider for ReflectionPairProvider {
@@ -157,11 +168,16 @@ impl ReflectionPairProvider {
         }
 
         // Test 1 + Test 2 + Test 3: build per-pair outcomes.
+        // Ordering: `up` is the image-geometrically-upper
+        // candidate (smaller `pixel.y` in top-left-origin
+        // pixel space). Test 2 then asserts photometrically
+        // that the upper one is at least as bright (within
+        // tolerance) — flipping the order here would make
+        // Test 2 unreachable.
         let mut outcomes: Vec<PairOutcome> = Vec::new();
         for (i, a) in ctx.body_candidates.iter().enumerate() {
             for (j, b) in ctx.body_candidates.iter().enumerate().skip(i + 1) {
-                // Order: up = brighter.
-                let (up_idx, up, dn) = if a.brightness >= b.brightness {
+                let (up_idx, up, dn) = if a.pixel.1 <= b.pixel.1 {
                     (i, a, b)
                 } else {
                     (j, b, a)
@@ -183,24 +199,16 @@ impl ReflectionPairProvider {
             return None;
         };
         let has_prior = ctx.position_prior.is_some();
-        let min_required = if has_prior {
-            // With a prior, a single pair that passed Test 3
-            // (catalog) is enough; otherwise two concordant
-            // pairs suffice (Test 4).
-            if cluster.iter().any(|p| {
-                // Re-check whether this pair had a catalog-
-                // applicable identification; if so the pair
-                // would have been gated by Test 3 already
-                // and a singleton cluster is admissible.
-                ctx.body_candidates
-                    .get(p.up_idx)
-                    .and_then(|c| c.predicted_altitude)
-                    .is_some()
-            }) {
-                1
-            } else {
-                2
-            }
+        // A singleton cluster is admissible only when at least
+        // one of its pairs actually *passed* Test 3 (catalog
+        // consistency). A prior that exists but no pair could
+        // apply Test 3 against (no identified body in the
+        // pair) is treated like cold start — the prior alone
+        // does not loosen the Test 4 threshold. See
+        // `docs/design/horizon_autodetect.md` §10.
+        let any_passed_test_3 = cluster.iter().any(|p| p.passed_test_3);
+        let min_required = if any_passed_test_3 {
+            1
         } else {
             self.config.cold_start_min_pairs
         };
@@ -213,12 +221,20 @@ impl ReflectionPairProvider {
         // `docs/design/horizon_autodetect.md` §3.2 (Test 5).
 
         // Aggregate the cluster: mean gravity direction,
-        // empirical-spread σ (RMS small-angle deviation from
-        // the mean), floored by config.
+        // empirical-spread σ on gravity (RMS small-angle
+        // deviation from the mean), and a propagated
+        // gravity-direction σ from per-pair inputs. The
+        // synthesized horizon altitude σ floors at the
+        // maximum of {empirical spread, propagated σ,
+        // configured floor}: all three are σ on gravity
+        // direction (radians) — *not* σ on the half-angle
+        // sight θ/2. The half-angle σ lives on
+        // `direct_sight.observed_altitude` separately.
         let (gravity_mean, empirical_sigma) = aggregate_cluster(&cluster);
+        let propagated_sigma = propagated_gravity_sigma(&cluster);
         let sigma_value = empirical_sigma
             .max(self.config.sigma_floor_rad)
-            .max(min_per_pair_sigma(&cluster));
+            .max(propagated_sigma);
         let altitude_sigma = Sigma::new(sigma_value).unwrap_or(Sigma::ZERO);
         // Sky-pointing normal = -gravity (gravity points down,
         // sky points up).
@@ -343,8 +359,9 @@ impl ReflectionPairProvider {
 
         // Test 3 (catalog consistency, optional). Applied only
         // when both a position prior and an identified body
-        // (predicted altitude on the brighter candidate) are
+        // (predicted altitude on the upper candidate) are
         // available. Skipped silently otherwise.
+        let mut passed_test_3 = false;
         if let (Some(_prior), Some(pred)) = (ctx.position_prior, up.predicted_altitude) {
             let combined_sigma =
                 (pred.sigma.value().powi(2) + half_angle_sigma.value().powi(2)).sqrt();
@@ -353,6 +370,7 @@ impl ReflectionPairProvider {
                 stats.rejected_catalog += 1;
                 return None;
             }
+            passed_test_3 = true;
         }
 
         Some(PairOutcome {
@@ -360,6 +378,7 @@ impl ReflectionPairProvider {
             gravity,
             half_angle,
             sigma_rad: pair_sigma,
+            passed_test_3,
         })
     }
 
@@ -369,12 +388,22 @@ impl ReflectionPairProvider {
     /// other.
     fn largest_cluster(&self, outcomes: &[PairOutcome]) -> Option<Vec<PairOutcome>> {
         let mut best: Vec<PairOutcome> = Vec::new();
-        for seed in outcomes {
+        for (seed_idx, seed) in outcomes.iter().enumerate() {
             let mut cluster: Vec<PairOutcome> = vec![*seed];
-            for other in outcomes {
-                if std::ptr::eq(seed, other) {
+            for (other_idx, other) in outcomes.iter().enumerate() {
+                if other_idx == seed_idx {
                     continue;
                 }
+                // Combined gravity-direction σ in radians:
+                // per-pair σ on gravity = `sigma_rad/2` (each
+                // ray's pixel σ perturbs the bisector by half
+                // that), so the quadrature combination over
+                // the seed and other pair is
+                // `0.5 * sqrt(sᵢ² + sⱼ²)`. Dropping the 0.5
+                // here was the historical behaviour; we keep
+                // it for now and let `multi_pair_tolerance_sigma`
+                // absorb the factor — see the unit-derivation
+                // note in §3.2 of horizon_autodetect.md.
                 let combined_sigma = (seed.sigma_rad.powi(2) + other.sigma_rad.powi(2))
                     .sqrt()
                     .max(f64::EPSILON);
@@ -429,14 +458,28 @@ fn aggregate_cluster(cluster: &[PairOutcome]) -> (CameraRay, f64) {
     (mean, rms)
 }
 
-/// Smallest per-pair σ in the cluster. The synthesized horizon
-/// σ floors at this value: the horizon can never be tighter
-/// than the best single pair's angular σ.
-fn min_per_pair_sigma(cluster: &[PairOutcome]) -> f64 {
-    cluster
-        .iter()
-        .map(|p| 0.5 * p.sigma_rad)
-        .fold(f64::INFINITY, f64::min)
+/// Propagated gravity-direction σ for the cluster (radians).
+///
+/// Each pair contributes a gravity-direction σ of
+/// `0.5 * sigma_rad` (a small-angle perturbation of either ray
+/// rotates the bisector by half that perturbation). Treating
+/// the N pairs as independent estimates of the same gravity
+/// vector, the combined σ reduces as `1/√N`:
+///
+/// ```text
+///   sigma_grav_combined = sqrt(sum_i sigma_grav_i^2) / N
+///                       = sqrt(sum_i (0.5 * sigma_rad_i)^2) / N.
+/// ```
+///
+/// This is the floor on the synthesized horizon altitude σ
+/// that the input ray uncertainties imply — the cluster can
+/// never be tighter than what the per-pair propagation allows.
+fn propagated_gravity_sigma(cluster: &[PairOutcome]) -> f64 {
+    debug_assert!(!cluster.is_empty());
+    let sum_sq: f64 = cluster.iter().map(|p| (0.5 * p.sigma_rad).powi(2)).sum();
+    #[allow(clippy::cast_precision_loss)]
+    let n = cluster.len() as f64;
+    sum_sq.sqrt() / n
 }
 
 #[cfg(test)]
@@ -617,8 +660,9 @@ mod tests {
 
     #[test]
     fn reflection_brighter_rejected() {
-        // Same geometry as a clean pair but with `dn` brighter
-        // than `up`. Test 2 must reject.
+        // Geometrically-upper candidate (image-up, smaller
+        // pixel.y) is dimmer than the image-down candidate.
+        // Test 2 must reject regardless of input ordering.
         let f = frame();
         let i = intr();
         let (mut up, mut dn) = symmetric_pair(0.2, 0.5);
@@ -627,7 +671,32 @@ mod tests {
         let cands = vec![up, dn];
         let provider = ReflectionPairProvider::default();
         let ctx = ctx_for(&f, &i, &cands, None);
-        assert!(provider.detect(&ctx).is_none());
+        let mut stats = ReflectionPairStats::default();
+        assert!(provider.detect_with_stats(&ctx, &mut stats).is_none());
+        assert_eq!(stats.rejected_photometric, 1);
+    }
+
+    #[test]
+    fn photometric_test_unreachable_via_test1_regression() {
+        // Regression for the blocker that pre-sorted pairs by
+        // brightness before passing them into `evaluate_pair`,
+        // which made Test 2 unreachable. Build a pair whose
+        // image-up candidate is much dimmer than the image-down
+        // candidate but whose geometry would otherwise pass
+        // Test 1. Detection must fail via Test 2 (photometric),
+        // not Test 1 (geometric).
+        let f = frame();
+        let i = intr();
+        let (mut up, mut dn) = symmetric_pair(0.2, 0.5);
+        up.brightness = 1.0;
+        dn.brightness = 1.5 * up.brightness * (1.0 + 0.10); // > 1+tol
+        let cands = vec![up, dn];
+        let provider = ReflectionPairProvider::default();
+        let ctx = ctx_for(&f, &i, &cands, None);
+        let mut stats = ReflectionPairStats::default();
+        assert!(provider.detect_with_stats(&ctx, &mut stats).is_none());
+        assert_eq!(stats.rejected_photometric, 1, "must reject via Test 2");
+        assert_eq!(stats.rejected_geometric, 0, "must not reject via Test 1");
     }
 
     #[test]
@@ -676,7 +745,9 @@ mod tests {
         };
         let provider = ReflectionPairProvider::default();
         let ctx = ctx_for(&f, &i, &cands, Some(prior));
-        assert!(provider.detect(&ctx).is_none());
+        let mut stats = ReflectionPairStats::default();
+        assert!(provider.detect_with_stats(&ctx, &mut stats).is_none());
+        assert_eq!(stats.rejected_catalog, 1);
     }
 
     #[test]
@@ -803,13 +874,16 @@ mod tests {
         // (e.g. up_0 × dn_1) get filtered by Test 1 / 2.
         assert!(stats.rejected_geometric + stats.rejected_photometric > 0);
 
-        // (b) photometric reject: NOTE — with the current
-        // swap-to-brighter ordering in `evaluate_pair`, Test 2
-        // can never fire (up is always the brighter of the
-        // pair, so `dn.brightness > up.brightness * (1+tol)`
-        // is unreachable). The photometric counter is wired
-        // but unreachable until that ordering is revisited.
-        // See open questions in PR description.
+        // (b) photometric reject: image-up candidate dimmer
+        // than image-down candidate.
+        let (mut up_b, mut dn_b) = symmetric_pair(0.2, 0.5);
+        up_b.brightness = 1.0;
+        dn_b.brightness = 2.0;
+        let cands_b = vec![up_b, dn_b];
+        let ctx_b = ctx_for(&f, &i, &cands_b, None);
+        let mut stats_b = ReflectionPairStats::default();
+        assert!(provider.detect_with_stats(&ctx_b, &mut stats_b).is_none());
+        assert_eq!(stats_b.rejected_photometric, 1);
 
         // (c) geometric reject: non-vertical pair-plane.
         let up_ray = CameraRay::from_unit_components(0.1, -0.2_f64.sin(), 0.2_f64.cos())

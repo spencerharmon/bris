@@ -74,7 +74,7 @@ mod queue;
 mod stage_d;
 mod stage_e;
 
-pub(crate) use horizon::HorizonStageOutcome;
+pub(crate) use horizon::{merge_reflection_pair, HorizonStageOutcome, ReflectionPairMerge};
 pub(crate) use hysteresis::ClassifierHysteresis;
 pub(crate) use queue::{FrameId, Storage};
 pub(crate) use stage_d::{run as run_stage_d, StageDOutcome};
@@ -164,9 +164,13 @@ pub(crate) struct StageOutcome {
     /// (≥ 2 body candidates were present and dispatched
     /// condition was actionable).
     pub reflection_pair_invoked: bool,
-    /// Whether the reflection-pair provider produced a
-    /// hypothesis on this frame.
-    pub reflection_pair_succeeded: bool,
+    /// Provider returned a hypothesis (Tests 1–4 all passed).
+    /// May not have been emitted if the optical horizon had
+    /// smaller σ (see `reflection_pair_used`).
+    pub reflection_pair_hypothesized: bool,
+    /// Provider's hypothesis won the best-σ merge and is the
+    /// horizon outcome surfaced from this frame.
+    pub reflection_pair_used: bool,
 }
 
 /// Process one frame through Stages A, B, and C synchronously.
@@ -261,22 +265,21 @@ pub(crate) fn process_frame(
     // ---- Stage C (second pass): reflection-pair provider ----
     //
     // Now that Stage B has produced body candidates, run the
-    // reflection-pair provider with them. If it returns a
-    // hypothesis with smaller σ than whatever optical
-    // detector won the first pass, replace the horizon
-    // outcome. The optical detectors do not need re-running
-    // — they ignore body candidates.
-    //
-    // Phase 1 is Night-mode only. Day yields a single centroid
-    // so cannot form a pair; Twilight is treated like Night
-    // when peaks were produced. See
-    // docs/handoff/reflection-pair-phase1.md.
+    // reflection-pair provider with them and merge by best-σ
+    // through the same trait-driven path the optical providers
+    // use. Phase 1 scope is Night / Twilight only — Day yields
+    // a single centroid (cannot form a pair) and the Day-mode
+    // multi-centroid path is deferred. The explicit match here
+    // makes the scope boundary inspectable rather than relying
+    // on the `len() >= 2` check to incidentally exclude Day.
     let body_candidates = body_candidates_from_detection(&body);
     let mut reflection_pair_stats = bris_vision::ReflectionPairStats::default();
     let mut reflection_pair_invoked = false;
-    let mut reflection_pair_succeeded = false;
-    if body_candidates.len() >= 2 && !matches!(dispatched_condition, Condition::Unusable) {
-        let provider = bris_vision::ReflectionPairProvider::default();
+    let mut reflection_pair_hypothesized = false;
+    let mut reflection_pair_used = false;
+    if body_candidates.len() >= 2
+        && matches!(dispatched_condition, Condition::Night | Condition::Twilight)
+    {
         let ctx = bris_vision::HorizonProviderContext {
             frame,
             intrinsics: &frame.intrinsics,
@@ -285,22 +288,17 @@ pub(crate) fn process_frame(
             timestamp: frame.capture_tt,
         };
         reflection_pair_invoked = true;
-        if let Some(hyp) = provider.detect_with_stats(&ctx, &mut reflection_pair_stats) {
-            reflection_pair_succeeded = true;
-            let replace = match horizon {
-                HorizonStageOutcome::Detected { line, .. } => {
-                    hyp.line.altitude_sigma < line.altitude_sigma
-                }
-                HorizonStageOutcome::None => true,
-            };
-            if replace {
-                horizon = HorizonStageOutcome::Detected {
-                    detector: super::pipeline::horizon::HorizonDetector::ReflectionPair,
-                    line: hyp.line,
-                    direct_sight: hyp.direct_sight,
-                };
-            }
-        }
+        let merge = merge_reflection_pair(horizon, &ctx);
+        let ReflectionPairMerge {
+            outcome,
+            stats,
+            hypothesized,
+            used,
+        } = merge;
+        horizon = outcome;
+        reflection_pair_stats = stats;
+        reflection_pair_hypothesized = hypothesized;
+        reflection_pair_used = used;
     }
 
     StageOutcome {
@@ -312,7 +310,8 @@ pub(crate) fn process_frame(
         frame_tt: frame.capture_tt,
         reflection_pair_stats,
         reflection_pair_invoked,
-        reflection_pair_succeeded,
+        reflection_pair_hypothesized,
+        reflection_pair_used,
     }
 }
 
@@ -696,6 +695,100 @@ mod tests {
                 );
             }
             other => panic!("expected Night peaks from twilight fallback, got {other:?}"),
+        }
+    }
+
+    /// Project a normalized ray (x, y, z) onto pixel coords
+    /// using the placeholder pinhole intrinsics.
+    fn pixel_for_ray(intr: &Intrinsics, x: f64, y: f64, z: f64) -> (f64, f64) {
+        bris_vision::project_pinhole(*intr, x / z, y / z)
+    }
+
+    /// Paint a small Gaussian-ish blob at sub-pixel `(px, py)`
+    /// with peak amplitude `amp` into `pixels`.
+    #[allow(clippy::many_single_char_names)]
+    fn paint_blob(pixels: &mut [u16], w: u32, h: u32, px: f64, py: f64, amp: u16) {
+        let cx = px.round() as i32;
+        let cy = py.round() as i32;
+        for dy in -2..=2_i32 {
+            for dx in -2..=2_i32 {
+                let x = cx + dx;
+                let y = cy + dy;
+                if x < 0 || y < 0 || x as u32 >= w || y as u32 >= h {
+                    continue;
+                }
+                let r2 = dx * dx + dy * dy;
+                let falloff = match r2 {
+                    0 => 1.0,
+                    1 => 0.7,
+                    2 => 0.5,
+                    _ => 0.2,
+                };
+                let v = (f64::from(amp) * falloff) as u16;
+                let idx = (y as usize) * (w as usize) + (x as usize);
+                if pixels[idx] < v {
+                    pixels[idx] = v;
+                }
+            }
+        }
+    }
+
+    /// Drive a synthetic Night frame with three reflection
+    /// pairs (six peaks) through `process_frame` and assert
+    /// Stage C outcome / direct sight / diagnostic counters.
+    #[test]
+    fn reflection_pair_integration_night_frame_emits_theta_half_sight() {
+        let w = 512_u32;
+        let h = 512_u32;
+        let intr = Intrinsics::placeholder(w, h);
+        let mut pixels = vec![10_u16; (w * h) as usize];
+        let alts = [0.05_f64, 0.06, 0.07];
+        let x_offs = [-0.05_f64, 0.0, 0.05];
+        let up_amp: u16 = 50_000;
+        let dn_amp: u16 = 25_000;
+        for (alt, x_off) in alts.iter().zip(x_offs.iter()) {
+            let (upx, upy) = pixel_for_ray(&intr, *x_off, -alt.sin(), alt.cos());
+            let (dnx, dny) = pixel_for_ray(&intr, *x_off, alt.sin(), alt.cos());
+            paint_blob(&mut pixels, w, h, upx, upy, up_amp);
+            paint_blob(&mut pixels, w, h, dnx, dny, dn_amp);
+        }
+        let frame = Frame::new(w, h, pixels, night_tt(), 1000, intr).unwrap();
+        let outcome = process_frame(
+            &bris_vision::FramePyramid::new(frame),
+            &test_cfg(),
+            &mut ClassifierHysteresis::default(),
+            None,
+        );
+        assert_eq!(outcome.dispatched_condition, Condition::Night);
+        assert!(
+            outcome.reflection_pair_invoked,
+            "reflection-pair provider must be invoked when ≥ 2 night peaks present"
+        );
+        assert!(
+            outcome.reflection_pair_hypothesized,
+            "three concordant pairs should produce a hypothesis"
+        );
+        assert!(
+            outcome.reflection_pair_used,
+            "reflection-pair hypothesis should win against no/poor optical horizon"
+        );
+        match outcome.horizon {
+            HorizonStageOutcome::Detected {
+                detector,
+                direct_sight,
+                ..
+            } => {
+                assert_eq!(detector, horizon::HorizonDetector::ReflectionPair);
+                let sight = direct_sight.expect("reflection-pair must emit a direct sight");
+                let v = sight.observed_altitude.value;
+                assert!(
+                    (0.04..=0.08).contains(&v),
+                    "direct-sight θ/2 = {v} rad outside [0.04, 0.08]"
+                );
+            }
+            HorizonStageOutcome::None => {
+                panic!("expected reflection-pair horizon detection on synthetic frame");
+            }
         }
     }
 

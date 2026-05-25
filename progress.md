@@ -32,9 +32,9 @@ Supporting plumbing:
 - `EngineState.last_published_fix` retained; staleness gate
   30 s; converted to `bris_vision::PositionPrior` per frame.
   DR projection of stale fixes is a Phase 2 followup.
-- `EngineDiagnostics` carries six new counters
-  (`reflection_pair_attempts`, `reflection_pair_succeeded`,
-  four `reflection_pair_rejected_*`). Provider exposes
+- `EngineDiagnostics` carries seven new counters
+  (`reflection_pair_attempts`, `reflection_pair_hypothesized`,
+  `reflection_pair_used`, four `reflection_pair_rejected_*`). Provider exposes
   `detect_with_stats` so the streaming engine can accumulate
   per-frame rejection reasons without re-running its tests.
 - Pi Zero 2W compile contract intact; no new dependencies; no

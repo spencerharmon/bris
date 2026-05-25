@@ -1491,9 +1491,10 @@ references to the regression tests that pin the behavior. See
    in-code TODO). `EngineState` carries `last_published_fix` so
    the catalog-consistency test has a `PositionPrior` to read
    (DR projection of stale fixes is a Phase 2 followup; current
-   staleness gate is 30 s). `EngineDiagnostics` gains six new
-   counters (`reflection_pair_attempts`,
-   `reflection_pair_succeeded`, four `_rejected_*`). Stage E
+   staleness gate is 30 s, lifted to `EngineConfig::position_prior_max_age_seconds`).
+   `EngineDiagnostics` gains seven new counters
+   (`reflection_pair_attempts`, `reflection_pair_hypothesized`,
+   `reflection_pair_used`, four `_rejected_*`). Stage E
    consumes the direct sight `Ho = θ/2` when present (option
    (ii) of §10). Acceptance: 9 synthetic unit tests in
    `bris-vision::horizon_providers::reflection_pair` plus

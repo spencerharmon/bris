@@ -128,19 +128,13 @@ struct EngineState {
     /// all processed frames. Surfaced verbatim in
     /// [`crate::EngineDiagnostics`].
     reflection_pair_attempts: u64,
-    reflection_pair_succeeded: u64,
+    reflection_pair_hypothesized: u64,
+    reflection_pair_used: u64,
     reflection_pair_rejected_geometric: u64,
     reflection_pair_rejected_photometric: u64,
     reflection_pair_rejected_catalog: u64,
     reflection_pair_rejected_no_cluster: u64,
 }
-
-/// Maximum age (seconds) of a published fix before the
-/// engine treats it as stale and stops surfacing it as a
-/// [`bris_vision::PositionPrior`]. DR projection of stale
-/// fixes is a Phase 2 followup; see
-/// `docs/handoff/reflection-pair-phase1.md`.
-const POSITION_PRIOR_MAX_AGE_SECONDS: f64 = 30.0;
 
 /// Nautical mile in metres; for converting Fix sigma (nm) to
 /// the `PositionPrior`'s metric sigma. The same magic number is
@@ -150,12 +144,15 @@ const METRES_PER_NM: f64 = 1852.0;
 
 /// Build a [`bris_vision::PositionPrior`] from the last
 /// published fix, returning `None` when the fix is missing or
-/// stale beyond [`POSITION_PRIOR_MAX_AGE_SECONDS`].
-fn position_prior_from_state(state: &EngineState) -> Option<bris_vision::PositionPrior> {
+/// stale beyond [`EngineConfig::position_prior_max_age_seconds`].
+fn position_prior_from_state(
+    state: &EngineState,
+    config: &EngineConfig,
+) -> Option<bris_vision::PositionPrior> {
     let published = state.last_published_fix.as_ref()?;
     if let Some(now_tt) = state.last_processed_frame_tt {
         let age_s = (now_tt.julian_date() - published.timestamp.julian_date()) * 86_400.0;
-        if age_s > POSITION_PRIOR_MAX_AGE_SECONDS {
+        if age_s > config.position_prior_max_age_seconds {
             return None;
         }
     }
@@ -255,8 +252,11 @@ fn update_stage_counters(
     if outcome.reflection_pair_invoked {
         state.reflection_pair_attempts += 1;
     }
-    if outcome.reflection_pair_succeeded {
-        state.reflection_pair_succeeded += 1;
+    if outcome.reflection_pair_hypothesized {
+        state.reflection_pair_hypothesized += 1;
+    }
+    if outcome.reflection_pair_used {
+        state.reflection_pair_used += 1;
     }
     let rp = &outcome.reflection_pair_stats;
     state.reflection_pair_rejected_geometric += rp.rejected_geometric;
@@ -329,7 +329,8 @@ impl StreamingEngine {
                 last_publication: None,
                 classifier_hysteresis: ClassifierHysteresis::default(),
                 reflection_pair_attempts: 0,
-                reflection_pair_succeeded: 0,
+                reflection_pair_hypothesized: 0,
+                reflection_pair_used: 0,
                 reflection_pair_rejected_geometric: 0,
                 reflection_pair_rejected_photometric: 0,
                 reflection_pair_rejected_catalog: 0,
@@ -407,7 +408,7 @@ impl StreamingEngine {
         // uses this for its catalog-consistency test; without
         // it the provider runs in cold-start mode (Test 3
         // dropped, Test 4 threshold raised).
-        let position_prior = position_prior_from_state(&state);
+        let position_prior = position_prior_from_state(&state, &self.config);
         let mut outcome = process_frame(
             &pyramid,
             &self.config,
@@ -569,7 +570,8 @@ impl StreamingEngine {
             last_published_fix_tt: state.last_published_fix_tt,
             last_horizon_analysis_size: state.last_horizon_analysis_size,
             reflection_pair_attempts: state.reflection_pair_attempts,
-            reflection_pair_succeeded: state.reflection_pair_succeeded,
+            reflection_pair_hypothesized: state.reflection_pair_hypothesized,
+            reflection_pair_used: state.reflection_pair_used,
             reflection_pair_rejected_geometric: state.reflection_pair_rejected_geometric,
             reflection_pair_rejected_photometric: state.reflection_pair_rejected_photometric,
             reflection_pair_rejected_catalog: state.reflection_pair_rejected_catalog,
