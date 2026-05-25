@@ -93,6 +93,23 @@ android {
         unitTests.isReturnDefaultValues = true
     }
 
+    signingConfigs {
+        // Deliberately-committed debug keystore at
+        // bris-android/keystore/debug.keystore. Without this,
+        // Gradle generates a fresh ephemeral debug keystore per
+        // CI runner, so every nightly/PR APK is signed with a
+        // different key and Android refuses in-place upgrade
+        // (INSTALL_FAILED_UPDATE_INCOMPATIBLE). Password is the
+        // standard Android default ("android"); not a secret.
+        // Debug builds only -- no release signing config here.
+        getByName("debug") {
+            storeFile = rootProject.file("keystore/debug.keystore")
+            storePassword = "android"
+            keyAlias = "androiddebugkey"
+            keyPassword = "android"
+        }
+    }
+
     buildTypes {
         debug {
             // Use the debug Rust build for faster iteration on
