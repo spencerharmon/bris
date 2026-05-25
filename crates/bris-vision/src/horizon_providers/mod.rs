@@ -218,9 +218,9 @@ pub trait HorizonProvider {
 }
 
 pub mod reflection_pair;
-pub mod vertical_line;
 pub mod vanishing_point;
+pub mod vertical_line;
 
 pub use reflection_pair::{ReflectionPairConfig, ReflectionPairProvider, ReflectionPairStats};
-pub use vertical_line::{VerticalLineConfig, VerticalLineProvider, VerticalLineStats};
 pub use vanishing_point::{VanishingPointConfig, VanishingPointProvider, VanishingPointStats};
+pub use vertical_line::{VerticalLineConfig, VerticalLineProvider, VerticalLineStats};
