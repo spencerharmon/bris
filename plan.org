@@ -1467,6 +1467,62 @@ references to the regression tests that pin the behavior. See
    APIs the mobile shell uses, not state changes on the
    engine itself.
 
+** DONE Engine sight persistence
+   On-disk persistence of the reduced-sight pool and the most
+   recent published fix so the streaming engine can hydrate
+   its operational state on cold start. Design:
+   [[file:docs/design/sight_persistence.md][docs/design/sight_persistence.md]].
+
+   Implemented in ~crates/bris-streaming/src/store.rs~ (new
+   module): ~SightStore~ with ~append_sight~, ~append_fix~,
+   ~hydrate_pool~, ~query_range~, ~most_recent~,
+   ~query_fixes~, ~most_recent_fix~. Records are 96-byte
+   fixed-width, little-endian, prefixed with a versioned
+   ~0x42525353~ ('BRSS') magic. Files live under
+   ~<data-root>/{sights,fixes}/current.log~ with hourly +
+   size-triggered rotation into ~archive/~ and a
+   ~retention_days~ prune on startup. Advisory file lock
+   (~current.log.lock~) prevents two engines from racing on
+   the same data root.
+
+   ~EngineConfig~ gains ~store: StoreConfig~. ~Engine::new~
+   opens the store, hydrates ~SightWindow~ from records
+   within ~sight_window_seconds~, and installs the most
+   recent persisted ~PublishedFix~ (within
+   ~position_prior_max_age_seconds~) as the startup
+   ~PositionPrior~. ~push_frame~ persists each newly
+   inserted sight and each published fix synchronously on
+   the Stage E thread; failures log + bump
+   ~EngineDiagnostics::store_append_failures~ and never
+   panic.
+
+   ~EngineDiagnostics~ adds ~sights_persisted_total~,
+   ~sights_loaded_on_start~, ~fixes_persisted_total~,
+   ~store_append_failures~,
+   ~store_corrupted_records_skipped~,
+   ~store_archive_files_pruned~,
+   ~store_current_log_bytes~. ~bris-ffi~ surfaces three new
+   getters: ~pool_sights~, ~recent_sights(n)~,
+   ~last_persisted_fix~, plus a new ~FfiSight~ record
+   mirroring the engine's internal ~Sight~ fields. ~bris-cli~
+   accepts ~--data-root~ (default ~~~/.bris/~) for the serve
+   subcommand.
+
+   Tests: 10 unit tests in ~store.rs~ covering round-trip,
+   partial-trailing-record truncation, magic mismatch +
+   archive, size rotation, hour rotation, retention pruning,
+   concurrent open lock-held, disk error surface,
+   age-windowed hydration, and most-recent-fix recovery; one
+   integration test
+   (~crates/bris-streaming/tests/sight_persistence.rs~)
+   drives an engine to accumulate sights, drops it, reopens
+   on the same tempdir, and verifies pool + position prior +
+   continued operation.
+
+   No new workspace dependencies; ~bincode~/~fs2~ avoided in
+   favour of hand-rolled ~to_le_bytes~ encoding and
+   ~O_EXCL~ sentinel locking.
+
 ** TODO Sweep guidance (mobile only)
    On phone frontends, render a minimal overlay showing
    horizon detection status and current body candidates. No

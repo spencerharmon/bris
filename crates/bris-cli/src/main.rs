@@ -216,6 +216,12 @@ struct ServeArgs {
     /// nautical miles).
     #[arg(long)]
     intrinsics: Option<PathBuf>,
+    /// Root directory for on-disk sight + fix persistence.
+    /// Defaults to `~/.bris/`. Set to a directory the
+    /// process can create files in; lives under your
+    /// configured user data.
+    #[arg(long)]
+    data_root: Option<PathBuf>,
 }
 
 #[derive(Debug, clap::Args)]
@@ -316,6 +322,14 @@ impl HorizonMethod {
             }
         }
     }
+}
+
+/// Default on-disk root for the sight + fix store. `$HOME/.bris/`
+/// on Unix; current directory as a last-resort fallback.
+fn default_data_root() -> PathBuf {
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .map_or_else(|| PathBuf::from(".bris"), |h| h.join(".bris"))
 }
 
 fn default_segmentation_model_path() -> std::path::PathBuf {
@@ -793,7 +807,12 @@ fn run_serve(args: &ServeArgs, raw_config: &config::RawConfig) -> anyhow::Result
         eye_height_sigma_m: 0.5,
         atmosphere: Atmosphere::STANDARD,
     };
-    let engine_config = EngineConfig::new(observer);
+    let engine_config = {
+        let mut c = EngineConfig::new(observer);
+        let data_root = args.data_root.clone().unwrap_or_else(default_data_root);
+        c.store.data_root = data_root;
+        c
+    };
     let engine = Arc::new(StreamingEngine::new(engine_config));
 
     // Subscribe before the capture thread starts so we never

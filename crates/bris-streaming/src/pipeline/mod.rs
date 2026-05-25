@@ -81,7 +81,7 @@ pub(crate) use horizon::{
 pub(crate) use hysteresis::ClassifierHysteresis;
 pub(crate) use queue::{FrameId, Storage};
 pub(crate) use stage_d::{run as run_stage_d, StageDOutcome};
-pub(crate) use stage_e::{run as run_stage_e, SightWindow};
+pub(crate) use stage_e::{run as run_stage_e, Sight, SightBody, SightWindow};
 
 /// Output of Stage B (and, after commit 6, also of Stage D).
 ///

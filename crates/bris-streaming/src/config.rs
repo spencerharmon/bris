@@ -28,6 +28,8 @@ use bris_vision::{
 };
 use std::path::PathBuf;
 
+use crate::store::StoreConfig;
+
 /// Top-level engine configuration.
 ///
 /// Construct with [`EngineConfig::new`] passing the observer
@@ -308,6 +310,12 @@ pub struct EngineConfig {
     /// `enabled = false` reverts to the pre-fusion best-σ
     /// behavior.
     pub horizon_fusion: HorizonFusionConfig,
+
+    /// On-disk persistence of the sight + fix pool. See
+    /// [`crate::StoreConfig`] for the knobs. Default is
+    /// `enabled: true` rooted at `"."`; tests that don't
+    /// want persistence override with `enabled: false`.
+    pub store: StoreConfig,
 }
 
 impl EngineConfig {
@@ -357,6 +365,7 @@ impl EngineConfig {
             vertical_line_provider_config: bris_vision::VerticalLineConfig::default(),
             vanishing_point_provider_config: bris_vision::VanishingPointConfig::default(),
             horizon_fusion: HorizonFusionConfig::default(),
+            store: StoreConfig::default(),
         }
     }
 

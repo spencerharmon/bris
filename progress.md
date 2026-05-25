@@ -9,6 +9,27 @@ For the end-to-end pipeline architecture and data flow, see
 
 ---
 
+## Phase 3.5: Engine sight persistence landed
+
+New `crates/bris-streaming/src/store.rs` module persists
+reduced sights and published fixes to disk in a 96-byte
+fixed-width little-endian format under
+`<data-root>/{sights,fixes}/current.log` with hourly +
+size-triggered rotation into `archive/`. `Engine::new` now
+hydrates the operational sight window from the on-disk log
+and recovers the most recent published fix as a startup
+`PositionPrior`, closing the "app reopened, AP gap" hole.
+`push_frame` persists each newly inserted sight and each
+published fix synchronously; failures log and bump
+`EngineDiagnostics::store_append_failures` without panicking.
+`bris-ffi` surfaces `pool_sights`, `recent_sights(n)`, and
+`last_persisted_fix`. `bris-cli` accepts `--data-root`
+(default `~/.bris/`). 10 unit tests + 1 integration test
+cover the full surface. Zero new workspace deps. See
+`docs/design/sight_persistence.md` for the design contract.
+
+---
+
 ## Phase 4: Cold-start no-AP fix landed
 
 New `bris_nav::cold_start_fix` (in
@@ -24,9 +45,7 @@ Public surface is `CircleOfPosition`, `FixCandidate`,
 guards) and 2 pure-synthetic integration tests in
 `crates/bris-streaming/tests/cold_start_fix.rs`. Zero new
 workspace dependencies. Stage-E engine fallback wiring and
-`Provenance::ColdStart` are deferred to a follow-up PR to
-avoid colliding with the parallel sight-persistence work
-on `bris-streaming/src/store.rs`.
+`Provenance::ColdStart` are deferred to a follow-up PR.
 
 ---
 

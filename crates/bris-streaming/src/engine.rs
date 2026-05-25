@@ -17,14 +17,15 @@ use crate::diagnostics::{EngineDiagnostics, PipelineStageStats};
 use crate::fix::PublishedFix;
 use crate::pipeline::{
     process_frame, run_stage_d, run_stage_e, BodyDetection, ClassifierHysteresis, FrameId,
-    HorizonStageOutcome, SightWindow, StageDOutcome, StageOutcome, Storage,
+    HorizonStageOutcome, Sight, SightWindow, StageDOutcome, StageOutcome, Storage,
 };
+use crate::store::{record_append_failure, SightStore};
 use bris_platesolve::StarHashDb;
 use bris_vision::{Condition, Frame};
 use std::sync::mpsc::{self, Receiver, Sender};
-use std::sync::{Mutex, OnceLock, PoisonError};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use std::time::Instant;
-use tracing::{debug, info};
+use tracing::{debug, error, info};
 
 /// Stage index into [`EngineDiagnostics::stages`] for Stage A
 /// (classifier).
@@ -37,6 +38,73 @@ const STAGE_C: usize = 2;
 const STAGE_D: usize = 3;
 /// Stage index for Stage E (sight assembly + fix publication).
 const STAGE_E: usize = 4;
+
+/// Public, FFI-safe view of one sight in the engine's pool.
+///
+/// Mirrors the in-memory `Sight` fields. Frame IDs are
+/// retained for restart-survivability semantics but may be
+/// `u64::MAX` for sights hydrated from the on-disk store
+/// (the contributing frames are long gone).
+#[derive(Debug, Clone, Copy)]
+pub struct PoolSight {
+    /// Body class: 0 = `SolarSystem`, 1 = Star.
+    pub body_kind: u8,
+    /// Body payload: solar discriminant or HR id.
+    pub body_payload: u32,
+    /// Body azimuth at the assumed observer, radians [0, 2π).
+    pub azimuth_rad: f64,
+    /// Per-sight altitude σ in radians.
+    pub altitude_sigma_rad: f64,
+    /// Intercept in nautical miles.
+    pub intercept_nm: f64,
+    /// 1σ intercept uncertainty in nautical miles.
+    pub intercept_sigma_nm: f64,
+    /// Anchor time, Julian Date (TT).
+    pub anchor_tt_jd: f64,
+    /// Engine-assigned source frame id, or `u64::MAX` when
+    /// hydrated from disk.
+    pub source_frame_id: u64,
+}
+
+impl From<Sight> for PoolSight {
+    fn from(s: Sight) -> Self {
+        use crate::pipeline::SightBody;
+        let (body_kind, body_payload) = match s.body {
+            SightBody::SolarSystem(b) => (0, solar_to_u32_public(b)),
+            SightBody::Star { hr } => (1, hr),
+        };
+        Self {
+            body_kind,
+            body_payload,
+            azimuth_rad: s.azimuth_rad,
+            altitude_sigma_rad: s.altitude_sigma_rad,
+            intercept_nm: s.lop.intercept_nm,
+            intercept_sigma_nm: s.lop.intercept_sigma_nm.value(),
+            anchor_tt_jd: s.anchor_tt.julian_date(),
+            source_frame_id: s.source_frame_id.0,
+        }
+    }
+}
+
+fn solar_to_u32_public(b: bris_almanac::SolarSystemBody) -> u32 {
+    use bris_almanac::{Body, SolarSystemBody};
+    match b {
+        SolarSystemBody::Sun => 0,
+        SolarSystemBody::Moon => 1,
+        SolarSystemBody::Planet(p) => {
+            100 + match p {
+                Body::Mercury => 0,
+                Body::Venus => 1,
+                Body::EarthMoonBarycenter => 2,
+                Body::Mars => 3,
+                Body::Jupiter => 4,
+                Body::Saturn => 5,
+                Body::Uranus => 6,
+                Body::Neptune => 7,
+            }
+        }
+    }
+}
 
 /// Continuous-operation streaming engine.
 ///
@@ -77,6 +145,10 @@ pub struct StreamingEngine {
     /// caller for ~10-30 s in release; documented at
     /// [`crate::PlateSolverInit`].
     plate_db: OnceLock<StarHashDb>,
+    /// On-disk store of sights and fixes. Always present; if
+    /// [`crate::StoreConfig::enabled`] is false, every method
+    /// is a no-op and queries return empty.
+    store: Arc<SightStore>,
 }
 
 /// Mutable engine state. Kept in a single struct so the worker
@@ -146,6 +218,12 @@ struct EngineState {
     horizon_fusion_clustered_frames: u64,
     horizon_fusion_discordant_frames: u64,
     horizon_fusion_singleton_frames: u64,
+    sights_persisted_total: u64,
+    sights_loaded_on_start: u64,
+    fixes_persisted_total: u64,
+    store_append_failures: u64,
+    store_corrupted_records_skipped: u64,
+    store_archive_files_pruned: u64,
 }
 
 /// Nautical mile in metres; for converting Fix sigma (nm) to
@@ -371,6 +449,44 @@ impl StreamingEngine {
                 );
             }
         }
+        // Open the persistence store. A failure to open here
+        // (lock contention, unwritable data root) demotes the
+        // store to disabled rather than aborting engine
+        // construction — the engine remains useful, just
+        // without restart durability.
+        let store = match SightStore::open(config.store.clone()) {
+            Ok(s) => Arc::new(s),
+            Err(e) => {
+                error!(error = ?e, "StreamingEngine::new: store open failed; disabling persistence");
+                let mut disabled = config.store.clone();
+                disabled.enabled = false;
+                Arc::new(SightStore::open(disabled).expect("disabled store always opens (no-op)"))
+            }
+        };
+
+        // Hydrate the sight pool from disk: pull every record
+        // within the sight window of "now".
+        #[allow(clippy::cast_precision_loss)]
+        let now_tt = bris_core::time::Tt::from_julian_date(
+            chrono::Utc::now().timestamp() as f64 / 86_400.0 + 2_440_587.5,
+        );
+        let (hydrated, sights_loaded, corrupted) = store
+            .hydrate_pool(now_tt, config.sight_window_seconds)
+            .unwrap_or_else(|e| {
+                error!(error = ?e, "hydrate_pool failed; starting with empty pool");
+                (Vec::new(), 0, 0)
+            });
+        let mut sight_window = SightWindow::default();
+        sight_window.hydrate(hydrated, config.sight_window_capacity);
+
+        // Recover a recent position prior.
+        let last_published_fix = store
+            .most_recent_fix(now_tt, config.position_prior_max_age_seconds)
+            .unwrap_or_else(|e| {
+                error!(error = ?e, "most_recent_fix failed; no startup position prior");
+                None
+            });
+
         Self {
             state: Mutex::new(EngineState {
                 frames_pushed: 0,
@@ -379,13 +495,13 @@ impl StreamingEngine {
                 stages: [PipelineStageStats::default(); 5],
                 last_classification: None,
                 last_processed_frame_tt: None,
-                last_published_fix_tt: None,
-                last_published_fix: None,
+                last_published_fix_tt: last_published_fix.as_ref().map(|p| p.timestamp),
+                last_published_fix,
                 last_horizon_analysis_size: None,
                 last_horizon_provenance: None,
                 last_horizon_altitude_sigma_rad: None,
                 storage: Storage::new(config.input_ring_capacity),
-                sight_window: SightWindow::default(),
+                sight_window,
                 last_publication: None,
                 classifier_hysteresis: ClassifierHysteresis::default(),
                 reflection_pair_attempts: 0,
@@ -405,11 +521,18 @@ impl StreamingEngine {
                 horizon_fusion_clustered_frames: 0,
                 horizon_fusion_discordant_frames: 0,
                 horizon_fusion_singleton_frames: 0,
+                sights_persisted_total: 0,
+                sights_loaded_on_start: sights_loaded,
+                fixes_persisted_total: 0,
+                store_append_failures: 0,
+                store_corrupted_records_skipped: corrupted,
+                store_archive_files_pruned: 0,
             }),
             config,
             fix_tx,
             fix_rx: Mutex::new(Some(fix_rx)),
             plate_db,
+            store,
         }
     }
 
@@ -564,11 +687,30 @@ impl StreamingEngine {
             run_stage_e(storage, sight_window, &self.config, last_publication)
         };
         state.stages[STAGE_E].entered += 1;
+        // Persist newly-inserted sights to disk. Sync on the
+        // Stage E thread per design; failures are logged and
+        // counted, never panicked.
+        for s in &stage_e_outcome.inserted_sights {
+            match self.store.append_sight(s) {
+                Ok(()) => state.sights_persisted_total += 1,
+                Err(e) => {
+                    record_append_failure("sight", &e);
+                    state.store_append_failures += 1;
+                }
+            }
+        }
         if let Some(published) = &stage_e_outcome.published {
             state.stages[STAGE_E].produced += 1;
             state.last_published_fix_tt = Some(published.timestamp);
             state.last_published_fix = Some(published.clone());
             state.last_publication = Some(Instant::now());
+            match self.store.append_fix(published) {
+                Ok(()) => state.fixes_persisted_total += 1,
+                Err(e) => {
+                    record_append_failure("fix", &e);
+                    state.store_append_failures += 1;
+                }
+            }
             // Send on the fix channel. Failure means the
             // single consumer dropped; we silently swallow
             // because there's no actionable recovery here.
@@ -658,6 +800,13 @@ impl StreamingEngine {
             horizon_fusion_clustered_frames: state.horizon_fusion_clustered_frames,
             horizon_fusion_discordant_frames: state.horizon_fusion_discordant_frames,
             horizon_fusion_singleton_frames: state.horizon_fusion_singleton_frames,
+            sights_persisted_total: state.sights_persisted_total,
+            sights_loaded_on_start: state.sights_loaded_on_start,
+            fixes_persisted_total: state.fixes_persisted_total,
+            store_append_failures: state.store_append_failures,
+            store_corrupted_records_skipped: state.store_corrupted_records_skipped,
+            store_archive_files_pruned: state.store_archive_files_pruned,
+            store_current_log_bytes: self.store.current_sights_log_bytes(),
         }
     }
 
@@ -690,6 +839,28 @@ impl StreamingEngine {
             .storage
             .frame(crate::pipeline::FrameId(id))
             .map(|rf| rf.frame().clone())
+    }
+
+    /// Snapshot the current operational sight pool (in-memory
+    /// only). Returned as opaque [`PoolSight`] values suitable
+    /// for FFI surfacing.
+    #[must_use]
+    pub fn pool_sights(&self) -> Vec<PoolSight> {
+        let state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        state
+            .sight_window
+            .snapshot()
+            .into_iter()
+            .map(PoolSight::from)
+            .collect()
+    }
+
+    /// Shared handle to the on-disk store; lets the FFI expose
+    /// historical sights and fixes without re-implementing
+    /// query logic.
+    #[must_use]
+    pub fn store(&self) -> Arc<SightStore> {
+        Arc::clone(&self.store)
     }
 
     /// Test-only hook: synthesize a published fix and emit it on
@@ -822,7 +993,9 @@ mod tests {
 
     #[test]
     fn engine_constructs_with_default_config() {
-        let cfg = EngineConfig::new(Observer::default_dev());
+        let mut cfg = EngineConfig::new(Observer::default_dev());
+        cfg.store.enabled = false;
+        cfg.store.enabled = false;
         let engine = StreamingEngine::new(cfg);
         let diag = engine.diagnostics();
         assert_eq!(diag.frames_pushed, 0);
@@ -834,7 +1007,9 @@ mod tests {
 
     #[test]
     fn push_frame_increments_counter() {
-        let engine = StreamingEngine::new(EngineConfig::new(Observer::default_dev()));
+        let mut __cfg = EngineConfig::new(Observer::default_dev());
+        __cfg.store.enabled = false;
+        let engine = StreamingEngine::new(__cfg);
         engine.push_frame(dummy_frame()).unwrap();
         engine.push_frame(dummy_frame()).unwrap();
         assert_eq!(engine.diagnostics().frames_pushed, 2);
@@ -846,7 +1021,9 @@ mod tests {
         // return a Frame with the same dimensions we pushed.
         // Lookup by an id that was never assigned must return
         // None rather than the most recent or any other frame.
-        let engine = StreamingEngine::new(EngineConfig::new(Observer::default_dev()));
+        let mut __cfg = EngineConfig::new(Observer::default_dev());
+        __cfg.store.enabled = false;
+        let engine = StreamingEngine::new(__cfg);
         engine.push_frame(dummy_frame()).unwrap();
         let got = engine.frame_by_id(0).expect("frame 0 must be reachable");
         assert_eq!(got.width(), 4);
@@ -864,7 +1041,9 @@ mod tests {
         // be populated. This is the integration test that
         // verifies push_frame actually invokes the pipeline,
         // not just the input-counter bookkeeping.
-        let engine = StreamingEngine::new(EngineConfig::new(Observer::default_dev()));
+        let mut __cfg = EngineConfig::new(Observer::default_dev());
+        __cfg.store.enabled = false;
+        let engine = StreamingEngine::new(__cfg);
         engine.push_frame(dummy_frame()).unwrap();
         let diag = engine.diagnostics();
         assert_eq!(
@@ -891,7 +1070,9 @@ mod tests {
     fn fix_stream_yields_published_fixes() {
         // Verifies the channel API surface end-to-end: subscribe,
         // emit one fix via the test hook, observe it.
-        let engine = StreamingEngine::new(EngineConfig::new(Observer::default_dev()));
+        let mut __cfg = EngineConfig::new(Observer::default_dev());
+        __cfg.store.enabled = false;
+        let engine = StreamingEngine::new(__cfg);
         let rx = engine.fix_stream().unwrap();
         assert!(rx.try_recv().unwrap().is_none());
         engine.emit_fix_for_test(dummy_fix());
@@ -904,7 +1085,9 @@ mod tests {
     fn second_subscribe_returns_already_subscribed() {
         // Single-consumer channel: the second subscribe must
         // refuse rather than silently disconnecting the first.
-        let engine = StreamingEngine::new(EngineConfig::new(Observer::default_dev()));
+        let mut __cfg = EngineConfig::new(Observer::default_dev());
+        __cfg.store.enabled = false;
+        let engine = StreamingEngine::new(__cfg);
         let _first = engine.fix_stream().unwrap();
         let err = engine.fix_stream().unwrap_err();
         assert_eq!(err, PushError::AlreadySubscribed);
@@ -917,7 +1100,9 @@ mod tests {
         // anything.
         let mut obs = Observer::default_dev();
         obs.eye_height_m = 12.5;
-        let engine = StreamingEngine::new(EngineConfig::new(obs));
+        let mut cfg = EngineConfig::new(obs);
+        cfg.store.enabled = false;
+        let engine = StreamingEngine::new(cfg);
         assert!((engine.config().observer.eye_height_m - 12.5).abs() < f64::EPSILON);
     }
 
@@ -928,7 +1113,9 @@ mod tests {
         // commit 1, so this only exercises the API; commit 2
         // onward ensures rotation is honored by the detectors.
         let frame = dummy_frame().with_source_rotation(Rotation::Deg90);
-        let engine = StreamingEngine::new(EngineConfig::new(Observer::default_dev()));
+        let mut __cfg = EngineConfig::new(Observer::default_dev());
+        __cfg.store.enabled = false;
+        let engine = StreamingEngine::new(__cfg);
         engine.push_frame(frame).unwrap();
         assert_eq!(engine.diagnostics().frames_pushed, 1);
     }
@@ -941,7 +1128,9 @@ mod tests {
         // detector finds anything), but the ring depth must be
         // 1 — even body-less, horizon-less frames are kept as
         // stitching intermediaries.
-        let engine = StreamingEngine::new(EngineConfig::new(Observer::default_dev()));
+        let mut __cfg = EngineConfig::new(Observer::default_dev());
+        __cfg.store.enabled = false;
+        let engine = StreamingEngine::new(__cfg);
         engine.push_frame(dummy_frame()).unwrap();
         let diag = engine.diagnostics();
         assert_eq!(
@@ -1000,7 +1189,9 @@ mod tests {
         // After one push of a body+horizon synthetic frame,
         // the sight window should contain exactly one sight.
         // No fix publishes because LSQ needs ≥ 2 sights.
-        let engine = StreamingEngine::new(EngineConfig::new(Observer::default_dev()));
+        let mut __cfg = EngineConfig::new(Observer::default_dev());
+        __cfg.store.enabled = false;
+        let engine = StreamingEngine::new(__cfg);
         // J2000 noon at Greenwich: Sun is high. The synthetic
         // frame's "body" projects to image position (64, 32);
         // the apparent sun place won't match exactly (we're
@@ -1045,6 +1236,7 @@ mod tests {
         // PublishedFix flows through the channel — the
         // end-to-end "frame in → fix out" path works.
         let mut cfg = EngineConfig::new(Observer::default_dev());
+        cfg.store.enabled = false;
         // Drop the publication throttle so two pushes in
         // immediate succession can both publish.
         cfg.min_fix_publication_interval_ms = 0;
@@ -1137,6 +1329,7 @@ mod tests {
         // the test verifies the lazy-build trigger fires
         // regardless.
         let mut cfg = EngineConfig::new(Observer::default_dev());
+        cfg.store.enabled = false;
         cfg.plate_solver_init = crate::PlateSolverInit::Lazy;
         cfg.star_hash_db_cfg = bris_platesolve::StarHashDbConfig {
             mag_cutoff: 1.5,
@@ -1175,6 +1368,7 @@ mod tests {
         // tiny DB; verify the database is populated before
         // `new()` returns.
         let mut cfg = EngineConfig::new(Observer::default_dev());
+        cfg.store.enabled = false;
         cfg.plate_solver_init = crate::PlateSolverInit::AtStartup;
         cfg.star_hash_db_cfg = bris_platesolve::StarHashDbConfig {
             mag_cutoff: 1.5,
@@ -1219,6 +1413,7 @@ mod tests {
         // 21 pushes without panicking and the diagnostics
         // record matches what we expect.
         let mut cfg = EngineConfig::new(Observer::default_dev());
+        cfg.store.enabled = false;
         cfg.classifier_hysteresis_frames = 90;
         let engine = StreamingEngine::new(cfg);
         let bright = u16::MAX / 2; // image evidence: Day
@@ -1250,6 +1445,7 @@ mod tests {
         // the dispatched verdict. The raw last_classification
         // and the dispatched should match per-frame.
         let mut cfg = EngineConfig::new(Observer::default_dev());
+        cfg.store.enabled = false;
         cfg.classifier_hysteresis_frames = 0;
         let engine = StreamingEngine::new(cfg);
         let tt = bris_core::time::Tt::from_julian_date(bris_core::time::JD_J2000);
@@ -1277,6 +1473,7 @@ mod tests {
         // recency rule keeps the trailing
         // stitching_window-worth alive.
         let mut cfg = EngineConfig::new(Observer::default_dev());
+        cfg.store.enabled = false;
         cfg.input_ring_capacity = 5; // tight cap to exercise the eviction
         cfg.stitching_window_seconds = 1.0; // tight recency window
         let engine = StreamingEngine::new(cfg);
@@ -1326,6 +1523,7 @@ mod tests {
         // the trailing recency window should evict everything
         // older than `stitching_window_seconds`.
         let mut cfg = EngineConfig::new(Observer::default_dev());
+        cfg.store.enabled = false;
         cfg.input_ring_capacity = 100;
         cfg.stitching_window_seconds = 2.0;
         let engine = StreamingEngine::new(cfg);
@@ -1359,7 +1557,9 @@ mod tests {
         // per-frame cost grow with frames-pushed (would
         // cause the test to time out under cargo's default
         // ~60 s per-test budget).
-        let cfg = EngineConfig::new(Observer::default_dev());
+        let mut cfg = EngineConfig::new(Observer::default_dev());
+        cfg.store.enabled = false;
+        cfg.store.enabled = false;
         let engine = StreamingEngine::new(cfg);
         let base = bris_core::time::JD_J2000;
         let start = std::time::Instant::now();
@@ -1388,7 +1588,9 @@ mod tests {
         // Pathological capture: frames arrive with TTs going
         // backward. The engine should not panic and the per-
         // push counters should still advance.
-        let cfg = EngineConfig::new(Observer::default_dev());
+        let mut cfg = EngineConfig::new(Observer::default_dev());
+        cfg.store.enabled = false;
+        cfg.store.enabled = false;
         let engine = StreamingEngine::new(cfg);
         let base = bris_core::time::JD_J2000;
         // 5 frames in reverse TT order.
@@ -1410,6 +1612,7 @@ mod tests {
         // sight-window capacity, verifying the window never
         // exceeds capacity.
         let mut cfg = EngineConfig::new(Observer::default_dev());
+        cfg.store.enabled = false;
         cfg.sight_window_capacity = 3;
         cfg.sight_window_seconds = 7200.0; // wide enough to keep all sights
         cfg.min_fix_publication_interval_ms = 0;
@@ -1437,6 +1640,7 @@ mod tests {
         // successful publication, the `dominant_source.label()`
         // must be one of the documented stable strings.
         let mut cfg = EngineConfig::new(Observer::default_dev());
+        cfg.store.enabled = false;
         cfg.min_fix_publication_interval_ms = 0;
         cfg.sight_window_seconds = 7200.0;
         let engine = StreamingEngine::new(cfg);

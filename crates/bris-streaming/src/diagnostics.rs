@@ -157,6 +157,28 @@ pub struct EngineDiagnostics {
     /// Frames where only one provider produced any hypothesis;
     /// no fusion was possible.
     pub horizon_fusion_singleton_frames: u64,
+
+    /// Total reduced sights persisted to disk since engine
+    /// construction.
+    pub sights_persisted_total: u64,
+    /// Sights hydrated from disk at engine startup.
+    pub sights_loaded_on_start: u64,
+    /// Total published fixes persisted to disk since engine
+    /// construction.
+    pub fixes_persisted_total: u64,
+    /// Append failures (disk full, permission, missing
+    /// directory). Incremented per failed record; the record
+    /// is dropped and the engine continues.
+    pub store_append_failures: u64,
+    /// Records skipped on load due to short trailing bytes or
+    /// magic mismatch within a file.
+    pub store_corrupted_records_skipped: u64,
+    /// Archive files removed during retention pruning over the
+    /// life of the engine. Today this is set at startup; future
+    /// rotations will add to it.
+    pub store_archive_files_pruned: u64,
+    /// Current size of `sights/current.log` in bytes.
+    pub store_current_log_bytes: u64,
 }
 
 /// Per-stage processing statistics.

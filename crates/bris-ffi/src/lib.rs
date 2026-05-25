@@ -762,6 +762,87 @@ impl Engine {
     pub fn frame_by_id(&self, id: u64) -> Option<FfiFrame> {
         self.inner.frame_by_id(id).map(frame_to_ffi)
     }
+
+    /// Sights currently in the operational pool. In-memory
+    /// only; cheap.
+    pub fn pool_sights(&self) -> Vec<FfiSight> {
+        self.inner
+            .pool_sights()
+            .into_iter()
+            .map(pool_sight_to_ffi)
+            .collect()
+    }
+
+    /// Most-recent N sights from the on-disk store (current.log
+    /// + archive). Reads from disk.
+    ///
+    /// # Errors
+    /// Returns [`FfiError::Engine`] on I/O failure.
+    pub fn recent_sights(&self, n: u32) -> Result<Vec<FfiSight>, FfiError> {
+        let store = self.inner.store();
+        let recent = store
+            .recent_sights_public(n as usize)
+            .map_err(|e| FfiError::Engine {
+                detail: format!("recent_sights: {e}"),
+            })?;
+        Ok(recent.into_iter().map(pool_sight_to_ffi).collect())
+    }
+
+    /// Most-recent persisted fix on disk. Returns `None` when
+    /// no fix has been persisted yet.
+    ///
+    /// # Errors
+    /// Returns [`FfiError::Engine`] on I/O failure.
+    pub fn last_persisted_fix(&self) -> Result<Option<FfiPublishedFix>, FfiError> {
+        let store = self.inner.store();
+        #[allow(clippy::cast_precision_loss)]
+        let now = bris_core::time::Tt::from_julian_date(
+            chrono::Utc::now().timestamp() as f64 / 86_400.0 + 2_440_587.5,
+        );
+        let fix = store
+            .last_persisted_fix_public(now, f64::INFINITY)
+            .map_err(|e| FfiError::Engine {
+                detail: format!("last_persisted_fix: {e}"),
+            })?;
+        Ok(fix.as_ref().map(published_fix_to_ffi))
+    }
+}
+
+/// One sight as it crosses the FFI. Mirrors the engine's
+/// internal `Sight` fields.
+#[derive(Debug, Clone, Copy, uniffi::Record)]
+pub struct FfiSight {
+    /// Body class: 0 = SolarSystem, 1 = Star.
+    pub body_kind: u8,
+    /// Body payload: solar discriminant or HR id.
+    pub body_payload: u32,
+    /// Body azimuth at the assumed observer, radians.
+    pub azimuth_rad: f64,
+    /// Per-sight altitude σ, radians.
+    pub altitude_sigma_rad: f64,
+    /// Intercept in nautical miles.
+    pub intercept_nm: f64,
+    /// 1σ intercept uncertainty in nautical miles.
+    pub intercept_sigma_nm: f64,
+    /// Anchor time, Julian Date (TT).
+    pub anchor_tt_jd: f64,
+    /// Source frame id (engine-assigned), or `u64::MAX` when
+    /// the sight was hydrated from disk and the originating
+    /// frame is no longer in the ring buffer.
+    pub source_frame_id: u64,
+}
+
+fn pool_sight_to_ffi(s: bris_streaming::PoolSight) -> FfiSight {
+    FfiSight {
+        body_kind: s.body_kind,
+        body_payload: s.body_payload,
+        azimuth_rad: s.azimuth_rad,
+        altitude_sigma_rad: s.altitude_sigma_rad,
+        intercept_nm: s.intercept_nm,
+        intercept_sigma_nm: s.intercept_sigma_nm,
+        anchor_tt_jd: s.anchor_tt_jd,
+        source_frame_id: s.source_frame_id,
+    }
 }
 
 /// Convert a [`bris_vision::Frame`] back to an [`FfiFrame`].
