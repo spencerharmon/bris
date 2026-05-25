@@ -1692,6 +1692,12 @@ references to the regression tests that pin the behavior. See
    uncertainty for that measurement, carried in the type system rather
    than a side channel. Sources to track:
    - Body centroiding residual (from sub-pixel fit covariance).
+     [DONE] `crates/bris-vision/src/centroid_refine.rs` produces
+     `RefinedCentroid { sigma_x_px, sigma_y_px, fit_quality }`
+     from a 2D Gaussian fit on the halo; Stage A
+     (`detect_day_body`) promotes the primary centroid before
+     handing it to Stage E. Threading `sigma_x_px` separately
+     from `sigma_y_px` through the LOP σ chain is the follow-up.
    - Horizon line fit residual (from RANSAC inlier covariance).
    - Lens calibration residual (from calibration RMS, optionally
      inflated by time/temperature since last calibration).

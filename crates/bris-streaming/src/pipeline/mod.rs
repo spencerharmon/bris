@@ -445,7 +445,27 @@ fn detect_day_body(frame: &Frame, cfg: SaturatedBodyConfig) -> BodyDetection {
     // Phase 1 behaviour).
     match bris_vision::extract_multi_saturated_centroids(frame, cfg, None) {
         Ok(mut centroids) if !centroids.is_empty() => {
-            let primary = centroids.remove(0);
+            let mut primary = centroids.remove(0);
+            // Sub-pixel refinement of the primary via 2D
+            // Gaussian fit on the non-saturated halo. Falls
+            // back to the integer centroid when the fit is
+            // unreliable (`refined = false`).
+            let radius_f = (f64::from(primary.area_px) / core::f64::consts::PI)
+                .sqrt()
+                .mul_add(2.0, 6.0);
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+            let radius = radius_f.max(1.0) as u32;
+            let halo =
+                bris_vision::extract_halo_pixels(frame, primary, cfg.saturation_threshold, radius);
+            let refined = bris_vision::refine_centroid_subpixel(frame, primary, &halo);
+            if refined.refined {
+                primary.x = refined.x;
+                primary.y = refined.y;
+                let max_sigma_px = refined.sigma_x_px.max(refined.sigma_y_px);
+                if let Ok(s) = bris_core::Sigma::new(max_sigma_px) {
+                    primary.position_sigma_px = s;
+                }
+            }
             BodyDetection::Day(primary, centroids)
         }
         Ok(_) => {

@@ -5,6 +5,7 @@
 //! Phase 2 for design.
 
 pub mod centroid;
+pub mod centroid_refine;
 pub mod condition;
 pub mod frame;
 pub mod fusion;
@@ -26,6 +27,9 @@ pub use centroid::{
     centroid_brightest_body, centroid_brightest_body_in_mask, centroid_saturated_body_in_mask,
     extract_multi_saturated_centroids, Centroid, CentroidConfig, CentroidError,
     SaturatedBodyConfig,
+};
+pub use centroid_refine::{
+    extract_halo_pixels, refine_centroid_subpixel, HaloPixel, RefinedCentroid,
 };
 pub use condition::{
     classify, AstronomicalEvidence, Classification, Condition, ConditionConfig, ImageEvidence,
