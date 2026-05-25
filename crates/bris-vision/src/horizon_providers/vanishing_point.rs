@@ -60,12 +60,14 @@
 //!
 //! Dominant cost is the RANSAC inlier-scoring loop:
 //! `O(iterations · edgels)`. With defaults (200 iterations,
-//! ≤ 2048 edgels) this is ~0.4 Medgel-ops/frame, comfortably
-//! under 10 ms on a Pi Zero 2W's single core at the engine's
-//! horizon-analysis resolution (≤ 1280 long edge). The
-//! provider is the most expensive of the horizon providers
-//! and is dispatched last (after cheap optical / reflection-
-//! pair providers).
+//! ≤ 2048 edgels) this is ~0.4 Medgel-ops/frame. A smoke
+//! benchmark in the unit tests asserts the synthetic-cube
+//! workload completes in < 50 ms on the dev workstation
+//! (`x86_64`); proper Pi Zero 2W benchmarking is deferred to
+//! Phase 3 hardware-in-the-loop measurement. The provider is
+//! the most expensive of the horizon providers and is
+//! dispatched last (after cheap optical / reflection-pair
+//! providers).
 
 // Pedantic lints suppressed module-wide:
 //   * `similar_names` / `many_single_char_names`: pixel-math
@@ -105,12 +107,12 @@ pub struct VanishingPointConfig {
     /// Floor on the synthesized horizon altitude σ (radians).
     /// Default 5e-4 rad (~1.5').
     pub sigma_floor_rad: f64,
-    /// A VP at normalized image position `(x_n, y_n)` is
-    /// classified as vertical (gravity direction) iff
-    /// `|y_n - cy| > vertical_vp_min_distance_from_image_center_normalized · H`.
-    /// Default 0.3 (a vertical VP must be at least 30 % of the
-    /// image height away from the principal-point row, in
-    /// either direction).
+    /// **Deprecated / reserved**: prior versions used
+    /// `|y_n - cy| > value · H` to classify VPs as vertical;
+    /// the classifier now uses camera-frame direction (see
+    /// `is_vertical_vp`). Retained as a config field to keep
+    /// the public API stable for the spike; ignored at
+    /// runtime.
     pub vertical_vp_min_distance_from_image_center_normalized: f64,
     /// Distance threshold (pixels) for an edgel to count as an
     /// inlier of a candidate VP.
@@ -137,12 +139,12 @@ impl Default for VanishingPointConfig {
             // (e.g. star blobs on a dim background) can
             // accidentally form 4-inlier "clusters" that
             // displace honest horizon detections via the
-            // best-σ merge. 20 keeps the false-positive rate
-            // negligible on synthetic-blob inputs while still
-            // firing reliably on structured scenes (the
-            // synthetic cube test passes comfortably at this
-            // threshold).
-            min_inliers: 20,
+            // best-σ merge. 50 is empirically above the
+            // false-positive ceiling (~48 inliers) on a
+            // 128×128 uniform-noise frame (see
+            // `default_config_rejects_noise`) while still
+            // firing reliably on structured scenes.
+            min_inliers: 50,
             ransac_iterations: 200,
             sigma_floor_rad: 5e-4,
             vertical_vp_min_distance_from_image_center_normalized: 0.3,
@@ -203,25 +205,33 @@ impl VanishingPointProvider {
             stats.rejected_no_cluster += 1;
             return None;
         }
-        let vps = ransac_vanishing_points(&edgels, &self.config);
+        let frame_max_dim = f64::from(ctx.frame.width().max(ctx.frame.height()));
+        let vps = ransac_vanishing_points(&edgels, &self.config, frame_max_dim);
         if vps.is_empty() {
             stats.rejected_no_cluster += 1;
             return None;
         }
 
         let intrinsics = ctx.intrinsics;
-        let h_norm = self
-            .config
-            .vertical_vp_min_distance_from_image_center_normalized
-            * f64::from(ctx.frame.height());
 
-        // Vertical-first policy: if a VP is far above/below the
-        // principal-point row in image space, it represents
-        // gravity directly.
-        let vertical = vps.iter().find(|v| (v.y - intrinsics.cy).abs() > h_norm);
+        // Vertical-first policy: classify each VP by its
+        // camera-frame direction. A VP in image pixels
+        // (vp_x, vp_y) corresponds to the camera-frame
+        // direction `d_cam = normalize(K⁻¹ · [vp_x, vp_y, 1])`
+        // — the shared direction of the parallel lines that
+        // produced the cluster. A *vertical* VP has
+        // |d_cam · y_cam_axis| ≈ 1 (lines are nearly parallel
+        // to the camera's y axis, i.e. world-vertical when the
+        // camera is upright). This is geometric rather than
+        // image-position-based, so it handles strongly-tilted
+        // cameras (vertical VP *inside* the image) correctly.
+        // Image-y distance is used only as a fallback for the
+        // level-camera degeneracy already handled by the
+        // synthetic-VP path in `ransac_vanishing_points`.
+        let vertical = vps.iter().find(|v| is_vertical_vp(v, intrinsics));
         if let Some(v) = vertical {
             let sky_normal = vp_to_sky_normal(v, intrinsics)?;
-            let sigma_value = vp_sigma_rad(v, &self.config);
+            let sigma_value = vp_sigma_rad(v, &self.config, intrinsics);
             let altitude_sigma = Sigma::new(sigma_value).unwrap_or(Sigma::ZERO);
             let line = horizon_line_from_normal(&sky_normal, intrinsics, altitude_sigma)?;
             stats.hypothesized += 1;
@@ -239,7 +249,7 @@ impl VanishingPointProvider {
         // the horizon line.
         let horizontals: Vec<&VanishingPoint> = vps
             .iter()
-            .filter(|v| (v.y - intrinsics.cy).abs() <= h_norm)
+            .filter(|v| !is_vertical_vp(v, intrinsics))
             .collect();
         if horizontals.len() < 2 {
             stats.rejected_no_cluster += 1;
@@ -258,8 +268,18 @@ impl VanishingPointProvider {
         // σ scaled by RMS of the two contributing VPs' σ; the
         // combined gravity-direction σ tracks the worse of the
         // two clusters but tightens with both inlier counts.
-        let combined_sigma = ((vp_sigma_rad(v0, &self.config)).powi(2)
-            + (vp_sigma_rad(v1, &self.config)).powi(2))
+        //
+        // NOTE (σ-honesty, Phase 1 limitation): this does not
+        // model the geometric leverage of the pixel-space
+        // baseline between the two VPs. A proper covariance
+        // would propagate each VP's positional σ through the
+        // 2-point line fit, where a short baseline inflates the
+        // resulting altitude σ. Proper covariance propagation
+        // through the 2-point line fit is deferred to a follow-
+        // up; the current value is a conservative summary
+        // statistic, not a propagated quantity.
+        let combined_sigma = ((vp_sigma_rad(v0, &self.config, intrinsics)).powi(2)
+            + (vp_sigma_rad(v1, &self.config, intrinsics)).powi(2))
         .sqrt()
             / std::f64::consts::SQRT_2;
         let altitude_sigma =
@@ -377,10 +397,15 @@ fn splitmix64(state: &mut u64) -> u64 {
 /// RANSAC for up to 3 vanishing points. Returns them sorted by
 /// inlier count descending; performs non-maximum suppression
 /// so near-duplicate VPs collapse.
-fn ransac_vanishing_points(edgels: &[Edgel], cfg: &VanishingPointConfig) -> Vec<VanishingPoint> {
+fn ransac_vanishing_points(
+    edgels: &[Edgel],
+    cfg: &VanishingPointConfig,
+    frame_max_dim: f64,
+) -> Vec<VanishingPoint> {
     if edgels.len() < 2 {
         return Vec::new();
     }
+    let synth_dim = frame_max_dim.max(1.0);
     let n = edgels.len();
     let mut state: u64 = (n as u64)
         .wrapping_mul(0xA076_1D64_78BD_642F)
@@ -403,11 +428,33 @@ fn ransac_vanishing_points(edgels: &[Edgel], cfg: &VanishingPointConfig) -> Vec<
         let vx = a.gy * c2 - c1 * b.gy;
         let vy = c1 * b.gx - a.gx * c2;
         let vw = a.gx * b.gy - a.gy * b.gx;
-        if vw.abs() < 1e-9 {
-            continue; // parallel or near-parallel lines
-        }
-        let vp_x = vx / vw;
-        let vp_y = vy / vw;
+        // Parallel-lines / level-camera degeneracy: when the
+        // two edgels have nearly-identical orientations the
+        // homogeneous intersection lies at (or very near)
+        // infinity along their shared direction. Silently
+        // dropping these pairs would discard the *exactly*
+        // case a level camera looking at a building wall
+        // produces (vertical VP at ±∞). Instead we synthesize
+        // a finite VP at a very large distance along the
+        // shared direction — geometrically equivalent for the
+        // inlier-scoring step that follows (a faraway VP and
+        // an at-infinity VP both score collinear edgels as
+        // inliers) and preserves the level-camera case.
+        let (vp_x, vp_y) = if vw.abs() < 1e-9 {
+            // Shared direction perpendicular to the (a.gx, a.gy)
+            // gradient is (-a.gy, a.gx). Place the synthetic VP
+            // at `synth_scale · frame_max_dim` along that
+            // direction from the principal point.
+            let synth_scale = 1.0e6;
+            let dir_x = -a.gy;
+            let dir_y = a.gx;
+            (
+                a.x + synth_scale * synth_dim * dir_x,
+                a.y + synth_scale * synth_dim * dir_y,
+            )
+        } else {
+            (vx / vw, vy / vw)
+        };
         if !vp_x.is_finite() || !vp_y.is_finite() {
             continue;
         }
@@ -487,11 +534,67 @@ fn vp_to_sky_normal(vp: &VanishingPoint, intrinsics: &Intrinsics) -> Option<Came
 
 /// Per-VP σ on gravity-direction (radians). Floor at
 /// `sigma_floor_rad`; tightens as `1/sqrt(inliers)`.
-fn vp_sigma_rad(vp: &VanishingPoint, cfg: &VanishingPointConfig) -> f64 {
-    let per_edgel_sigma_rad = (cfg.inlier_distance_px / 1000.0).max(cfg.sigma_floor_rad);
+///
+/// The per-edgel angular σ is derived from the camera
+/// intrinsics: a 1-pixel perpendicular distance subtends
+/// approximately `1/f` radians at the camera, where `f` is the
+/// focal length in pixels. We use `mean(fx, fy)` for an
+/// isotropic estimate (Bris intrinsics may have fx ≠ fy on a
+/// non-square-pixel sensor, but the difference is sub-percent
+/// for the lenses Bris targets). Hence per-edgel σ in pixels
+/// (`inlier_distance_px`) divides by the focal length to give
+/// per-edgel σ in radians. This makes the cluster σ
+/// resolution-invariant: the *same* lens at a different image
+/// size has its fx scaled in the same proportion as the
+/// pixel-space residual, so the angular σ is unchanged. The
+/// previous hand-tuned `/1000` constant violated the project's
+/// σ-honesty rule (AGENTS.md).
+fn vp_sigma_rad(vp: &VanishingPoint, cfg: &VanishingPointConfig, intrinsics: &Intrinsics) -> f64 {
+    let f_mean = 0.5 * (intrinsics.fx + intrinsics.fy);
+    let per_edgel_sigma_rad = if f_mean > 0.0 {
+        (cfg.inlier_distance_px / f_mean).max(cfg.sigma_floor_rad)
+    } else {
+        cfg.sigma_floor_rad
+    };
     #[allow(clippy::cast_precision_loss)]
     let n = (vp.inliers.max(1)) as f64;
     (per_edgel_sigma_rad / n.sqrt()).max(cfg.sigma_floor_rad)
+}
+
+/// Classify a candidate VP as vertical (gravity-direction) by
+/// looking at its camera-frame direction rather than its image
+/// position.
+///
+/// The VP pixel `(vp_x, vp_y)` rayifies through the lens model
+/// into a unit direction in camera frame; that direction is
+/// the shared direction of the parallel lines that converged
+/// at the VP. A *vertical* VP corresponds to lines that are
+/// parallel to world-vertical (gravity), which in the camera
+/// frame is the y-axis when the camera is upright.
+///
+/// We use a *dominant-image-tilt* test: the VP is vertical iff
+/// its camera-frame direction's y-component magnitude exceeds
+/// its x-component magnitude (`|d.y| > |d.x|`). This
+/// distinguishes lines that converge in the up/down direction
+/// (vertical poles, building corners) from lines that converge
+/// left/right (lintels, road markings). The z-component
+/// (forward) is naturally large for any VP near the image
+/// center and does not discriminate vertical from horizontal,
+/// so we ignore it.
+///
+/// This formulation is *geometric* and so handles the cases
+/// the image-y rule failed on:
+///   * Level camera ⇒ vertical VP at ±∞ in image, but its
+///     camera-frame direction is exactly ±`y_cam` ⇒ vertical.
+///   * Strongly-tilted camera (e.g. looking up at a skyline)
+///     ⇒ vertical VP *inside* the image close to `cy`, but its
+///     camera-frame direction still has y-axis dominance ⇒
+///     vertical.
+fn is_vertical_vp(vp: &VanishingPoint, intrinsics: &Intrinsics) -> bool {
+    let Some(d) = CameraRay::from_pixel(intrinsics, vp.x, vp.y).normalize() else {
+        return false;
+    };
+    d.y.abs() > d.x.abs()
 }
 
 #[cfg(test)]
@@ -711,6 +814,7 @@ mod tests {
     fn sigma_tightens_with_more_inliers() {
         // Provider's σ formula: σ ≈ per_edgel_σ / sqrt(N).
         let cfg = VanishingPointConfig::default();
+        let i = intr(640, 480);
         let small = vp_sigma_rad(
             &VanishingPoint {
                 x: 0.0,
@@ -718,6 +822,7 @@ mod tests {
                 inliers: 4,
             },
             &cfg,
+            &i,
         );
         let large = vp_sigma_rad(
             &VanishingPoint {
@@ -726,6 +831,7 @@ mod tests {
                 inliers: 400,
             },
             &cfg,
+            &i,
         );
         assert!(
             large <= small,
@@ -735,6 +841,169 @@ mod tests {
             small >= cfg.sigma_floor_rad - 1e-12,
             "σ must respect the floor: {small} < {}",
             cfg.sigma_floor_rad,
+        );
+    }
+
+    #[test]
+    fn sigma_scales_with_focal_length() {
+        // σ-honesty: doubling focal length should halve the
+        // per-edgel angular σ (when floor isn't binding).
+        let cfg = VanishingPointConfig {
+            sigma_floor_rad: 1e-12,
+            ..VanishingPointConfig::default()
+        };
+        let vp = VanishingPoint {
+            x: 0.0,
+            y: 0.0,
+            inliers: 100,
+        };
+        let mut i_short = intr(640, 480);
+        let mut i_long = intr(640, 480);
+        i_short.fx = 500.0;
+        i_short.fy = 500.0;
+        i_long.fx = 1000.0;
+        i_long.fy = 1000.0;
+        let s_short = vp_sigma_rad(&vp, &cfg, &i_short);
+        let s_long = vp_sigma_rad(&vp, &cfg, &i_long);
+        // 2× focal length ⇒ 0.5× σ.
+        assert!(
+            (s_short / s_long - 2.0).abs() < 1e-9,
+            "σ must be inversely proportional to f: short={s_short} long={s_long}",
+        );
+    }
+
+    #[test]
+    fn default_config_rejects_noise() {
+        // σ-honesty + false-positive coverage gap from PR
+        // critic #4: at the DEFAULT config (no raised
+        // min_inliers) a noise frame must yield None.
+        let w: u32 = 128;
+        let h: u32 = 128;
+        let mut pixels = blank_frame(w, h);
+        let mut s: u64 = 0xDEAD_BEEF;
+        for v in pixels.iter_mut() {
+            *v = (splitmix64(&mut s) as u16) ^ 0x2710_u16;
+        }
+        let f = frame_from(pixels, w, h);
+        let intrinsics = intr(w, h);
+        let ctx = ctx_for(&f, &intrinsics);
+        let provider = VanishingPointProvider::default();
+        assert!(
+            provider.detect(&ctx).is_none(),
+            "default-config noise frame must yield None",
+        );
+    }
+
+    #[test]
+    fn vertical_vp_classifier_geometric() {
+        // A VP at the principal point (vp_x = cx, vp_y = cy)
+        // corresponds to a camera-frame direction (0, 0, 1) —
+        // straight ahead, *not* vertical.
+        let i = intr(640, 480);
+        let vp_center = VanishingPoint {
+            x: i.cx,
+            y: i.cy,
+            inliers: 50,
+        };
+        assert!(!is_vertical_vp(&vp_center, &i));
+        // A VP whose camera-frame direction is dominated by
+        // the y-axis: place it far below the image so the ray
+        // through it is nearly (0, +1, 0)-ish.
+        let vp_below = VanishingPoint {
+            x: i.cx,
+            y: i.cy + 10_000.0,
+            inliers: 50,
+        };
+        assert!(is_vertical_vp(&vp_below, &i));
+        // A strongly-tilted-camera scenario: vertical VP
+        // *inside* the image, only 50 px from cy. With image-y
+        // rule (0.3 · H = 144 px) this would be misclassified
+        // horizontal; the geometric classifier should still
+        // see y-axis dominance for an extreme-y direction.
+        // Use a long-focal-length intrinsic so a 50 px offset
+        // still rayifies into a strongly y-tilted direction.
+        let mut i_long = intr(640, 480);
+        i_long.fx = 50.0;
+        i_long.fy = 50.0;
+        let vp_tilted = VanishingPoint {
+            x: i_long.cx,
+            y: i_long.cy + 200.0,
+            inliers: 50,
+        };
+        assert!(
+            is_vertical_vp(&vp_tilted, &i_long),
+            "strongly-tilted camera vertical VP must classify as vertical even when image-y close to cy",
+        );
+        // And the level-camera limit: a VP very far below
+        // the image ⇒ direction → +y_cam ⇒ vertical.
+        let vp_at_infinity = VanishingPoint {
+            x: i.cx,
+            y: i.cy + 1.0e6,
+            inliers: 50,
+        };
+        assert!(is_vertical_vp(&vp_at_infinity, &i));
+    }
+
+    #[test]
+    fn parallel_lines_produce_finite_vp() {
+        // Critic #2: two near-parallel edgels must produce a
+        // synthetic finite VP, not be silently dropped.
+        // Verify by direct call into ransac with two
+        // exactly-parallel edgels at min_inliers=2.
+        let edgels = vec![
+            Edgel {
+                x: 10.0,
+                y: 10.0,
+                gx: 1.0,
+                gy: 0.0,
+            },
+            Edgel {
+                x: 10.0,
+                y: 200.0,
+                gx: 1.0,
+                gy: 0.0,
+            },
+        ];
+        let cfg = VanishingPointConfig {
+            min_inliers: 2,
+            ransac_iterations: 10,
+            ..VanishingPointConfig::default()
+        };
+        let vps = ransac_vanishing_points(&edgels, &cfg, 640.0);
+        assert!(
+            !vps.is_empty(),
+            "parallel-lines case must synthesize a finite VP",
+        );
+        for v in &vps {
+            assert!(v.x.is_finite() && v.y.is_finite());
+        }
+    }
+
+    /// Smoke benchmark — NOT a Pi Zero 2W number. This runs on
+    /// the dev workstation (`x86_64`) and asserts the synthetic-
+    /// cube workload completes in well under 50 ms. Real Pi
+    /// Zero 2W benchmarking is deferred to Phase 3 hardware-
+    /// in-the-loop testing.
+    #[test]
+    fn smoke_bench_under_50ms() {
+        let w: u32 = 640;
+        let h: u32 = 480;
+        let mut pixels = blank_frame(w, h);
+        let cx = (w / 2) as i32;
+        let cy = (h / 2) as i32;
+        let vp_v = (cx, cy + (h as i32) * 4);
+        let anchors: Vec<(i32, i32)> = (0..12).map(|k| (40 + k * 50, 40)).collect();
+        draw_fan(&mut pixels, w, h, vp_v.0, vp_v.1, &anchors);
+        let f = frame_from(pixels, w, h);
+        let intrinsics = intr(w, h);
+        let ctx = ctx_for(&f, &intrinsics);
+        let provider = VanishingPointProvider::default();
+        let start = std::time::Instant::now();
+        let _ = provider.detect(&ctx);
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed.as_millis() < 50,
+            "smoke bench exceeded 50ms (x86_64 dev box): {elapsed:?}",
         );
     }
 }

@@ -299,7 +299,6 @@ pub(crate) struct VanishingPointDispatch {
     pub invoked: bool,
     pub used: bool,
 }
-}
 
 /// Run the reflection-pair provider against an already-
 /// computed [`HorizonStageOutcome`] and merge by best-σ.

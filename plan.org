@@ -1557,20 +1557,33 @@ references to the regression tests that pin the behavior. See
     temporal scope. Minimal in-module Sobel edgel extractor +
     RANSAC over edgel pairs (homogeneous-coordinate line
     intersection → candidate VP) + non-maximum suppression
-    to keep top-3 clusters. Vertical-first classification
-    (`|y − cy| > 0.3·H` ⇒ gravity) then two-horizontal-VP
-    fallback (line through both ⇒ horizon). σ floors at
-    5e-4 rad and tightens as `~1/√N_inliers`. Dispatched
-    last (most expensive provider), gated on the cheap
-    detectors failing to clear the early-termination
-    threshold. `EngineDiagnostics` gains three counters
+    to keep top-3 clusters. Geometric vertical-VP
+    classification (camera-frame direction, `|d.y| > |d.x|`)
+    then two-horizontal-VP fallback (line through both →
+    horizon). Parallel-lines / level-camera degeneracy is
+    handled by synthesizing a finite VP at large distance
+    along the shared direction (no silent drop). σ derived
+    from camera focal length (per-edgel σ in radians =
+    `inlier_distance_px / mean(fx, fy)`), floored at 5e-4 rad
+    and tightens as `~1/√N_inliers`. Dispatched last (most
+    expensive provider), gated on the cheap detectors failing
+    to clear the early-termination threshold.
+    `EngineDiagnostics` gains three counters
     (`vanishing_point_hypothesized`, `vanishing_point_used`,
-    `vanishing_point_rejected_no_cluster`). Acceptance: four
+    `vanishing_point_rejected_no_cluster`). Acceptance: nine
     synthetic unit tests (cube edges → vertical-VP horizon,
-    lamp-post row → gravity, random-noise frame → None,
-    σ-monotonicity). Line-detection front-end is intentionally
-    minimal pending consolidation with `VerticalLineProvider`
-    (TODO marker in `vanishing_point.rs` module doc).
+    lamp-post row → gravity, random-noise frame → None at
+    raised + default config, σ monotonicity, σ inverse-
+    proportional to focal length, geometric classifier on
+    level/tilted cameras, parallel-lines synthetic VP, smoke
+    benchmark < 50 ms x86_64). Default `min_inliers` raised to
+    50 to clear the noise-frame false-positive ceiling.
+    Line-detection front-end is intentionally minimal pending
+    consolidation with `VerticalLineProvider` (TODO marker in
+    `vanishing_point.rs` module doc). σ propagation through
+    the 2-horizontal-VP line fit (baseline-leverage covariance)
+    deferred to a follow-up; current value is a conservative
+    summary statistic.
 ** TODO Phase 5: IMU provider
    Mark the IMU-prior TODO at plan.org line ~1062 PARTIAL once
    the provider trait carries the IMU implementation.

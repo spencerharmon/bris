@@ -581,10 +581,21 @@ fn format_horizon_provenance(p: bris_vision::HorizonProvenance) -> String {
                 format!("ReflectionPair({pair_count})")
             }
         }
-        // Catch-all for future provenance variants (vertical
-        // line, vanishing point, fused, etc.). Falls back to
-        // debug formatting so the HUD continues to render
-        // something useful without coordinating an FFI bump.
+        HP::VerticalLine { line_count } => format!("VerticalLine({line_count})"),
+        HP::VanishingPoint {
+            vp_count,
+            used_vertical,
+        } => {
+            if used_vertical {
+                format!("VanishingPoint({vp_count},vert)")
+            } else {
+                format!("VanishingPoint({vp_count})")
+            }
+        }
+        // Catch-all for future provenance variants. Falls
+        // back to debug formatting so the HUD continues to
+        // render something useful without coordinating an
+        // FFI bump.
         other => format!("{other:?}"),
     }
 }
