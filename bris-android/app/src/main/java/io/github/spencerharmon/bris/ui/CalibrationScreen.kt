@@ -390,7 +390,7 @@ fun CalibrationScreen(
                     }
                 },
             ) { Text("Save calibration to phone") }
-            if (debugMode) {
+            if (debugMode && io.github.spencerharmon.bris.BuildConfig.ENABLE_REMOTE_SUBMIT) {
                 Button(
                     modifier = Modifier.fillMaxWidth(),
                     enabled = tally.value.good > 0,

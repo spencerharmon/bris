@@ -61,6 +61,13 @@ android {
             ?: "spike-shared-token-replace-me"
         buildConfigField("String", "BRIS_COLLECTOR_BEARER_TOKEN", "\"$token\"")
         buildConfigField("String", "BRIS_APP_VERSION", "\"0.1.0\"")
+        // Diagnostic-collection upload is a spike, not a
+        // production surface. Gate every "Send to collector"
+        // button behind this flag so the operator doesn't see
+        // a feature that doesn't really work yet. Flip in a
+        // local build via `-PbrisEnableRemoteSubmit=true`.
+        val remoteSubmit = (project.findProperty("brisEnableRemoteSubmit") as String?) == "true"
+        buildConfigField("boolean", "ENABLE_REMOTE_SUBMIT", remoteSubmit.toString())
     }
 
     buildFeatures {
@@ -82,6 +89,10 @@ android {
             kotlin.srcDir(layout.buildDirectory.dir("generated/source/uniffi/kotlin"))
             jniLibs.srcDir(layout.projectDirectory.dir("src/main/jniLibs"))
         }
+    }
+
+    testOptions {
+        unitTests.isReturnDefaultValues = true
     }
 
     buildTypes {
@@ -114,6 +125,9 @@ dependencies {
     // crashing CameraX's bindToLifecycle on real devices).
     implementation("androidx.lifecycle:lifecycle-runtime-compose:2.8.7")
     implementation("androidx.datastore:datastore-preferences:1.1.1")
+    // SAF helpers (DocumentFile) for the operator-chosen
+    // "Save buffer" destination in debug-mode.
+    implementation("androidx.documentfile:documentfile:1.0.1")
 
     // CameraX
     val cameraxVersion = "1.4.0"
@@ -131,6 +145,13 @@ dependencies {
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
 
     debugImplementation("androidx.compose.ui:ui-tooling")
+
+    // JVM unit tests (run under Gradle's `test` task in CI).
+    testImplementation("junit:junit:4.13.2")
+    testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.8.1")
+    // android.jar ships org.json as stubs ("Stub!" at runtime);
+    // JVM unit tests need the real implementation.
+    testImplementation("org.json:json:20240303")
 }
 
 // ---------------------------------------------------------------------------

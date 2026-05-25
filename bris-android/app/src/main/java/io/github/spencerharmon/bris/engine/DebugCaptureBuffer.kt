@@ -1,6 +1,9 @@
 package io.github.spencerharmon.bris.engine
 
 import android.content.Context
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
@@ -58,9 +61,27 @@ class DebugCaptureBuffer(
     private val seqFile = File(rootDir, ".seq")
     private val seq = AtomicLong(loadSeq())
     private val totalBytes = AtomicLong(walkTotalBytes())
+    private val frameCount = AtomicLong(countFramesFromIndex())
+    private val lastAppendUnixMs = AtomicLong(0L)
+    private val oldestFrameUnixMs = AtomicLong(0L)
+    private val newestFrameUnixMs = AtomicLong(0L)
+    private val evictedSinceClear = AtomicLong(0L)
+
+    private val _stateFlow: MutableStateFlow<BufferState>
+
+    /**
+     * Observable buffer state. Emits on every append, eviction
+     * and clear. Reads are cheap (in-memory counters); the
+     * initial value is computed by scanning `index.jsonl` at
+     * construction.
+     */
+    val stateFlow: StateFlow<BufferState>
 
     init {
         rootDir.mkdirs()
+        seedTimestampsFromIndex()
+        _stateFlow = MutableStateFlow(snapshotState())
+        stateFlow = _stateFlow.asStateFlow()
     }
 
     /**
@@ -83,7 +104,13 @@ class DebugCaptureBuffer(
             appendIndex(n, frame, pgm.length(), json.length())
             persistSeq(n + 1)
             totalBytes.addAndGet(pgm.length() + json.length())
+            frameCount.incrementAndGet()
+            val capturedMs = frame.capturedUnixMs.toLong()
+            lastAppendUnixMs.set(System.currentTimeMillis())
+            if (oldestFrameUnixMs.get() == 0L) oldestFrameUnixMs.set(capturedMs)
+            newestFrameUnixMs.set(capturedMs)
             evictIfOverCap()
+            emitState()
             return n
         } catch (e: Exception) {
             android.util.Log.w(TAG, "appendFrame($tag) failed: $e")
@@ -107,6 +134,8 @@ class DebugCaptureBuffer(
         } catch (e: Exception) {
             android.util.Log.w(TAG, "appendPbris failed: $e")
         }
+        lastAppendUnixMs.set(System.currentTimeMillis())
+        emitState()
     }
 
     /**
@@ -148,6 +177,45 @@ class DebugCaptureBuffer(
         seqFile.delete()
         seq.set(0)
         totalBytes.set(0)
+        frameCount.set(0)
+        lastAppendUnixMs.set(0)
+        oldestFrameUnixMs.set(0)
+        newestFrameUnixMs.set(0)
+        evictedSinceClear.set(0)
+        emitState()
+    }
+
+    /** Root directory on disk; exposed for export tooling. */
+    fun rootDir(): File = rootDir
+
+    private fun emitState() {
+        _stateFlow.value = snapshotState()
+    }
+
+    private fun snapshotState(): BufferState = BufferState(
+        frameCount = frameCount.get().toInt(),
+        totalBytes = totalBytes.get(),
+        lastAppendUnixMs = lastAppendUnixMs.get().takeIf { it > 0L },
+        oldestFrameUnixMs = oldestFrameUnixMs.get().takeIf { it > 0L },
+        newestFrameUnixMs = newestFrameUnixMs.get().takeIf { it > 0L },
+        evictedSinceClear = evictedSinceClear.get(),
+    )
+
+    private fun countFramesFromIndex(): Long =
+        if (indexFile.exists()) indexFile.useLines { it.count().toLong() } else 0L
+
+    private fun seedTimestampsFromIndex() {
+        if (!indexFile.exists()) return
+        try {
+            val lines = indexFile.readLines()
+            if (lines.isEmpty()) return
+            val first = JSONObject(lines.first()).optLong("captured_unix_ms", 0L)
+            val last = JSONObject(lines.last()).optLong("captured_unix_ms", 0L)
+            if (first > 0L) oldestFrameUnixMs.set(first)
+            if (last > 0L) newestFrameUnixMs.set(last)
+        } catch (_: Exception) {
+            // index unreadable — leave seeds at 0
+        }
     }
 
     private fun loadSeq(): Long = try {
@@ -262,8 +330,29 @@ class DebugCaptureBuffer(
             tmp.writeText(lines.drop(evictCount).joinToString("\n", postfix = "\n"))
             tmp.renameTo(indexFile)
             totalBytes.addAndGet(-freed)
+            frameCount.addAndGet(-evictCount.toLong())
+            evictedSinceClear.addAndGet(evictCount.toLong())
+            // Refresh oldest from new index head; newest is unchanged.
+            val remaining = lines.drop(evictCount)
+            oldestFrameUnixMs.set(
+                remaining.firstOrNull()?.let {
+                    try { JSONObject(it).optLong("captured_unix_ms", 0L) } catch (_: Exception) { 0L }
+                } ?: 0L,
+            )
+            if (frameCount.get() == 0L) newestFrameUnixMs.set(0L)
+            emitState()
         }
     }
+
+    /** Snapshot of buffer-state fields surfaced to the UI. */
+    data class BufferState(
+        val frameCount: Int,
+        val totalBytes: Long,
+        val lastAppendUnixMs: Long?,
+        val oldestFrameUnixMs: Long?,
+        val newestFrameUnixMs: Long?,
+        val evictedSinceClear: Long,
+    )
 
     /** One persisted frame's location and metadata. */
     data class Entry(

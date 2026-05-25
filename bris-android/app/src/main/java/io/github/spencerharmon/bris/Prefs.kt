@@ -32,6 +32,16 @@ class Prefs(private val context: Context) {
     val collectorBaseFlow: Flow<String> = context.dataStore.data.map { it[KEY_COLLECTOR_BASE] ?: "" }
 
     /**
+     * Operator-chosen Storage Access Framework tree URI for
+     * "Save buffer" exports, or `null` if not yet picked. Stored
+     * as the URI string; the caller resolves it via
+     * `Uri.parse(...)`. First save without this prompts the
+     * system tree picker; subsequent saves go directly to the
+     * stored location.
+     */
+    val debugSaveLocationFlow: Flow<String?> = context.dataStore.data.map { it[KEY_DEBUG_SAVE_URI] }
+
+    /**
      * Operator-selected physical-camera lens id, or `null` if
      * the operator has not chosen one yet (in which case
      * callers fall back to a heuristic default).
@@ -57,6 +67,14 @@ class Prefs(private val context: Context) {
         context.dataStore.edit { it[KEY_COLLECTOR_BASE] = url }
     }
 
+    /** Persist (or clear, with `null`) the SAF tree URI used
+     *  by "Save buffer" for debug exports. */
+    suspend fun setDebugSaveLocation(uri: String?) {
+        context.dataStore.edit {
+            if (uri == null) it.remove(KEY_DEBUG_SAVE_URI) else it[KEY_DEBUG_SAVE_URI] = uri
+        }
+    }
+
     /** Persist the operator's lens selection. */
     suspend fun setSelectedLensId(lensId: String) {
         context.dataStore.edit { it[KEY_SELECTED_LENS_ID] = lensId }
@@ -77,5 +95,6 @@ class Prefs(private val context: Context) {
         private val KEY_COLLECTOR_BASE = stringPreferencesKey("collector_base")
         private val KEY_DEVICE_UUID = stringPreferencesKey("device_uuid")
         private val KEY_SELECTED_LENS_ID = stringPreferencesKey("selected_lens_id")
+        private val KEY_DEBUG_SAVE_URI = stringPreferencesKey("debug_save_uri")
     }
 }

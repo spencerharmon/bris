@@ -23,8 +23,10 @@ import androidx.compose.ui.unit.dp
 import io.github.spencerharmon.bris.BuildConfig
 import io.github.spencerharmon.bris.Prefs
 import io.github.spencerharmon.bris.engine.CalibrationStore
+import io.github.spencerharmon.bris.engine.DebugBufferActions
 import io.github.spencerharmon.bris.engine.DebugCaptureBuffer
 import io.github.spencerharmon.bris.engine.Exporter
+import io.github.spencerharmon.bris.engine.SaveResult
 import io.github.spencerharmon.bris.location.CoarseLocation
 import io.github.spencerharmon.bris.upload.ManifestBuilder
 import io.github.spencerharmon.bris.upload.MediaPart
@@ -32,6 +34,7 @@ import io.github.spencerharmon.bris.upload.MediaSummary
 import io.github.spencerharmon.bris.upload.SubmitResult
 import io.github.spencerharmon.bris.upload.Submitter
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
@@ -102,7 +105,7 @@ fun PreUploadReviewScreen(
         )
 
         Button(
-            enabled = collectorBase.isNotBlank(),
+            enabled = BuildConfig.ENABLE_REMOTE_SUBMIT && collectorBase.isNotBlank(),
             onClick = {
                 scope.launch {
                     val deviceUuid = prefs.deviceUuid()
@@ -243,34 +246,50 @@ fun PreUploadReviewScreen(
                     if (result is SubmitResult.Accepted) onSend()
                 }
             },
-        ) { Text("Send") }
+        ) {
+            if (BuildConfig.ENABLE_REMOTE_SUBMIT) {
+                Text("Send")
+            } else {
+                Text("Send (disabled in this build)")
+            }
+        }
         Button(
-            // "Save to phone" mirrors the on-device data into
-            // <external-files>/exports/ for adb-pull / MTP
-            // transfer. Available regardless of debug mode
-            // because saving to local storage doesn't transmit
-            // anything off-device. Send-to-collector stays
-            // gated on debug mode (collector is the network
-            // surface; per AGENTS.md the diagnostic-collection
-            // UI is only shown in debug mode).
+            // Local save mirrors the on-device debug buffer to
+            // the operator's chosen Storage Access Framework
+            // destination via DebugBufferActions (PR #1 of the
+            // debug-UI fix). Available regardless of debug mode
+            // because saving locally does not transmit anything
+            // off-device; collector upload stays gated by
+            // BuildConfig.ENABLE_REMOTE_SUBMIT above.
             onClick = {
                 scope.launch {
-                    val exporter = Exporter.forApp(context)
-                    val dest = withContext(Dispatchers.IO) {
-                        when (kind) {
-                            "calibration" -> {
-                                val sess = CalibrationStore.forApp(context).latestSession()
-                                sess?.let { exporter.exportCalibrationSession(it) }
+                    val savedUriStr = prefs.debugSaveLocationFlow.first()
+                    if (kind == "calibration") {
+                        val sess = CalibrationStore.forApp(context).latestSession()
+                        val dest = withContext(Dispatchers.IO) {
+                            sess?.let { Exporter.forApp(context).exportCalibrationSession(it) }
+                        }
+                        val msg = dest?.let { "Saved to ${it.absolutePath}" }
+                            ?: "Nothing to save (no calibration session)."
+                        Toast.makeText(context, msg, Toast.LENGTH_LONG).show()
+                    } else {
+                        val uri = savedUriStr?.let { android.net.Uri.parse(it) }
+                        if (uri == null) {
+                            Toast.makeText(
+                                context,
+                                "Pick a save location in Settings \u2192 Change save location first.",
+                                Toast.LENGTH_LONG,
+                            ).show()
+                        } else {
+                            val r = DebugBufferActions.saveAll(context, debugBuffer, uri)
+                            val msg = when (r) {
+                                is SaveResult.Ok -> "Saved ${r.frameCount} frames to ${r.destinationDisplay}"
+                                is SaveResult.Failed -> "Save failed: ${r.message}"
+                                SaveResult.NeedLocation -> "Pick a save location."
                             }
-                            "debug_capture", "fix" -> {
-                                exporter.exportDebugCapture(debugBuffer, MAX_FRAMES_PER_SUBMISSION)
-                            }
-                            else -> null
+                            Toast.makeText(context, msg, Toast.LENGTH_LONG).show()
                         }
                     }
-                    val msg = dest?.let { "Saved to ${it.absolutePath}" }
-                        ?: "Nothing to save (no source data found)."
-                    Toast.makeText(context, msg, Toast.LENGTH_LONG).show()
                 }
             },
         ) { Text("Save to phone") }

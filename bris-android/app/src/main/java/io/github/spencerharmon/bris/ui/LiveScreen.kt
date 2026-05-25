@@ -1,6 +1,8 @@
 package io.github.spencerharmon.bris.ui
 
+import android.text.format.Formatter
 import android.Manifest
+import android.net.Uri
 import android.content.pm.PackageManager
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -21,10 +23,15 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.Button
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.Snackbar
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -33,6 +40,7 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -47,6 +55,7 @@ import io.github.spencerharmon.bris.Prefs
 import io.github.spencerharmon.bris.engine.CalibrationSource
 import io.github.spencerharmon.bris.engine.CalibrationStore
 import io.github.spencerharmon.bris.engine.CameraConstants
+import io.github.spencerharmon.bris.engine.DebugBufferActions
 import io.github.spencerharmon.bris.engine.DebugCaptureBuffer
 import io.github.spencerharmon.bris.engine.EngineWrapper
 import io.github.spencerharmon.bris.engine.FixVerdict
@@ -58,6 +67,7 @@ import io.github.spencerharmon.bris.engine.SightLog
 import io.github.spencerharmon.bris.engine.resolveCalibration
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
 import uniffi.bris_ffi.FfiEngineConfig
 import uniffi.bris_ffi.FfiIntrinsics
 import uniffi.bris_ffi.FfiObserver
@@ -192,6 +202,29 @@ fun LiveScreen(
     val sessionStatus by recorder.status.collectAsState()
     val captureActive = sessionStatus is SessionStatus.Capturing ||
         sessionStatus is SessionStatus.Saving
+    val bufferState by debugBuffer.stateFlow.collectAsState()
+    val saveLocation by prefs.debugSaveLocationFlow.collectAsState(initial = null)
+    val snackbarHost = remember { SnackbarHostState() }
+    val uiScope = rememberCoroutineScope()
+
+    val saveLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenDocumentTree(),
+    ) { uri ->
+        if (uri == null) return@rememberLauncherForActivityResult
+        val flags = android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION or
+            android.content.Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+        try {
+            context.contentResolver.takePersistableUriPermission(uri, flags)
+        } catch (_: SecurityException) {
+            // Some pickers don't grant persistable rights; the
+            // immediately-following save still works on the
+            // ephemeral grant.
+        }
+        uiScope.launch {
+            prefs.setDebugSaveLocation(uri.toString())
+            performSave(context, debugBuffer, uri, snackbarHost)
+        }
+    }
 
     Box(modifier = Modifier.fillMaxSize()) {
         CameraSurface(
@@ -221,6 +254,9 @@ fun LiveScreen(
                 calibrationSource = calibration,
                 lensLabel = lensLabelFor(context, effectiveLensId),
                 captureSize = captureSize,
+                debugCaptureEnabled = debugCaptureEnabled,
+                captureActive = captureActive,
+                bufferState = bufferState,
             )
             Spacer(Modifier.height(12.dp))
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -236,10 +272,46 @@ fun LiveScreen(
                 OutlinedButton(onClick = onOpenCalibration) { Text("Calibration") }
             }
             if (debugMode) {
-                Button(onClick = onSendFix) { Text("Send fix (debug)") }
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Button(onClick = onSendFix) { Text("Send fix (debug)") }
+                    OutlinedButton(onClick = {
+                        val saved = saveLocation?.let { Uri.parse(it) }
+                        if (saved == null) {
+                            saveLauncher.launch(null)
+                        } else {
+                            uiScope.launch {
+                                performSave(context, debugBuffer, saved, snackbarHost)
+                            }
+                        }
+                    }) { Text("Save buffer") }
+                }
             }
         }
+
+        SnackbarHost(
+            hostState = snackbarHost,
+            modifier = Modifier.align(Alignment.BottomCenter).padding(12.dp),
+        ) { data -> Snackbar(snackbarData = data) }
     }
+}
+
+private suspend fun performSave(
+    context: android.content.Context,
+    buffer: DebugCaptureBuffer,
+    treeUri: Uri,
+    snackbarHost: SnackbarHostState,
+) {
+    val result = DebugBufferActions.saveAll(context, buffer, treeUri)
+    val msg = when (result) {
+        is io.github.spencerharmon.bris.engine.SaveResult.Ok ->
+            "Saved ${result.frameCount} frames " +
+                "(${Formatter.formatShortFileSize(context, result.bytes)}) " +
+                "to ${result.destinationDisplay}"
+        is io.github.spencerharmon.bris.engine.SaveResult.Failed -> "Save failed: ${result.message}"
+        io.github.spencerharmon.bris.engine.SaveResult.NeedLocation ->
+            "Pick a save location to continue."
+    }
+    snackbarHost.showSnackbar(msg)
 }
 
 /**
@@ -347,6 +419,49 @@ private fun CameraSurface(
 }
 
 /**
+ * Inline HUD chip explaining the debug-capture state.
+ *
+ * Shown only when Debug capture is enabled. While the session
+ * is idle (toggle on but Start capture not yet pressed) the
+ * chip reads "Debug armed" to make the toggle/capture
+ * relationship obvious; while capturing it shows a pulsing
+ * red `REC` dot plus frame count + on-disk size; while paused
+ * after a recent append the dot is static grey.
+ */
+@Composable
+private fun DebugBufferChip(
+    bufferState: DebugCaptureBuffer.BufferState,
+    captureActive: Boolean,
+) {
+    val context = LocalContext.current
+    if (!captureActive) {
+        Text(
+            "Debug armed \u2014 press Start capture to record",
+            color = Color(0xFFB0B0B0),
+        )
+        return
+    }
+    val recentMs = bufferState.lastAppendUnixMs ?: 0L
+    val isLive = System.currentTimeMillis() - recentMs < 1500L
+    val dotColor = if (isLive) Color(0xFFE53935) else Color(0xFF808080)
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        Box(
+            modifier = Modifier
+                .size(10.dp)
+                .background(dotColor, CircleShape),
+        )
+        val size = Formatter.formatShortFileSize(context, bufferState.totalBytes)
+        Text(
+            "REC  ${bufferState.frameCount} frames \u00b7 $size",
+            color = Color.White,
+        )
+    }
+}
+
+/**
  * Top-of-screen translucent panel with the engine + session
  * diagnostics. While idle: calibration state + "Tap Start
  * capture to begin." While capturing: elapsed seconds, last
@@ -366,6 +481,9 @@ private fun DiagnosticOverlay(
     calibrationSource: CalibrationSource,
     lensLabel: String,
     captureSize: android.util.Size,
+    debugCaptureEnabled: Boolean,
+    captureActive: Boolean,
+    bufferState: DebugCaptureBuffer.BufferState,
 ) {
     // Provenance-honest calibration label. Operator-run
     // sessions are the gold standard; factory profiles are
@@ -394,6 +512,12 @@ private fun DiagnosticOverlay(
             .padding(8.dp),
         verticalArrangement = Arrangement.spacedBy(2.dp),
     ) {
+        if (debugCaptureEnabled) {
+            DebugBufferChip(
+                bufferState = bufferState,
+                captureActive = captureActive,
+            )
+        }
         Text(calibLabel, color = Color.White)
         Text("capture: ${captureSize.width}×${captureSize.height}", color = Color.White)
         Text("lens: $lensLabel", color = Color.White)
