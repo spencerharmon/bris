@@ -685,9 +685,7 @@ mod tests {
         let (sdec0, cdec0) = true_eq.dec.sin_cos();
         let (sa1, ca1) = app.ra.sin_cos();
         let (sdec1, cdec1) = app.dec.sin_cos();
-        let dot = (cdec0 * ca0) * (cdec1 * ca1)
-            + (cdec0 * sa0) * (cdec1 * sa1)
-            + sdec0 * sdec1;
+        let dot = (cdec0 * ca0) * (cdec1 * ca1) + (cdec0 * sa0) * (cdec1 * sa1) + sdec0 * sdec1;
         let angle = dot.clamp(-1.0, 1.0).acos();
         let arcsec = angle * 180.0 * 3600.0 / std::f64::consts::PI;
         assert!(
