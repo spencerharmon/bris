@@ -1,5 +1,6 @@
 package io.github.spencerharmon.bris.ui
 
+import android.text.format.Formatter
 import android.Manifest
 import android.content.pm.PackageManager
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -13,6 +14,12 @@ import androidx.camera.core.resolutionselector.ResolutionSelector
 import androidx.camera.core.resolutionselector.ResolutionStrategy
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -21,10 +28,15 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.Button
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.Snackbar
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -192,6 +204,13 @@ fun LiveScreen(
     val sessionStatus by recorder.status.collectAsState()
     val captureActive = sessionStatus is SessionStatus.Capturing ||
         sessionStatus is SessionStatus.Saving
+    val bufferState by debugBuffer.stateFlow.collectAsState()
+    val snackbarHost = remember { SnackbarHostState() }
+    val saveAction = rememberDebugSaveAction(
+        buffer = debugBuffer,
+        prefs = prefs,
+        snackbarHost = snackbarHost,
+    )
 
     Box(modifier = Modifier.fillMaxSize()) {
         CameraSurface(
@@ -221,6 +240,9 @@ fun LiveScreen(
                 calibrationSource = calibration,
                 lensLabel = lensLabelFor(context, effectiveLensId),
                 captureSize = captureSize,
+                debugCaptureEnabled = debugCaptureEnabled,
+                captureActive = captureActive,
+                bufferState = bufferState,
             )
             Spacer(Modifier.height(12.dp))
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -236,9 +258,17 @@ fun LiveScreen(
                 OutlinedButton(onClick = onOpenCalibration) { Text("Calibration") }
             }
             if (debugMode) {
-                Button(onClick = onSendFix) { Text("Send fix (debug)") }
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Button(onClick = onSendFix) { Text("Send fix (debug)") }
+                    OutlinedButton(onClick = saveAction) { Text("Save buffer") }
+                }
             }
         }
+
+        SnackbarHost(
+            hostState = snackbarHost,
+            modifier = Modifier.align(Alignment.BottomCenter).padding(12.dp),
+        ) { data -> Snackbar(snackbarData = data) }
     }
 }
 
@@ -347,6 +377,66 @@ private fun CameraSurface(
 }
 
 /**
+ * Inline HUD chip explaining the debug-capture state.
+ *
+ * Shown only when Debug capture is enabled. While the session
+ * is idle (toggle on but Start capture not yet pressed) the
+ * chip reads "Debug armed" to make the toggle/capture
+ * relationship obvious; while capturing it shows a pulsing
+ * red `REC` dot plus frame count + on-disk size; while paused
+ * after a recent append the dot is static grey.
+ */
+@Composable
+private fun DebugBufferChip(
+    bufferState: DebugCaptureBuffer.BufferState,
+    captureActive: Boolean,
+) {
+    val context = LocalContext.current
+    if (!captureActive) {
+        Text(
+            "Debug armed \u2014 press Start capture to record",
+            color = Color(0xFFB0B0B0),
+        )
+        return
+    }
+    val recentMs = bufferState.lastAppendUnixMs ?: 0L
+    val isLive = System.currentTimeMillis() - recentMs < 1500L
+    // Only pulse when actively recording; the static grey
+    // dot for the "paused but armed" state is intentionally
+    // not animated (drawing attention to it would mislead).
+    val dotAlpha = if (isLive) {
+        val transition = rememberInfiniteTransition(label = "rec-dot")
+        transition.animateFloat(
+            initialValue = 1.0f,
+            targetValue = 0.3f,
+            animationSpec = infiniteRepeatable(
+                animation = tween(durationMillis = 700, easing = LinearEasing),
+                repeatMode = RepeatMode.Reverse,
+            ),
+            label = "rec-dot-alpha",
+        ).value
+    } else {
+        1.0f
+    }
+    val dotColor = if (isLive) Color(0xFFE53935) else Color(0xFF808080)
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        Box(
+            modifier = Modifier
+                .size(10.dp)
+                .background(dotColor.copy(alpha = dotAlpha), CircleShape),
+        )
+        val size = Formatter.formatShortFileSize(context, bufferState.totalBytes)
+        Text(
+            "REC  ${bufferState.frameCount} frames \u00b7 $size",
+            color = Color.White,
+        )
+    }
+}
+
+/**
  * Top-of-screen translucent panel with the engine + session
  * diagnostics. While idle: calibration state + "Tap Start
  * capture to begin." While capturing: elapsed seconds, last
@@ -366,6 +456,9 @@ private fun DiagnosticOverlay(
     calibrationSource: CalibrationSource,
     lensLabel: String,
     captureSize: android.util.Size,
+    debugCaptureEnabled: Boolean,
+    captureActive: Boolean,
+    bufferState: DebugCaptureBuffer.BufferState,
 ) {
     // Provenance-honest calibration label. Operator-run
     // sessions are the gold standard; factory profiles are
@@ -394,6 +487,12 @@ private fun DiagnosticOverlay(
             .padding(8.dp),
         verticalArrangement = Arrangement.spacedBy(2.dp),
     ) {
+        if (debugCaptureEnabled) {
+            DebugBufferChip(
+                bufferState = bufferState,
+                captureActive = captureActive,
+            )
+        }
         Text(calibLabel, color = Color.White)
         Text("capture: ${captureSize.width}×${captureSize.height}", color = Color.White)
         Text("lens: $lensLabel", color = Color.White)

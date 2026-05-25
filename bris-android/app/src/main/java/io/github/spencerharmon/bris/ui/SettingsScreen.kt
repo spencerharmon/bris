@@ -1,6 +1,8 @@
 package io.github.spencerharmon.bris.ui
 
 import android.Manifest
+import android.net.Uri
+import android.text.format.Formatter
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
@@ -11,10 +13,16 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.Card
 import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.RadioButton
+import androidx.compose.material3.Snackbar
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -28,9 +36,15 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
+import androidx.documentfile.provider.DocumentFile
+import io.github.spencerharmon.bris.BuildConfig
 import io.github.spencerharmon.bris.Prefs
+import io.github.spencerharmon.bris.engine.DebugCaptureBuffer
 import io.github.spencerharmon.bris.engine.LensCatalog
 import kotlinx.coroutines.launch
+import java.time.Instant
+import java.time.ZoneId
+import java.time.format.DateTimeFormatter
 
 /**
  * Operator settings.
@@ -162,6 +176,25 @@ fun SettingsScreen(prefs: Prefs, onBack: () -> Unit) {
                 )
             }
 
+            if (debugCapture) {
+                DebugCaptureSection(prefs = prefs)
+            }
+
+            // Collector configuration. The submit UI itself is
+            // gated by BuildConfig.ENABLE_REMOTE_SUBMIT (off by
+            // default in this build) per the diagnostic-
+            // collection spike status; the URL/token fields
+            // stay visible so a future build with the flag on
+            // has somewhere to read its config from.
+            val collectorHeader = if (BuildConfig.ENABLE_REMOTE_SUBMIT) {
+                "Collector"
+            } else {
+                "Collector (disabled in this build)"
+            }
+            Text(
+                collectorHeader,
+                style = androidx.compose.material3.MaterialTheme.typography.titleMedium,
+            )
             OutlinedTextField(
                 value = collectorBaseDraft,
                 onValueChange = { collectorBaseDraft = it },
@@ -177,3 +210,115 @@ fun SettingsScreen(prefs: Prefs, onBack: () -> Unit) {
         Button(onClick = onBack) { Text("Back") }
     }
 }
+
+/**
+ * Debug-capture controls surfaced when the toggle is on:
+ * save the buffer, clear it, change the SAF destination, and
+ * a read-only state card.
+ */
+@Composable
+private fun DebugCaptureSection(prefs: Prefs) {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    val buffer = remember(context) { DebugCaptureBuffer.forApp(context) }
+    val state by buffer.stateFlow.collectAsState()
+    val saveLocation by prefs.debugSaveLocationFlow.collectAsState(initial = null)
+    val snackbarHost = remember { SnackbarHostState() }
+    val saveAction = rememberDebugSaveAction(
+        buffer = buffer,
+        prefs = prefs,
+        snackbarHost = snackbarHost,
+    )
+    var showClearDialog by remember { mutableStateOf(false) }
+
+    // Picker dedicated to "Change save location" — does NOT
+    // trigger a save afterwards; only updates the stored URI.
+    val changeLocationPicker = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenDocumentTree(),
+    ) { uri ->
+        if (uri == null) return@rememberLauncherForActivityResult
+        val flags = android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION or
+            android.content.Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+        var persisted = false
+        try {
+            context.contentResolver.takePersistableUriPermission(uri, flags)
+            persisted = true
+        } catch (_: SecurityException) {
+            // Don't poison DataStore with a non-persistable URI;
+            // surface the failure in the snackbar instead.
+        }
+        scope.launch {
+            if (persisted) {
+                prefs.setDebugSaveLocation(uri.toString())
+                snackbarHost.showSnackbar("Save location set.")
+            } else {
+                snackbarHost.showSnackbar(
+                    "Save location couldn't be persisted; pick a different folder.",
+                )
+            }
+        }
+    }
+
+    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        Button(onClick = saveAction) { Text("Save buffer now") }
+        OutlinedButton(onClick = { showClearDialog = true }) { Text("Clear buffer") }
+    }
+    OutlinedButton(onClick = { changeLocationPicker.launch(null) }) {
+        Text("Change save location")
+    }
+
+    val saveDisplay = saveLocation
+        ?.let { Uri.parse(it) }
+        ?.let { DocumentFile.fromTreeUri(context, it)?.name }
+        ?: "Not set \u2014 pick on first save"
+    Card(modifier = Modifier.fillMaxWidth()) {
+        Column(
+            modifier = Modifier.padding(12.dp),
+            verticalArrangement = Arrangement.spacedBy(4.dp),
+        ) {
+            Text(
+                "Buffer state",
+                style = androidx.compose.material3.MaterialTheme.typography.titleSmall,
+            )
+            Text("Frames: ${state.frameCount}")
+            Text("Bytes: ${Formatter.formatShortFileSize(context, state.totalBytes)}")
+            Text("Oldest: ${formatInstant(state.oldestFrameUnixMs)}")
+            Text("Newest: ${formatInstant(state.newestFrameUnixMs)}")
+            Text("Evicted since clear: ${state.evictedSinceClear}")
+            Text(
+                "On-device path: /data/data/io.github.spencerharmon.bris/files/debug-capture/",
+            )
+            Text("Save location: $saveDisplay")
+        }
+    }
+
+    SnackbarHost(hostState = snackbarHost) { data -> Snackbar(snackbarData = data) }
+
+    if (showClearDialog) {
+        val size = Formatter.formatShortFileSize(context, state.totalBytes)
+        val frameCount = state.frameCount
+        AlertDialog(
+            onDismissRequest = { showClearDialog = false },
+            title = { Text("Clear debug buffer?") },
+            text = { Text("Delete $frameCount frames ($size)? This cannot be undone.") },
+            confirmButton = {
+                Button(onClick = {
+                    showClearDialog = false
+                    buffer.clear()
+                    scope.launch {
+                        snackbarHost.showSnackbar("Cleared $frameCount frames.")
+                    }
+                }) { Text("Delete") }
+            },
+            dismissButton = {
+                OutlinedButton(onClick = { showClearDialog = false }) { Text("Cancel") }
+            },
+        )
+    }
+}
+
+private val TS_FORMATTER: DateTimeFormatter =
+    DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss").withZone(ZoneId.systemDefault())
+
+private fun formatInstant(ms: Long?): String =
+    if (ms == null) "\u2014" else TS_FORMATTER.format(Instant.ofEpochMilli(ms))

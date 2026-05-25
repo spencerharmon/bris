@@ -2,6 +2,7 @@ package io.github.spencerharmon.bris.ui
 
 import android.widget.Toast
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -9,6 +10,9 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.Button
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Snackbar
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
@@ -17,6 +21,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
@@ -75,7 +80,14 @@ fun PreUploadReviewScreen(
     // provider, or no cached fix.
     val gps = androidx.compose.runtime.remember(context) { CoarseLocation.getLastKnown(context) }
     var note by remember { mutableStateOf("") }
+    val snackbarHost = remember { SnackbarHostState() }
+    val saveAction = rememberDebugSaveAction(
+        buffer = debugBuffer,
+        prefs = prefs,
+        snackbarHost = snackbarHost,
+    )
 
+    Box(modifier = Modifier.fillMaxSize()) {
     Column(
         modifier = Modifier.fillMaxSize().padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp),
@@ -102,7 +114,7 @@ fun PreUploadReviewScreen(
         )
 
         Button(
-            enabled = collectorBase.isNotBlank(),
+            enabled = BuildConfig.ENABLE_REMOTE_SUBMIT && collectorBase.isNotBlank(),
             onClick = {
                 scope.launch {
                     val deviceUuid = prefs.deviceUuid()
@@ -243,38 +255,43 @@ fun PreUploadReviewScreen(
                     if (result is SubmitResult.Accepted) onSend()
                 }
             },
-        ) { Text("Send") }
+        ) {
+            if (BuildConfig.ENABLE_REMOTE_SUBMIT) {
+                Text("Send")
+            } else {
+                Text("Send (disabled in this build)")
+            }
+        }
         Button(
-            // "Save to phone" mirrors the on-device data into
-            // <external-files>/exports/ for adb-pull / MTP
-            // transfer. Available regardless of debug mode
-            // because saving to local storage doesn't transmit
-            // anything off-device. Send-to-collector stays
-            // gated on debug mode (collector is the network
-            // surface; per AGENTS.md the diagnostic-collection
-            // UI is only shown in debug mode).
+            // Local save mirrors the on-device debug buffer to
+            // the operator's chosen Storage Access Framework
+            // destination via DebugBufferActions (PR #1 of the
+            // debug-UI fix). Available regardless of debug mode
+            // because saving locally does not transmit anything
+            // off-device; collector upload stays gated by
+            // BuildConfig.ENABLE_REMOTE_SUBMIT above.
             onClick = {
-                scope.launch {
-                    val exporter = Exporter.forApp(context)
-                    val dest = withContext(Dispatchers.IO) {
-                        when (kind) {
-                            "calibration" -> {
-                                val sess = CalibrationStore.forApp(context).latestSession()
-                                sess?.let { exporter.exportCalibrationSession(it) }
-                            }
-                            "debug_capture", "fix" -> {
-                                exporter.exportDebugCapture(debugBuffer, MAX_FRAMES_PER_SUBMISSION)
-                            }
-                            else -> null
+                if (kind == "calibration") {
+                    scope.launch {
+                        val sess = CalibrationStore.forApp(context).latestSession()
+                        val dest = withContext(Dispatchers.IO) {
+                            sess?.let { Exporter.forApp(context).exportCalibrationSession(it) }
                         }
+                        val msg = dest?.let { "Saved to ${it.absolutePath}" }
+                            ?: "Nothing to save (no calibration session)."
+                        snackbarHost.showSnackbar(msg)
                     }
-                    val msg = dest?.let { "Saved to ${it.absolutePath}" }
-                        ?: "Nothing to save (no source data found)."
-                    Toast.makeText(context, msg, Toast.LENGTH_LONG).show()
+                } else {
+                    saveAction()
                 }
             },
         ) { Text("Save to phone") }
         OutlinedButton(onClick = onBack) { Text("Cancel") }
+    }
+    SnackbarHost(
+        hostState = snackbarHost,
+        modifier = Modifier.align(Alignment.BottomCenter).padding(12.dp),
+    ) { data -> Snackbar(snackbarData = data) }
     }
 }
 

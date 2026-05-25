@@ -1,6 +1,9 @@
 package io.github.spencerharmon.bris.engine
 
 import android.content.Context
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
@@ -39,15 +42,24 @@ import uniffi.bris_ffi.FfiFrame
  * (one-line decode), without requiring a PNG encoder dependency
  * on the Android side.
  *
- * Submission flow (wired in `PreUploadReviewScreen`): when
- * "Send fix" or "Send debug capture" is invoked, the buffer's
- * [`recentEntries`] is queried, each entry's frame and snapshot
- * become a [`io.github.spencerharmon.bris.upload.MediaSummary`], and the
- * Submitter uploads them.
+ * Export flow (primary, operator-visible): the operator's
+ * "Save buffer" action in Settings / Live / PreUploadReview
+ * funnels through [`DebugBufferActions.saveAll`], which copies
+ * the on-disk buffer to a Storage Access Framework destination.
+ * This is the canonical local-export path and is available
+ * whether or not a fix was produced.
+ *
+ * Collector-upload flow (secondary, gated by
+ * `BuildConfig.ENABLE_REMOTE_SUBMIT`, off in this build):
+ * [`PreUploadReviewScreen`] queries [`recentEntries`] and the
+ * Submitter uploads each as a
+ * [`io.github.spencerharmon.bris.upload.MediaSummary`].
  *
  * Threading: this class is `Sendable`-equivalent via internal
- * synchronization; concurrent calls from the camera-analyzer
- * thread and the UI thread are safe.
+ * synchronization. There is one process-wide instance per
+ * application context (see [`forApp`]), so all UI sites that
+ * read [`stateFlow`] observe the same counters as the analyzer
+ * thread that writes them.
  */
 class DebugCaptureBuffer(
     private val rootDir: File,
@@ -58,9 +70,27 @@ class DebugCaptureBuffer(
     private val seqFile = File(rootDir, ".seq")
     private val seq = AtomicLong(loadSeq())
     private val totalBytes = AtomicLong(walkTotalBytes())
+    private val frameCount = AtomicLong(countFramesFromIndex())
+    private val lastAppendUnixMs = AtomicLong(0L)
+    private val oldestFrameUnixMs = AtomicLong(0L)
+    private val newestFrameUnixMs = AtomicLong(0L)
+    private val evictedSinceClear = AtomicLong(0L)
+
+    private val _stateFlow: MutableStateFlow<BufferState>
+
+    /**
+     * Observable buffer state. Emits on every append, eviction
+     * and clear. Reads are cheap (in-memory counters); the
+     * initial value is computed by scanning `index.jsonl` at
+     * construction.
+     */
+    val stateFlow: StateFlow<BufferState>
 
     init {
         rootDir.mkdirs()
+        seedTimestampsFromIndex()
+        _stateFlow = MutableStateFlow(snapshotState())
+        stateFlow = _stateFlow.asStateFlow()
     }
 
     /**
@@ -83,7 +113,13 @@ class DebugCaptureBuffer(
             appendIndex(n, frame, pgm.length(), json.length())
             persistSeq(n + 1)
             totalBytes.addAndGet(pgm.length() + json.length())
+            frameCount.incrementAndGet()
+            val capturedMs = frame.capturedUnixMs.toLong()
+            lastAppendUnixMs.set(System.currentTimeMillis())
+            if (oldestFrameUnixMs.get() == 0L) oldestFrameUnixMs.set(capturedMs)
+            newestFrameUnixMs.set(capturedMs)
             evictIfOverCap()
+            emitState()
             return n
         } catch (e: Exception) {
             android.util.Log.w(TAG, "appendFrame($tag) failed: $e")
@@ -103,10 +139,14 @@ class DebugCaptureBuffer(
     fun appendPbris(line: String) {
         val log = File(rootDir, "pbris.log")
         try {
-            FileOutputStream(log, true).use { it.write((line + "\n").toByteArray()) }
+            val bytes = (line + "\n").toByteArray()
+            FileOutputStream(log, true).use { it.write(bytes) }
+            totalBytes.addAndGet(bytes.size.toLong())
         } catch (e: Exception) {
             android.util.Log.w(TAG, "appendPbris failed: $e")
         }
+        lastAppendUnixMs.set(System.currentTimeMillis())
+        emitState()
     }
 
     /**
@@ -148,6 +188,45 @@ class DebugCaptureBuffer(
         seqFile.delete()
         seq.set(0)
         totalBytes.set(0)
+        frameCount.set(0)
+        lastAppendUnixMs.set(0)
+        oldestFrameUnixMs.set(0)
+        newestFrameUnixMs.set(0)
+        evictedSinceClear.set(0)
+        emitState()
+    }
+
+    /** Root directory on disk; exposed for export tooling. */
+    fun rootDir(): File = rootDir
+
+    private fun emitState() {
+        _stateFlow.value = snapshotState()
+    }
+
+    private fun snapshotState(): BufferState = BufferState(
+        frameCount = frameCount.get().toInt(),
+        totalBytes = totalBytes.get(),
+        lastAppendUnixMs = lastAppendUnixMs.get().takeIf { it > 0L },
+        oldestFrameUnixMs = oldestFrameUnixMs.get().takeIf { it > 0L },
+        newestFrameUnixMs = newestFrameUnixMs.get().takeIf { it > 0L },
+        evictedSinceClear = evictedSinceClear.get(),
+    )
+
+    private fun countFramesFromIndex(): Long =
+        if (indexFile.exists()) indexFile.useLines { it.count().toLong() } else 0L
+
+    private fun seedTimestampsFromIndex() {
+        if (!indexFile.exists()) return
+        try {
+            val lines = indexFile.readLines()
+            if (lines.isEmpty()) return
+            val first = JSONObject(lines.first()).optLong("captured_unix_ms", 0L)
+            val last = JSONObject(lines.last()).optLong("captured_unix_ms", 0L)
+            if (first > 0L) oldestFrameUnixMs.set(first)
+            if (last > 0L) newestFrameUnixMs.set(last)
+        } catch (_: Exception) {
+            // index unreadable — leave seeds at 0
+        }
     }
 
     private fun loadSeq(): Long = try {
@@ -165,8 +244,17 @@ class DebugCaptureBuffer(
     }
 
     private fun walkTotalBytes(): Long {
-        if (!framesDir.exists()) return 0
-        return framesDir.listFiles()?.sumOf { it.length() } ?: 0
+        var sum = 0L
+        if (framesDir.exists()) {
+            sum += framesDir.listFiles()?.sumOf { it.length() } ?: 0L
+        }
+        // Top-level files (index.jsonl, pbris.log, .seq) also
+        // count toward the on-disk cap so unbounded $PBRIS log
+        // growth eventually triggers eviction.
+        if (rootDir.exists()) {
+            sum += rootDir.listFiles { f -> f.isFile }?.sumOf { it.length() } ?: 0L
+        }
+        return sum
     }
 
     private fun writePgm(path: File, frame: FfiFrame) {
@@ -235,6 +323,17 @@ class DebugCaptureBuffer(
      * order, and rewrites the index without the evicted lines.
      * Index rewrite is atomic (write to .tmp, rename).
      */
+    /**
+     * Run the eviction pass without appending a new frame.
+     * Test-only hook so unit tests can exercise the
+     * empty-remainder cleanup path without constructing an
+     * `FfiFrame` (which needs the native library).
+     */
+    @Synchronized
+    internal fun evictForTests() {
+        evictIfOverCap()
+    }
+
     private fun evictIfOverCap() {
         if (totalBytes.get() <= maxBytes) return
         val lines = indexFile.readLines()
@@ -258,12 +357,37 @@ class DebugCaptureBuffer(
             }
         }
         if (evictCount > 0) {
-            val tmp = File(rootDir, "index.jsonl.tmp")
-            tmp.writeText(lines.drop(evictCount).joinToString("\n", postfix = "\n"))
-            tmp.renameTo(indexFile)
+            val remaining = lines.drop(evictCount).filter { it.isNotBlank() }
+            if (remaining.isEmpty()) {
+                indexFile.delete()
+            } else {
+                val tmp = File(rootDir, "index.jsonl.tmp")
+                tmp.writeText(remaining.joinToString("\n", postfix = "\n"))
+                tmp.renameTo(indexFile)
+            }
             totalBytes.addAndGet(-freed)
+            frameCount.addAndGet(-evictCount.toLong())
+            evictedSinceClear.addAndGet(evictCount.toLong())
+            // Refresh oldest from new index head; newest is unchanged.
+            oldestFrameUnixMs.set(
+                remaining.firstOrNull()?.let {
+                    try { JSONObject(it).optLong("captured_unix_ms", 0L) } catch (_: Exception) { 0L }
+                } ?: 0L,
+            )
+            if (frameCount.get() == 0L) newestFrameUnixMs.set(0L)
+            emitState()
         }
     }
+
+    /** Snapshot of buffer-state fields surfaced to the UI. */
+    data class BufferState(
+        val frameCount: Int,
+        val totalBytes: Long,
+        val lastAppendUnixMs: Long?,
+        val oldestFrameUnixMs: Long?,
+        val newestFrameUnixMs: Long?,
+        val evictedSinceClear: Long,
+    )
 
     /** One persisted frame's location and metadata. */
     data class Entry(
@@ -284,8 +408,44 @@ class DebugCaptureBuffer(
         /** Default cap: 1 GiB. */
         const val DEFAULT_MAX_BYTES: Long = 1L * 1024 * 1024 * 1024
 
-        /** Construct a buffer rooted at the app's files dir. */
-        fun forApp(context: Context): DebugCaptureBuffer =
-            DebugCaptureBuffer(File(context.filesDir, "debug-capture"))
+        @Volatile
+        private var instance: DebugCaptureBuffer? = null
+
+        /**
+         * Return the process-wide buffer for this application.
+         *
+         * Multiple UI Composables (LiveScreen, SettingsScreen,
+         * PreUploadReviewScreen) read [`stateFlow`] and call
+         * [`clear`] / [`appendFrame`] against the *same* on-disk
+         * tree; constructing independent instances per call
+         * site would let their in-memory counters
+         * (`totalBytes`, `frameCount`, timestamps) drift out of
+         * sync with each other and with reality after a clear,
+         * corrupting the eviction cap. Keyed on
+         * `applicationContext.filesDir` implicitly via the
+         * application singleton.
+         */
+        fun forApp(context: Context): DebugCaptureBuffer {
+            val app = context.applicationContext
+            return getOrCreate(File(app.filesDir, "debug-capture"))
+        }
+
+        /**
+         * Internal singleton creation hook. Visible for tests
+         * so they can exercise the same caching code path
+         * without a real Android `Context`.
+         */
+        internal fun getOrCreate(rootDir: File): DebugCaptureBuffer {
+            instance?.let { return it }
+            return synchronized(this) {
+                instance ?: DebugCaptureBuffer(rootDir).also { instance = it }
+            }
+        }
+
+        /** Test-only: drop the cached singleton so each test
+         *  using a fresh temp dir gets a fresh buffer. */
+        internal fun resetForTests() {
+            synchronized(this) { instance = null }
+        }
     }
 }

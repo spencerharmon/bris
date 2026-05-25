@@ -61,6 +61,11 @@ android {
             ?: "spike-shared-token-replace-me"
         buildConfigField("String", "BRIS_COLLECTOR_BEARER_TOKEN", "\"$token\"")
         buildConfigField("String", "BRIS_APP_VERSION", "\"0.1.0\"")
+        // Diagnostic-collection upload is a spike, not a
+        // production surface. Hard-coded false so a developer
+        // building locally can't silently enable remote submit
+        // without editing source (visible in code review).
+        buildConfigField("boolean", "ENABLE_REMOTE_SUBMIT", "false")
     }
 
     buildFeatures {
@@ -81,6 +86,27 @@ android {
         getByName("main") {
             kotlin.srcDir(layout.buildDirectory.dir("generated/source/uniffi/kotlin"))
             jniLibs.srcDir(layout.projectDirectory.dir("src/main/jniLibs"))
+        }
+    }
+
+    testOptions {
+        unitTests.isReturnDefaultValues = true
+    }
+
+    signingConfigs {
+        // Deliberately-committed debug keystore at
+        // bris-android/keystore/debug.keystore. Without this,
+        // Gradle generates a fresh ephemeral debug keystore per
+        // CI runner, so every nightly/PR APK is signed with a
+        // different key and Android refuses in-place upgrade
+        // (INSTALL_FAILED_UPDATE_INCOMPATIBLE). Password is the
+        // standard Android default ("android"); not a secret.
+        // Debug builds only -- no release signing config here.
+        getByName("debug") {
+            storeFile = rootProject.file("keystore/debug.keystore")
+            storePassword = "android"
+            keyAlias = "androiddebugkey"
+            keyPassword = "android"
         }
     }
 
@@ -114,6 +140,9 @@ dependencies {
     // crashing CameraX's bindToLifecycle on real devices).
     implementation("androidx.lifecycle:lifecycle-runtime-compose:2.8.7")
     implementation("androidx.datastore:datastore-preferences:1.1.1")
+    // SAF helpers (DocumentFile) for the operator-chosen
+    // "Save buffer" destination in debug-mode.
+    implementation("androidx.documentfile:documentfile:1.0.1")
 
     // CameraX
     val cameraxVersion = "1.4.0"
@@ -131,6 +160,13 @@ dependencies {
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
 
     debugImplementation("androidx.compose.ui:ui-tooling")
+
+    // JVM unit tests (run under Gradle's `test` task in CI).
+    testImplementation("junit:junit:4.13.2")
+    testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.8.1")
+    // android.jar ships org.json as stubs ("Stub!" at runtime);
+    // JVM unit tests need the real implementation.
+    testImplementation("org.json:json:20240303")
 }
 
 // ---------------------------------------------------------------------------
