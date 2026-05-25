@@ -1529,6 +1529,28 @@ references to the regression tests that pin the behavior. See
    favour of hand-rolled ~to_le_bytes~ encoding and
    ~O_EXCL~ sentinel locking.
 
+** DONE Engine tuning: opportunistic-flow defaults + publication gate + cumulative counters
+   Bumps ~EngineConfig::sight_window_seconds~ from 600 s to
+   7200 s (2 h) and ~sight_window_capacity~ from 10 to 50 to
+   cover the multi-capture / same-body-30-min-apart
+   opportunistic flow. New ~EngineConfig::publication_gate~
+   (~PublicationGateConfig~) applies geometric-diversity
+   (≥ 30° azimuth spread), ellipse-axis-ratio (≤ 10:1),
+   absolute-σ (≤ 50 nm major), and motion-staleness
+   (~assumed_max_speed_kn~, default 0 kn) gates in
+   Stage E ~try_publish~ — honest-but-misleading fixes are
+   filtered before reaching the publication channel. Six new
+   cumulative ~EngineDiagnostics~ counters
+   (~fixes_published_total~, ~fix_publish_attempts~,
+   ~sights_inserted_total~, ~sights_evicted_total~,
+   ~singular_geometry_rejections~,
+   ~publication_gate_rejections~). New design doc
+   [[file:docs/design/observer_motion_staleness.md][docs/design/observer_motion_staleness.md]] explains the
+   σ-inflation arithmetic and the no-DR posture. Acceptance:
+   4 new gate unit tests in ~stage_e~ + updated
+   config-defaults test; full workspace `fmt + clippy + test`
+   green; no new workspace deps.
+
 ** TODO Sweep guidance (mobile only)
    On phone frontends, render a minimal overlay showing
    horizon detection status and current body candidates. No

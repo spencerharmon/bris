@@ -229,6 +229,12 @@ struct EngineState {
     cold_start_ambiguous_skipped: u64,
     cold_start_inconsistent_count: u64,
     cold_start_disjoint_count: u64,
+    fixes_published_total: u64,
+    fix_publish_attempts: u64,
+    sights_inserted_total: u64,
+    sights_evicted_total: u64,
+    singular_geometry_rejections: u64,
+    publication_gate_rejections: u64,
 }
 
 /// Nautical mile in metres; for converting Fix sigma (nm) to
@@ -538,6 +544,12 @@ impl StreamingEngine {
                 cold_start_ambiguous_skipped: 0,
                 cold_start_inconsistent_count: 0,
                 cold_start_disjoint_count: 0,
+                fixes_published_total: 0,
+                fix_publish_attempts: 0,
+                sights_inserted_total: 0,
+                sights_evicted_total: 0,
+                singular_geometry_rejections: 0,
+                publication_gate_rejections: 0,
             }),
             config,
             fix_tx,
@@ -714,6 +726,18 @@ impl StreamingEngine {
         if stage_e_outcome.cold_start_disjoint {
             state.cold_start_disjoint_count += 1;
         }
+        // Cumulative counters from this Stage E pass.
+        state.sights_inserted_total += stage_e_outcome.sights_inserted as u64;
+        state.sights_evicted_total += stage_e_outcome.sights_evicted as u64;
+        if stage_e_outcome.publish_attempted {
+            state.fix_publish_attempts += 1;
+        }
+        if stage_e_outcome.singular_geometry_rejection {
+            state.singular_geometry_rejections += 1;
+        }
+        if stage_e_outcome.publication_gate_rejection {
+            state.publication_gate_rejections += 1;
+        }
         // Persist newly-inserted sights to disk. Sync on the
         // Stage E thread per design; failures are logged and
         // counted, never panicked.
@@ -728,6 +752,7 @@ impl StreamingEngine {
         }
         if let Some(published) = &stage_e_outcome.published {
             state.stages[STAGE_E].produced += 1;
+            state.fixes_published_total += 1;
             state.last_published_fix_tt = Some(published.timestamp);
             state.last_published_fix = Some(published.clone());
             state.last_publication = Some(Instant::now());
@@ -839,6 +864,12 @@ impl StreamingEngine {
             cold_start_ambiguous_skipped: state.cold_start_ambiguous_skipped,
             cold_start_inconsistent_count: state.cold_start_inconsistent_count,
             cold_start_disjoint_count: state.cold_start_disjoint_count,
+            fixes_published_total: state.fixes_published_total,
+            fix_publish_attempts: state.fix_publish_attempts,
+            sights_inserted_total: state.sights_inserted_total,
+            sights_evicted_total: state.sights_evicted_total,
+            singular_geometry_rejections: state.singular_geometry_rejections,
+            publication_gate_rejections: state.publication_gate_rejections,
         }
     }
 

@@ -12,9 +12,14 @@
 //!
 //! - 2-second stitching window (= 60 frames at 30 fps; the upper
 //!   end of useful frame separation for cross-frame stitching).
-//! - 600-second (10-minute) sight window with linear age-weighting
-//!   constant 600 s.
-//! - Cap of 10 sights in the window, replace-worst on insertion.
+//! - 7200-second (2-hour) sight window with linear age-weighting
+//!   constant 600 s. Operator-targeted opportunistic flows often
+//!   take same-body sights 30+ minutes apart (cold-start `CoP`
+//!   needs ≥ 2 same-body LOPs on different time-shifted GP
+//!   circles); 2 h covers that with margin. See
+//!   `docs/design/sight_persistence.md` and
+//!   `docs/design/circle_of_position.md`.
+//! - Cap of 50 sights in the window, replace-worst on insertion.
 //! - Minimum 1-second interval between fix publications.
 //! - Single worker thread.
 //! - Plate-solving database built lazily on first night frame.
@@ -60,9 +65,19 @@ pub struct EngineConfig {
     /// Default 600.0 (10 minutes).
     ///
     /// Without a course/speed input the observer may have moved
-    /// in 10 minutes; the linear age-weighting (controlled by
+    /// in the interval; the linear age-weighting (controlled by
     /// [`Self::sight_age_weight_time_constant_s`]) downweights
-    /// older sights smoothly within this window.
+    /// older sights smoothly within this window, and the
+    /// publication-time motion-staleness gate (see
+    /// [`PublicationGateConfig::assumed_max_speed_kn`] and
+    /// `docs/design/observer_motion_staleness.md`) refuses to
+    /// publish a fix whose σ inflated by motion exceeds
+    /// [`PublicationGateConfig::max_position_sigma_nm`].
+    ///
+    /// Default 7200 (2 hours): covers the multi-capture /
+    /// same-body-30-min-apart opportunistic flow the operator
+    /// targets. See `docs/design/sight_persistence.md` and
+    /// `docs/design/circle_of_position.md`.
     pub sight_window_seconds: f64,
 
     /// Time constant of the linear age-weighting applied to sights
@@ -74,10 +89,13 @@ pub struct EngineConfig {
 
     /// Maximum number of sights kept in the active window. When
     /// the window is full, an inserted sight replaces the worst-σ
-    /// existing entry rather than the oldest. Default 10 (matches
-    /// the design-doc diminishing-returns inflection at N≈5 with
-    /// good azimuth spread; cap at N=10 because marginal gains
-    /// drop below 10% per additional sight beyond that).
+    /// existing entry rather than the oldest. Default 50: the
+    /// operator's multi-body opportunistic-scan flow can easily
+    /// produce tens of sights across a 2-hour window; the
+    /// diminishing-returns inflection on a *single* fix is still
+    /// near N≈5, but capacity here governs the pool of
+    /// candidates the publication LSQ chooses from, not the
+    /// number it must combine.
     pub sight_window_capacity: usize,
 
     /// Minimum interval, in milliseconds, between fix publications
@@ -320,6 +338,16 @@ pub struct EngineConfig {
     /// Cold-start fix fallback configuration. See
     /// [`ColdStartEngineConfig`].
     pub cold_start: ColdStartEngineConfig,
+
+    /// Geometric-diversity and motion-staleness gate applied
+    /// *after* `multi_sight_fix` succeeds and *before* the fix
+    /// goes out on the publication channel. Honest-but-misleading
+    /// fixes (degenerate azimuth spread, huge ellipses, sights
+    /// stale relative to operator motion) are rejected here so
+    /// downstream consumers never see them. See
+    /// [`PublicationGateConfig`] and
+    /// `docs/design/observer_motion_staleness.md`.
+    pub publication_gate: PublicationGateConfig,
 }
 
 /// Cold-start fix fallback knobs.
@@ -346,6 +374,69 @@ pub struct ColdStartEngineConfig {
     pub coarse_hemisphere: Option<Hemisphere>,
 }
 
+/// Pre-publication gate on a freshly-solved fix.
+///
+/// `multi_sight_fix` reports the LSQ residual covariance
+/// honestly. When the underlying geometry is degenerate (all
+/// sights clustered at one azimuth, or a single body's `CoP`
+/// pair with poor intersection geometry) the resulting
+/// ellipse is huge — honest, but operationally useless. This
+/// gate refuses to publish such fixes; the engine still
+/// retains the sights for a later, better-conditioned
+/// combination.
+///
+/// The gate is additive to (not a replacement for)
+/// `multi_sight_fix`'s own singular-geometry rejection: the
+/// LSQ refuses when the normal matrix is uninvertible; this
+/// gate refuses when the resulting ellipse is wide enough
+/// (in axis ratio or absolute σ) to be operationally useless.
+///
+/// Setting any threshold to `f64::INFINITY` disables that
+/// individual check. Setting all to infinity (and
+/// `min_azimuth_spread_rad = 0.0`) recovers the pre-gate
+/// publish-everything-the-LSQ-accepts behavior.
+#[derive(Debug, Clone, Copy)]
+pub struct PublicationGateConfig {
+    /// Minimum azimuth spread, in radians, across the
+    /// contributing sights. Default `30° ≈ 0.524 rad`. Below
+    /// this the LOPs are nearly parallel and the fix is
+    /// "good along track, weak across track" — usually not
+    /// what the operator wants surfaced as a navigation fix.
+    pub min_azimuth_spread_rad: f64,
+    /// Maximum allowed ratio of the position ellipse's major
+    /// to minor axis. Default 10.0. A ratio above this is
+    /// a sign of degenerate geometry that the absolute σ
+    /// gate alone might miss (small absolute σ with extreme
+    /// elongation is still a sliver-fix).
+    pub max_ellipse_axis_ratio: f64,
+    /// Maximum allowed σ along the ellipse's major axis, in
+    /// nautical miles. Default 50.0. Above this the fix is
+    /// useless for celestial-grade navigation regardless of
+    /// how the σ accumulated.
+    pub max_position_sigma_nm: f64,
+    /// Assumed worst-case observer speed, in knots, between
+    /// the oldest sight and the publication instant. Used
+    /// only by the motion-staleness gate: a sight of age `t`
+    /// seconds inflates its σ-contribution to the fix's
+    /// major-axis σ by `assumed_max_speed_kn * t / 3600` nm
+    /// (RSS). Default 0.0 (stationary use): the gate is
+    /// inert. Set higher for mobile use (5-10 kn for a
+    /// sailing yacht, ~30 kn for a power vessel). See
+    /// `docs/design/observer_motion_staleness.md`.
+    pub assumed_max_speed_kn: f64,
+}
+
+impl Default for PublicationGateConfig {
+    fn default() -> Self {
+        Self {
+            min_azimuth_spread_rad: 30.0_f64.to_radians(),
+            max_ellipse_axis_ratio: 10.0,
+            max_position_sigma_nm: 50.0,
+            assumed_max_speed_kn: 0.0,
+        }
+    }
+}
+
 impl EngineConfig {
     /// Construct an engine config with the given observer and the
     /// design-doc defaults for everything else.
@@ -354,9 +445,9 @@ impl EngineConfig {
         Self {
             observer,
             stitching_window_seconds: 2.0,
-            sight_window_seconds: 600.0,
+            sight_window_seconds: 7200.0,
             sight_age_weight_time_constant_s: 600.0,
-            sight_window_capacity: 10,
+            sight_window_capacity: 50,
             min_fix_publication_interval_ms: 1_000,
             max_concurrent_pipeline_workers: 1,
             input_ring_capacity: 120,
@@ -398,6 +489,7 @@ impl EngineConfig {
                 enabled: true,
                 coarse_hemisphere: None,
             },
+            publication_gate: PublicationGateConfig::default(),
         }
     }
 
@@ -503,8 +595,13 @@ mod tests {
     fn defaults_match_design_doc_recommendations() {
         let cfg = EngineConfig::new(Observer::default_dev());
         assert!((cfg.stitching_window_seconds - 2.0).abs() < f64::EPSILON);
-        assert!((cfg.sight_window_seconds - 600.0).abs() < f64::EPSILON);
-        assert_eq!(cfg.sight_window_capacity, 10);
+        assert!((cfg.sight_window_seconds - 7200.0).abs() < f64::EPSILON);
+        assert_eq!(cfg.sight_window_capacity, 50);
+        let gate = cfg.publication_gate;
+        assert!((gate.min_azimuth_spread_rad - 30.0_f64.to_radians()).abs() < 1e-12);
+        assert!((gate.max_ellipse_axis_ratio - 10.0).abs() < f64::EPSILON);
+        assert!((gate.max_position_sigma_nm - 50.0).abs() < f64::EPSILON);
+        assert!((gate.assumed_max_speed_kn - 0.0).abs() < f64::EPSILON);
         assert_eq!(cfg.min_fix_publication_interval_ms, 1_000);
         assert_eq!(cfg.max_concurrent_pipeline_workers, 1);
         assert_eq!(cfg.classifier_hysteresis_frames, 90);
