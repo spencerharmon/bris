@@ -73,6 +73,33 @@ pub struct EngineDiagnostics {
     /// successfully computed. `None` until the first frame
     /// has completed Stage C.
     pub last_horizon_analysis_size: Option<(u32, u32)>,
+
+    /// Number of times the reflection-pair provider was
+    /// invoked (i.e. ≥ 2 body candidates were present and
+    /// the dispatched condition was actionable).
+    pub reflection_pair_attempts: u64,
+    /// Number of frames where the reflection-pair provider
+    /// produced a hypothesis (Tests 1–4 all passed). A
+    /// hypothesis may not have won the best-σ merge against
+    /// the optical horizon; see [`Self::reflection_pair_used`]
+    /// for emission count.
+    pub reflection_pair_hypothesized: u64,
+    /// Number of frames where the reflection-pair provider's
+    /// hypothesis won the best-σ merge and was emitted as the
+    /// frame's horizon outcome.
+    pub reflection_pair_used: u64,
+    /// Pair-level rejections inside the reflection-pair
+    /// provider, broken down by test. A single attempt can
+    /// increment multiple rejection counters (one per
+    /// rejected pair).
+    pub reflection_pair_rejected_geometric: u64,
+    /// Pair-level rejections by Test 2 (photometric).
+    pub reflection_pair_rejected_photometric: u64,
+    /// Pair-level rejections by Test 3 (catalog consistency).
+    pub reflection_pair_rejected_catalog: u64,
+    /// Attempts that produced ≥ 1 surviving pair but no
+    /// cluster met the minimum-size threshold (Test 4).
+    pub reflection_pair_rejected_no_cluster: u64,
 }
 
 /// Per-stage processing statistics.

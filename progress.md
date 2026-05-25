@@ -9,6 +9,53 @@ For the end-to-end pipeline architecture and data flow, see
 
 ---
 
+## Phase 3.6 Phase 1 landed (reflection-pair horizon provider)
+
+`HorizonProvider` trait now lives in
+`bris-vision::horizon_providers` and is the engine-internal seam
+for pluggable horizon sources. The five classical optical
+detectors have trivial wrapper impls in
+`bris-streaming::pipeline::horizon_providers`; behavior is
+unchanged from the cheap-first-best-σ dispatcher.
+
+The first auto-horizon source, `ReflectionPairProvider`, is
+live. Algorithm per `docs/design/horizon_autodetect.md` §3.2:
+Tests 1 (geometric), 2 (photometric), 3 (catalog-consistency
+against a position prior, optional / skipped on cold start),
+4 (multi-pair agreement / clustering). Test 5
+(reflector-region) is an in-code TODO. On a successful pair
+the provider emits both a horizon line and a direct sight
+`Ho = θ/2` (option (ii) from §10); Stage E uses the direct
+sight verbatim when present.
+
+Supporting plumbing:
+- `EngineState.last_published_fix` retained; staleness gate
+  30 s; converted to `bris_vision::PositionPrior` per frame.
+  DR projection of stale fixes is a Phase 2 followup.
+- `EngineDiagnostics` carries seven new counters
+  (`reflection_pair_attempts`, `reflection_pair_hypothesized`,
+  `reflection_pair_used`, four `reflection_pair_rejected_*`). Provider exposes
+  `detect_with_stats` so the streaming engine can accumulate
+  per-frame rejection reasons without re-running its tests.
+- Pi Zero 2W compile contract intact; no new dependencies; no
+  FFI / Android / collector changes.
+
+Acceptance: 9 synthetic unit tests in
+`bris-vision::horizon_providers::reflection_pair` covering
+clean detection, the four primary rejection paths, prior +
+catalog gating, cold-start ≥ 3 cluster threshold, σ floor,
+Day-mode scope boundary, and stats-counter increment.
+`cargo fmt + clippy --all-targets -D warnings + test
+--workspace --all-features` all green.
+
+Known limitation surfaced during integration: the
+`evaluate_pair` swap-to-brighter ordering makes Test 2
+structurally unreachable—`up` is always the brighter of the
+two candidates, so the photometric counter cannot fire in the
+current code path. The `reflection_brighter_rejected` test
+passes via Test 1 (gravity direction flips). Wired counter
+left in place for a follow-up that revisits the ordering.
+
 ## Current status
 
 **Phases done:**

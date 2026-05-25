@@ -9,6 +9,7 @@ pub mod condition;
 pub mod frame;
 pub mod fusion;
 pub mod horizon;
+pub mod horizon_providers;
 pub mod io;
 pub mod lens;
 pub mod measure;
@@ -36,6 +37,11 @@ pub use horizon::{
     detect_horizon_via_sky_region_with_column_mask, detect_horizon_with_column_mask, HorizonConfig,
     HorizonError, HorizonLine,
 };
+pub use horizon_providers::{
+    BodyCandidate, DirectSight, HorizonHypothesis, HorizonProvenance, HorizonProvider,
+    HorizonProviderContext, OpticalKind, PositionPrior, ReflectionPairConfig,
+    ReflectionPairProvider, ReflectionPairStats, TemporalScope,
+};
 pub use io::{
     load_frame_from_path, load_frame_from_path_with_rotation, save_frame_as_png, LoadError,
 };
@@ -54,7 +60,10 @@ pub use panorama::{
 };
 pub use peak::{detect_peaks, detect_peaks_above_horizon, Peak, PeakConfig};
 pub use pyramid::{FramePyramid, PyramidError, PyramidLevel};
-pub use ray::{altitude_from_rays, AltitudeMeasurement, BodyRay, CameraRay, HorizonRay};
+pub use ray::{
+    altitude_from_rays, bisector_normal, horizon_line_from_normal, AltitudeMeasurement, BodyRay,
+    CameraRay, HorizonRay,
+};
 #[cfg(feature = "segmentation")]
 pub use segment::{
     detect_horizon_via_segmentation, detect_horizon_via_segmentation_with_column_mask, load_model,

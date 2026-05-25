@@ -276,6 +276,15 @@ pub struct EngineConfig {
     /// so a successful solve is by construction at or below
     /// this σ.
     pub per_star_sigma: Sigma,
+
+    /// Maximum age (seconds) of a published fix before the
+    /// engine treats it as stale and stops surfacing it as a
+    /// [`bris_vision::PositionPrior`] to horizon providers
+    /// (notably the reflection-pair provider's catalog
+    /// consistency test). DR projection of stale fixes is a
+    /// Phase 2 followup; see
+    /// `docs/handoff/reflection-pair-phase1.md`.
+    pub position_prior_max_age_seconds: f64,
 }
 
 impl EngineConfig {
@@ -321,6 +330,7 @@ impl EngineConfig {
             // 30 arcsec → radians.
             per_star_sigma: Sigma::new(30.0 * std::f64::consts::PI / (180.0 * 3600.0))
                 .expect("30 arcsec is a valid Sigma"),
+            position_prior_max_age_seconds: 30.0,
         }
     }
 
