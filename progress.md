@@ -31,6 +31,50 @@ synthetic unit tests in
 → horizontal horizon at cy; empty frame → None; 30° tilt →
 None; short line yields larger σ than long line). Sibling PR
 for vanishing-point provider (Phase 4b) is outstanding.
+---
+
+## Phase 3.6 Phase 2 landed (Day-mode reflection-pair)
+
+`BodyDetection::Day` now exposes a primary `Centroid` plus a
+`Vec<Centroid>` of secondary saturated components, produced by
+the new `bris_vision::extract_multi_saturated_centroids` (one
+connected-components pass, area-gated, sorted largest-first).
+The reflection-pair dispatch in `pipeline/mod.rs` gates on Day
+in addition to Night/Twilight.
+
+When a position prior is present the Day primary candidate
+carries an almanac-computed Sun apparent altitude
+(`body_apparent_place(SolarSystemBody::Sun, ...)` evaluated at
+the prior position), so Test 3 (catalog consistency)
+evaluates on Day and a single direct+reflection pair can
+accept without the cold-start `min_pairs = 3` gate.
+
+`extract_multi_saturated_centroids` computes `mean_intensity`
+over each component's *non-saturated halo* (background
+pixels neighbouring the labelled blob) rather than over the
+labelled pixels themselves, so the photometric Test 2
+(`dn.brightness ≤ up.brightness * (1 + tol)`) retains
+discriminating power on saturated Day blobs instead of
+degenerating to ceiling ≤ ceiling.
+
+Acceptance: new centroid-extraction unit tests in
+`bris-vision::centroid` (multi-component largest-first,
+empty-when-no-saturation, **halo discriminates equal-area
+blobs** by background brightness); two new integration tests
+in `bris-streaming::pipeline` (Day frame *with* prior →
+reflection-pair both invoked AND used, emits direct sight;
+Day frame *without* prior → invoked but rejected by
+cold-start gate); existing reflection-pair + workspace tests
+still clean.
+
+Caveat: the Day-mode success path **requires a position
+prior** (cold start with one Day pair cannot pass the
+min-pair gate). Lens-flare rejection,
+specular-vs-diffuse photometric model, glitter-path
+handling, and Pi Zero 2W headroom measurement are
+`TODO(phase 3)` markers in
+`crates/bris-vision/src/horizon_providers/reflection_pair.rs`.
+DR projection of stale priors remains a follow-up.
 
 ---
 

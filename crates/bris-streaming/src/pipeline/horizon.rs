@@ -338,8 +338,13 @@ pub(crate) fn merge_vertical_line(
             used: false,
         };
     };
-    let mut best: Option<(HorizonDetector, HorizonLine)> = match prev {
-        HorizonStageOutcome::Detected { detector, line, .. } => Some((detector, line)),
+    let mut best: Option<(HorizonDetector, HorizonProvenance, HorizonLine)> = match prev {
+        HorizonStageOutcome::Detected {
+            detector,
+            provenance,
+            line,
+            ..
+        } => Some((detector, provenance, line)),
         HorizonStageOutcome::None => None,
     };
     let mut best_direct_sight: Option<bris_vision::DirectSight> = match prev {
@@ -348,11 +353,11 @@ pub(crate) fn merge_vertical_line(
     };
     let detector = detector_from_provenance(hyp.provenance);
     let improved = match best {
-        Some((_, ref existing)) => hyp.line.altitude_sigma < existing.altitude_sigma,
+        Some((_, _, ref existing)) => hyp.line.altitude_sigma < existing.altitude_sigma,
         None => true,
     };
     if improved {
-        best = Some((detector, hyp.line));
+        best = Some((detector, hyp.provenance, hyp.line));
         best_direct_sight = hyp.direct_sight;
     }
     VerticalLineMerge {

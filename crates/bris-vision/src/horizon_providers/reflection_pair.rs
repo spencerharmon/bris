@@ -10,6 +10,35 @@
 //!
 //! Phase 1 scope: intra-frame only, Night mode (≥ 2 body
 //! candidates required), no Day-mode multi-centroid support.
+//
+// TODO(phase 3): lens-flare rejection. A sun-induced lens-flare
+// ghost appears as a saturated secondary blob on Day, often
+// vertically displaced along the optical axis — the same
+// geometry as a Sun-reflection pair. Current tests do not
+// distinguish flares from real reflections; needs an additional
+// per-pair check (e.g. radial-from-primary geometry, halo
+// signature, or temporal correlation across frames).
+//
+// TODO(phase 3): specular-vs-diffuse model. Test 2's photometric
+// gate assumes diffuse-water reflectance (`dn ≤ up * (1 + tol)`).
+// Chrome / glass / wet asphalt return source radiance essentially
+// unattenuated, so the diffuse model under-rejects specular
+// false-positives. Real surfaces also brighten the reflection
+// near grazing incidence (Fresnel). The current model is fine for
+// the Phase 2 Day-water target; revisit when expanding scope.
+//
+// TODO(phase 3): glitter-path handling. At sea, direct sun on
+// wave-textured water produces a *glitter path* (many specular
+// highlights along the wave field) rather than a single coherent
+// reflection blob. The CC extractor produces dozens of small
+// components; most are gated by `min_area_px`, surviving ones
+// noisy. No corpus tests exercise this case yet.
+//
+// TODO(phase 3): Pi Zero 2W benchmark. The Day multi-centroid
+// path adds one full-frame moment-accumulation pass over the
+// single-centroid path. No measured headroom on the Pi Zero 2W
+// target has been recorded; once a Day corpus exists, run the
+// existing Phase 3.5 streaming benchmarks against it.
 
 use bris_core::{Sigma, Uncertain};
 

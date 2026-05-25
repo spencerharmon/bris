@@ -1500,10 +1500,37 @@ references to the regression tests that pin the behavior. See
    `bris-vision::horizon_providers::reflection_pair` plus
    counter-increment coverage; full workspace `fmt + clippy +
    test` green.
-** TODO Phase 2: Day-mode multi-centroid support
-   Extend Stage B to expose ≥ 2 candidates per Day frame; add
-   DR projection of stale position prior so the catalog test
-   stays available between fixes.
+** DONE Phase 2: Day-mode multi-centroid support
+   `BodyDetection::Day` carries a primary `Centroid` plus a
+   `Vec<Centroid>` of secondary saturated components
+   (largest-first), produced by
+   `bris_vision::extract_multi_saturated_centroids`. The
+   reflection-pair dispatcher gates on Day in addition to
+   Night/Twilight. When a position prior is present the Day
+   primary candidate carries an almanac-computed Sun
+   predicted altitude (`body_apparent_place`), so Test 3
+   evaluates and a single Day pair (direct + reflection) can
+   accept without the cold-start `min_pairs = 3` gate.
+   `extract_multi_saturated_centroids` computes
+   `mean_intensity` over each component's non-saturated
+   halo, preserving photometric discriminating power in the
+   presence of saturation clipping. Acceptance: new
+   centroid-extraction unit tests (halo discrimination,
+   component ordering) + Day-mode integration tests in
+   `bris-streaming::pipeline` (two-blob frame with prior
+   → `reflection_pair_used`; two-blob frame without prior
+   → invoked but rejected by cold-start gate); existing 9+
+   reflection-pair tests still pass.
+
+   Caveat: the Day-mode success path **requires a
+   position_prior**. Without a prior the primary's
+   `predicted_altitude` is None, Test 3 is skipped, and a
+   single Day pair fails the cold-start gate. DR projection
+   of stale priors is still deferred to a follow-up; lens-
+   flare rejection, specular-vs-diffuse photometric model,
+   glitter-path handling, and a Pi Zero 2W headroom
+   measurement are TODO(phase 3) in
+   `crates/bris-vision/src/horizon_providers/reflection_pair.rs`.
 ** TODO Phase 3: Cross-frame registration
    `TemporalScope::Window` provider mode per
    `docs/design/horizon_autodetect.md` §11.

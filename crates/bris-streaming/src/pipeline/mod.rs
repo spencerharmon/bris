@@ -60,10 +60,10 @@
 use crate::config::EngineConfig;
 use bris_almanac::{body_apparent_place, Observer, SolarSystemBody};
 use bris_core::time::Tt;
-use bris_core::Sigma;
+use bris_core::{Latitude, Longitude, Sigma, Uncertain};
 use bris_vision::{
-    centroid_saturated_body_in_mask, classify, detect_peaks, detect_peaks_above_horizon, Centroid,
-    Classification, Condition, Frame, HorizonLine, Peak, SaturatedBodyConfig,
+    classify, detect_peaks, detect_peaks_above_horizon, Centroid, Classification, Condition, Frame,
+    HorizonLine, Peak, SaturatedBodyConfig,
 };
 use tracing::{debug, trace, warn};
 
@@ -100,8 +100,14 @@ pub(crate) use stage_e::{run as run_stage_e, SightWindow};
 ///   sufficient).
 #[derive(Debug, Clone)]
 pub(crate) enum BodyDetection {
-    /// Day or successful-twilight-day-fallback centroid.
-    Day(Centroid),
+    /// Day or successful-twilight-day-fallback centroid. The
+    /// first field is the primary (largest-area) saturated
+    /// body; the second is any additional saturated
+    /// components above the area threshold (e.g. the body's
+    /// reflection on water / hood / puddle), largest first.
+    /// Empty when no secondaries were detected — the
+    /// historical single-centroid Day behaviour.
+    Day(Centroid, Vec<Centroid>),
     /// Night or twilight-night-fallback peaks. Empty `Vec` is not
     /// a valid `Night` outcome — the pipeline returns
     /// [`BodyDetection::None`] in that case. Stage D promotes
@@ -285,13 +291,34 @@ pub(crate) fn process_frame(
     // multi-centroid path is deferred. The explicit match here
     // makes the scope boundary inspectable rather than relying
     // on the `len() >= 2` check to incidentally exclude Day.
-    let body_candidates = body_candidates_from_detection(&body);
+    // Day path: when a position prior is available, compute
+    // the Sun's apparent altitude at the prior location and
+    // attach it as `predicted_altitude` on the *primary* Day
+    // candidate. This lets the reflection-pair provider's
+    // Test 3 (catalog consistency) evaluate against the
+    // single Day pair (1 direct + 1 reflection), which would
+    // otherwise fail the cold-start `min_pairs = 3` gate.
+    // Secondaries get `None` — they're hypothesized as
+    // reflections of the primary, not catalog bodies in
+    // their own right. Without a prior the field stays
+    // `None`; Day reflection-pair then falls through to the
+    // cold-start path which (with 1 pair) declines to emit.
+    let day_sun_predicted_altitude = match dispatched_condition {
+        Condition::Day | Condition::Twilight => {
+            position_prior.and_then(|p| sun_predicted_altitude(cfg.observer, frame.capture_tt, p))
+        }
+        Condition::Night | Condition::Unusable => None,
+    };
+    let body_candidates = body_candidates_from_detection(&body, day_sun_predicted_altitude);
     let mut reflection_pair_stats = bris_vision::ReflectionPairStats::default();
     let mut reflection_pair_invoked = false;
     let mut reflection_pair_hypothesized = false;
     let mut reflection_pair_used = false;
     if body_candidates.len() >= 2
-        && matches!(dispatched_condition, Condition::Night | Condition::Twilight)
+        && matches!(
+            dispatched_condition,
+            Condition::Day | Condition::Night | Condition::Twilight
+        )
     {
         let ctx = bris_vision::HorizonProviderContext {
             frame,
@@ -372,18 +399,44 @@ pub(crate) fn process_frame(
 /// defense-in-depth log.
 /// Project a [`BodyDetection`] into the narrow read-only view
 /// consumed by horizon providers.
-fn body_candidates_from_detection(body: &BodyDetection) -> Vec<bris_vision::BodyCandidate> {
+fn body_candidates_from_detection(
+    body: &BodyDetection,
+    day_primary_predicted_altitude: Option<Uncertain<f64>>,
+) -> Vec<bris_vision::BodyCandidate> {
     match body {
-        BodyDetection::Day(c) => vec![bris_vision::BodyCandidate {
-            pixel: (c.x, c.y),
-            brightness: c.mean_intensity,
-            position_sigma_px: c.position_sigma_px.value(),
-            // Day-mode body identification (Sun) is implicit
-            // but a predicted altitude here would require an
-            // almanac call; deferred to Phase 2 with the
-            // Day-mode multi-centroid work.
-            predicted_altitude: None,
-        }],
+        BodyDetection::Day(c, secondaries) => {
+            let mut out = Vec::with_capacity(1 + secondaries.len());
+            out.push(bris_vision::BodyCandidate {
+                pixel: (c.x, c.y),
+                brightness: c.mean_intensity,
+                position_sigma_px: c.position_sigma_px.value(),
+                // The Sun is the implicit Day body. When a
+                // position prior is available, the caller
+                // supplies an almanac-predicted Sun altitude;
+                // this lets reflection-pair Test 3 evaluate
+                // and a single Day pair (direct + reflection)
+                // can pass without the cold-start min-pair
+                // gate. Without a prior the field is `None`
+                // and the provider falls back to cold-start.
+                predicted_altitude: day_primary_predicted_altitude,
+            });
+            for s in secondaries {
+                out.push(bris_vision::BodyCandidate {
+                    pixel: (s.x, s.y),
+                    brightness: s.mean_intensity,
+                    position_sigma_px: s.position_sigma_px.value(),
+                    // Secondaries are hypothesized as
+                    // reflections of the primary, not
+                    // independent catalog bodies. Leaving
+                    // `predicted_altitude` None on the
+                    // secondary keeps Test 3 from
+                    // double-counting and lets the
+                    // primary's altitude carry the test.
+                    predicted_altitude: None,
+                });
+            }
+            out
+        }
         BodyDetection::Night(peaks) => peaks
             .iter()
             .map(|p| bris_vision::BodyCandidate {
@@ -402,10 +455,25 @@ fn body_candidates_from_detection(body: &BodyDetection) -> Vec<bris_vision::Body
 }
 
 fn detect_day_body(frame: &Frame, cfg: SaturatedBodyConfig) -> BodyDetection {
-    match centroid_saturated_body_in_mask(frame, cfg, None) {
-        Ok(centroid) => BodyDetection::Day(centroid),
+    // Extract every saturated component above the area gate.
+    // The largest is the primary (Sun / Moon); any remaining
+    // ones are exposed as secondaries so the reflection-pair
+    // horizon provider can form pairs across the direct image
+    // and reflection-on-surface candidates. Falls back to the
+    // single-centroid path when only one component survives,
+    // and to `BodyDetection::None` when none do (matching the
+    // Phase 1 behaviour).
+    match bris_vision::extract_multi_saturated_centroids(frame, cfg, None) {
+        Ok(mut centroids) if !centroids.is_empty() => {
+            let primary = centroids.remove(0);
+            BodyDetection::Day(primary, centroids)
+        }
+        Ok(_) => {
+            trace!("Stage B (day): no saturated body");
+            BodyDetection::None
+        }
         Err(e) => {
-            trace!(error = %e, "Stage B (day): no saturated body");
+            trace!(error = %e, "Stage B (day): centroid extraction failed");
             BodyDetection::None
         }
     }
@@ -461,7 +529,7 @@ fn detect_twilight(
     horizon: Option<HorizonLine>,
 ) -> BodyDetection {
     match detect_day_body(frame, sat_cfg) {
-        BodyDetection::Day(c) => BodyDetection::Day(c),
+        BodyDetection::Day(c, _) => BodyDetection::Day(c, Vec::new()),
         // None or Night from day-path call shouldn't happen
         // (it only returns Day or None); IdentifiedStars
         // certainly can't (Stage D hasn't run yet). Fall
@@ -474,11 +542,12 @@ fn detect_twilight(
 
 fn log_body_outcome(body: &BodyDetection) {
     match body {
-        BodyDetection::Day(c) => trace!(
+        BodyDetection::Day(c, secondaries) => trace!(
             x = c.x,
             y = c.y,
             area_px = c.area_px,
             sigma_px = c.position_sigma_px.value(),
+            secondaries = secondaries.len(),
             "Stage B (day): centroid"
         ),
         BodyDetection::Night(peaks) => trace!(
@@ -507,6 +576,47 @@ fn log_body_outcome(body: &BodyDetection) {
 /// classifier degrades gracefully to image-only operation, and
 /// astronomy-time errors are rare enough that warning per-frame
 /// would just spam the log.
+/// Build an observer at the position prior's latitude/longitude,
+/// inheriting the engine's configured atmosphere/eye-height for
+/// dip and refraction. Returns `None` if the prior's coordinates
+/// fall outside the angle types' valid range (shouldn't happen
+/// for well-formed priors but we degrade gracefully).
+fn observer_at_prior(
+    cfg_observer: Observer,
+    prior: bris_vision::PositionPrior,
+) -> Option<Observer> {
+    let latitude = Latitude::from_radians(prior.lat_rad).ok()?;
+    let longitude = Longitude::from_radians(prior.lon_rad).ok()?;
+    Some(Observer {
+        latitude,
+        longitude,
+        ..cfg_observer
+    })
+}
+
+/// Compute the Sun's predicted apparent altitude (radians, with
+/// 1σ) at the prior position and frame instant. Returns `None`
+/// when the almanac declines (Sun below horizon) or the prior
+/// coordinates are invalid — the Day reflection-pair primary
+/// then carries `predicted_altitude = None` and Test 3 is
+/// skipped, falling back to cold start.
+fn sun_predicted_altitude(
+    cfg_observer: Observer,
+    tt: Tt,
+    prior: bris_vision::PositionPrior,
+) -> Option<Uncertain<f64>> {
+    let observer = observer_at_prior(cfg_observer, prior)?;
+    let jd_ut1 = tt.julian_date();
+    let place = body_apparent_place(SolarSystemBody::Sun, tt, jd_ut1, observer).ok()?;
+    if !place.direction.altitude.is_finite() {
+        return None;
+    }
+    Some(Uncertain::new(
+        place.direction.altitude,
+        place.altitude_sigma,
+    ))
+}
+
 fn sun_altitude_deg(observer: Observer, tt: Tt) -> Option<f64> {
     // jd_ut1 ≈ tt.julian_date() to ~69 s ≈ 0.0008°. The classifier
     // only consults the band (boundaries at 0°, -6°, -12°, -18°);
@@ -635,7 +745,7 @@ mod tests {
         );
         assert_eq!(outcome.classification.condition, Condition::Day);
         match outcome.body {
-            BodyDetection::Day(c) => {
+            BodyDetection::Day(c, _) => {
                 // Centroid should land near the frame center.
                 assert!((c.x - 64.0).abs() < 1.0, "centroid x off-center: {}", c.x);
                 assert!((c.y - 64.0).abs() < 1.0, "centroid y off-center: {}", c.y);
@@ -837,6 +947,189 @@ mod tests {
                 panic!("expected reflection-pair horizon detection on synthetic frame");
             }
         }
+    }
+
+    /// Paint a circular saturated disk centred at (cx, cy)
+    /// with the given radius into `pixels`.
+    fn paint_disk(pixels: &mut [u16], w: u32, h: u32, cx: f64, cy: f64, r: f64, value: u16) {
+        let r2 = r * r;
+        for y in 0..h {
+            for x in 0..w {
+                let dx = f64::from(x) - cx;
+                let dy = f64::from(y) - cy;
+                if dx * dx + dy * dy <= r2 {
+                    pixels[(y as usize) * (w as usize) + (x as usize)] = value;
+                }
+            }
+        }
+    }
+
+    /// Day-mode reflection-pair, end-to-end. With a position
+    /// prior threaded into the engine, `body_candidates_from_detection`
+    /// attaches the Sun's almanac-predicted altitude to the
+    /// primary Day candidate. Test 3 (catalog consistency)
+    /// then evaluates and a single Day pair (1 direct + 1
+    /// reflection) suffices — the cold-start `min_pairs = 3`
+    /// gate does not apply when any pair passed Test 3.
+    ///
+    /// We pick `alt` to equal the Sun's predicted altitude at
+    /// the prior location so geometry agrees with the
+    /// almanac. The synthetic frame's apparent half-angle
+    /// then matches the predicted altitude (the half-angle
+    /// of the pair *is* the body's apparent altitude when
+    /// the reflector is horizontal).
+    #[test]
+    fn reflection_pair_integration_day_frame_emits_theta_half_sight() {
+        let w = 512_u32;
+        let h = 512_u32;
+        let intr = Intrinsics::placeholder(w, h);
+        let tt = Tt::from_julian_date(JD_J2000);
+        // Pick a latitude such that the Sun is a few degrees
+        // above the horizon at J2000 noon TT (Sun is near the
+        // winter solstice, declination ≈ −23°). Latitude 60°N
+        // puts the Sun at altitude ≈ 7° — inside the
+        // small-angle band the synthetic geometry needs.
+        let prior = bris_vision::PositionPrior {
+            lat_rad: 60.0_f64.to_radians(),
+            lon_rad: 0.0,
+            sigma_position_m: 1000.0,
+            timestamp: tt,
+        };
+        let predicted = sun_predicted_altitude(Observer::default_dev(), tt, prior)
+            .expect("Sun must be above the horizon for this test geometry");
+        let alt = predicted.value;
+        assert!(
+            (0.005..0.5).contains(&alt),
+            "predicted Sun altitude {alt} rad outside synthetic-geometry sanity band; \
+             tune the prior"
+        );
+        let mut pixels = vec![u16::MAX - 100; (w * h) as usize];
+        let (upx, upy) = pixel_for_ray(&intr, 0.0, -alt.sin(), alt.cos());
+        let (dnx, dny) = pixel_for_ray(&intr, 0.0, alt.sin(), alt.cos());
+        paint_disk(&mut pixels, w, h, upx, upy, 20.0, u16::MAX);
+        paint_disk(&mut pixels, w, h, dnx, dny, 15.0, u16::MAX);
+        let frame = Frame::new(w, h, pixels, tt, 1000, intr).unwrap();
+        let mut cfg = test_cfg();
+        cfg.saturated_body_cfg = SaturatedBodyConfig {
+            saturation_threshold: u16::MAX - 50,
+            min_area_px: 50,
+        };
+        let outcome = process_frame(
+            &bris_vision::FramePyramid::new(frame),
+            &cfg,
+            &mut ClassifierHysteresis::default(),
+            Some(prior),
+        );
+        // The day-twilight image classifier may yield Day or
+        // Twilight on the bright synthetic frame; both feed
+        // the reflection-pair provider with predicted_altitude.
+        assert!(
+            matches!(
+                outcome.dispatched_condition,
+                Condition::Day | Condition::Twilight
+            ),
+            "expected Day or Twilight, got {:?}",
+            outcome.dispatched_condition,
+        );
+        match &outcome.body {
+            BodyDetection::Day(_, secondaries) => {
+                assert_eq!(
+                    secondaries.len(),
+                    1,
+                    "Day path must expose the reflection as a secondary centroid",
+                );
+            }
+            other => panic!("expected BodyDetection::Day(_, _), got {other:?}"),
+        }
+        assert!(
+            outcome.reflection_pair_invoked,
+            "reflection-pair provider must be invoked when Day produces ≥ 2 candidates",
+        );
+        assert!(
+            outcome.reflection_pair_used,
+            "reflection-pair must accept (Test 3 passes via almanac prediction): \
+             stats = {:?}",
+            outcome.reflection_pair_stats,
+        );
+        match outcome.horizon {
+            HorizonStageOutcome::Detected {
+                detector,
+                direct_sight,
+                ..
+            } => {
+                assert_eq!(detector, horizon::HorizonDetector::ReflectionPair);
+                let sight = direct_sight.expect("reflection-pair must emit a direct sight");
+                let v = sight.observed_altitude.value;
+                assert!(
+                    (alt * 0.5..alt * 1.5).contains(&v),
+                    "direct-sight θ/2 = {v} rad far from predicted altitude {alt}",
+                );
+            }
+            HorizonStageOutcome::None => {
+                panic!("expected reflection-pair horizon detection on synthetic frame");
+            }
+        }
+    }
+
+    /// Day-mode reflection-pair WITHOUT a position prior:
+    /// dispatcher reaches the provider but no `predicted_altitude`
+    /// is attached, so Test 3 is skipped and the single Day
+    /// pair fails the cold-start min-pair gate. Documents the
+    /// limitation: Day reflection-pair currently requires a
+    /// prior to produce a fix.
+    #[test]
+    fn reflection_pair_day_without_prior_invokes_but_emits_none() {
+        let w = 512_u32;
+        let h = 512_u32;
+        let intr = Intrinsics::placeholder(w, h);
+        let alt = 0.05_f64;
+        let mut pixels = vec![u16::MAX - 100; (w * h) as usize];
+        let (upx, upy) = pixel_for_ray(&intr, 0.0, -alt.sin(), alt.cos());
+        let (dnx, dny) = pixel_for_ray(&intr, 0.0, alt.sin(), alt.cos());
+        paint_disk(&mut pixels, w, h, upx, upy, 20.0, u16::MAX);
+        paint_disk(&mut pixels, w, h, dnx, dny, 15.0, u16::MAX);
+        let frame = Frame::new(w, h, pixels, Tt::from_julian_date(JD_J2000), 1000, intr).unwrap();
+        let mut cfg = test_cfg();
+        cfg.saturated_body_cfg = SaturatedBodyConfig {
+            saturation_threshold: u16::MAX - 50,
+            min_area_px: 50,
+        };
+        let outcome = process_frame(
+            &bris_vision::FramePyramid::new(frame),
+            &cfg,
+            &mut ClassifierHysteresis::default(),
+            None,
+        );
+        assert!(
+            outcome.reflection_pair_invoked,
+            "provider must still be invoked: dispatcher gating is on candidate count",
+        );
+        assert!(
+            !outcome.reflection_pair_used,
+            "single Day pair without prior must NOT accept (cold-start gate)",
+        );
+    }
+
+    /// Day-mode single saturated body → reflection-pair
+    /// provider not invoked (only one candidate).
+    #[test]
+    fn day_single_body_does_not_invoke_reflection_pair() {
+        let frame = frame_with_disk(256, 256, 20, u16::MAX);
+        let outcome = process_frame(
+            &bris_vision::FramePyramid::new(frame),
+            &test_cfg(),
+            &mut ClassifierHysteresis::default(),
+            None,
+        );
+        assert_eq!(outcome.dispatched_condition, Condition::Day);
+        match &outcome.body {
+            BodyDetection::Day(_, secondaries) => assert!(secondaries.is_empty()),
+            other => panic!("expected Day, got {other:?}"),
+        }
+        assert!(
+            !outcome.reflection_pair_invoked,
+            "single Day candidate must not invoke reflection-pair"
+        );
     }
 
     #[test]

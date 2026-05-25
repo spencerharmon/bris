@@ -251,6 +251,158 @@ pub fn centroid_brightest_body_in_mask(
     })
 }
 
+/// Detect *all* saturated bright components in a frame.
+///
+/// Like [`centroid_saturated_body_in_mask`], but returns one
+/// [`Centroid`] per surviving connected component that meets
+/// the minimum-area threshold, sorted by descending area
+/// (largest first). Used by the reflection-pair horizon
+/// provider's Day path, where the direct image of the body
+/// and its reflection on a horizontal surface (water, hood,
+/// puddle) both appear as bright blobs and the provider needs
+/// at least two candidates per frame.
+///
+/// Returns an empty `Vec` (not an error) when no component
+/// passes the area gate — the caller treats this as "no
+/// secondary present" and falls back to single-centroid
+/// behaviour.
+///
+/// # Errors
+///
+/// [`CentroidError::MaskShapeMismatch`] if the mask length
+/// doesn't match the frame.
+pub fn extract_multi_saturated_centroids(
+    frame: &Frame,
+    cfg: SaturatedBodyConfig,
+    mask: Option<&[bool]>,
+) -> Result<Vec<Centroid>, CentroidError> {
+    let pixel_count = (frame.width() as usize) * (frame.height() as usize);
+    if let Some(m) = mask {
+        if m.len() != pixel_count {
+            return Err(CentroidError::MaskShapeMismatch {
+                expected: pixel_count,
+                actual: m.len(),
+            });
+        }
+    }
+
+    let labels = label_components_masked(frame, cfg.saturation_threshold, mask);
+    let n_labels = labels.next_label as usize;
+    if n_labels <= 1 {
+        return Ok(Vec::new());
+    }
+
+    // Accumulate per-label moments in a single pass.
+    //
+    // `mean_intensity` is computed from the **non-saturated
+    // halo** of each component (background pixels adjacent
+    // to a labelled blob) rather than from the labelled
+    // pixels themselves: every labelled pixel is
+    // ≥ `saturation_threshold` by construction, so a per-
+    // component mean over labelled pixels collapses to the
+    // saturation ceiling for *every* component and the
+    // reflection-pair Test 2 (`dn.brightness ≤ up.brightness
+    // * (1 + tol)`) degenerates to a tautology on Day. The
+    // halo proxy retains photometric discriminating power
+    // without needing un-clipped raw pixels: a brighter
+    // source has a brighter sub-saturation glow around it.
+    // When the halo is empty (component touches frame edge
+    // or saturates through to its neighbours), we fall back
+    // to the labelled-pixel mean (ceiling value).
+    let mut areas: Vec<u32> = vec![0; n_labels];
+    let mut sum_x: Vec<f64> = vec![0.0; n_labels];
+    let mut sum_y: Vec<f64> = vec![0.0; n_labels];
+    let mut sum_w: Vec<f64> = vec![0.0; n_labels];
+    let mut sum_i: Vec<f64> = vec![0.0; n_labels];
+    let mut halo_sum: Vec<f64> = vec![0.0; n_labels];
+    let mut halo_count: Vec<u32> = vec![0; n_labels];
+    let w = frame.width();
+    let h = frame.height();
+    let wu = w as usize;
+    let hu = h as usize;
+    for y in 0..h {
+        for x in 0..w {
+            let idx = (y as usize) * wu + (x as usize);
+            let lbl = labels.labels[idx] as usize;
+            if lbl != 0 {
+                let intensity = f64::from(frame.pixels()[idx]);
+                areas[lbl] += 1;
+                sum_x[lbl] += f64::from(x) * intensity;
+                sum_y[lbl] += f64::from(y) * intensity;
+                sum_w[lbl] += intensity;
+                sum_i[lbl] += intensity;
+                continue;
+            }
+            // Background pixel: if any 4-neighbour belongs to
+            // a labelled component, this pixel contributes
+            // to that component's halo. By construction in
+            // `label_components_masked`, background pixels
+            // are *below* the saturation threshold, so this
+            // is a meaningful brightness sample.
+            let xi = x as usize;
+            let yi = y as usize;
+            let mut neighbour_lbl: u32 = 0;
+            if xi > 0 {
+                let l = labels.labels[idx - 1];
+                if l != 0 {
+                    neighbour_lbl = l;
+                }
+            }
+            if neighbour_lbl == 0 && xi + 1 < wu {
+                let l = labels.labels[idx + 1];
+                if l != 0 {
+                    neighbour_lbl = l;
+                }
+            }
+            if neighbour_lbl == 0 && yi > 0 {
+                let l = labels.labels[idx - wu];
+                if l != 0 {
+                    neighbour_lbl = l;
+                }
+            }
+            if neighbour_lbl == 0 && yi + 1 < hu {
+                let l = labels.labels[idx + wu];
+                if l != 0 {
+                    neighbour_lbl = l;
+                }
+            }
+            if neighbour_lbl != 0 {
+                let intensity = f64::from(frame.pixels()[idx]);
+                halo_sum[neighbour_lbl as usize] += intensity;
+                halo_count[neighbour_lbl as usize] += 1;
+            }
+        }
+    }
+
+    let mut out: Vec<Centroid> = (1..n_labels)
+        .filter(|&l| areas[l] >= cfg.min_area_px && sum_w[l] > 0.0)
+        .map(|l| {
+            let area = areas[l];
+            let cx = sum_x[l] / sum_w[l];
+            let cy = sum_y[l] / sum_w[l];
+            let mean_intensity = if halo_count[l] > 0 {
+                halo_sum[l] / f64::from(halo_count[l])
+            } else {
+                sum_i[l] / f64::from(area)
+            };
+            let stat = 1.0 / (area as f64).sqrt();
+            let bias = 0.5;
+            let sigma = (stat * stat + bias * bias).sqrt();
+            Centroid {
+                x: cx,
+                y: cy,
+                area_px: area,
+                mean_intensity,
+                position_sigma_px: Sigma::new(sigma).unwrap_or(Sigma::ZERO),
+            }
+        })
+        .collect();
+    // Largest first. Stable on equal areas (preserves label
+    // order).
+    out.sort_by(|a, b| b.area_px.cmp(&a.area_px));
+    Ok(out)
+}
+
 /// Centroid the brightest *saturated* body inside a mask.
 ///
 /// Distinct from [`centroid_brightest_body_in_mask`] in that the
@@ -866,5 +1018,132 @@ mod tests {
             centroid_saturated_body_in_mask(&frame, SaturatedBodyConfig::default(), Some(&mask))
                 .unwrap_err();
         assert!(matches!(err, CentroidError::MaskShapeMismatch { .. }));
+    }
+
+    #[test]
+    fn multi_saturated_returns_each_component_largest_first() {
+        // Two saturated disks: A at (100, 100) radius 18
+        // (area ≈ 1017), B at (300, 200) radius 10 (area ≈
+        // 314). Plus a 3-pixel saturated speck that must be
+        // gated out by `min_area_px`.
+        let mut pixels = vec![1_000u16; 400 * 300];
+        for y in 0..300 {
+            for x in 0..400 {
+                let in_a =
+                    (f64::from(x) - 100.0).powi(2) + (f64::from(y) - 100.0).powi(2) <= 18.0 * 18.0;
+                let in_b =
+                    (f64::from(x) - 300.0).powi(2) + (f64::from(y) - 200.0).powi(2) <= 10.0 * 10.0;
+                if in_a || in_b {
+                    pixels[(y as usize) * 400 + (x as usize)] = u16::MAX;
+                }
+            }
+        }
+        // Tiny noise speck.
+        for &(x, y) in &[(380_usize, 10_usize), (381, 10), (380, 11)] {
+            pixels[y * 400 + x] = u16::MAX;
+        }
+        let frame = Frame::new(
+            400,
+            300,
+            pixels,
+            Tt::from_julian_date(JD_J2000),
+            1000,
+            Intrinsics::placeholder(400, 300),
+        )
+        .unwrap();
+        let centroids =
+            extract_multi_saturated_centroids(&frame, SaturatedBodyConfig::default(), None)
+                .unwrap();
+        assert_eq!(centroids.len(), 2, "speck must be gated by min_area_px");
+        assert!(
+            centroids[0].area_px >= centroids[1].area_px,
+            "largest first"
+        );
+        assert_relative_eq!(centroids[0].x, 100.0, epsilon = 1.0);
+        assert_relative_eq!(centroids[0].y, 100.0, epsilon = 1.0);
+        assert_relative_eq!(centroids[1].x, 300.0, epsilon = 1.0);
+        assert_relative_eq!(centroids[1].y, 200.0, epsilon = 1.0);
+        for c in &centroids {
+            assert!(c.position_sigma_px.value() > 0.0);
+        }
+    }
+
+    #[test]
+    fn multi_saturated_empty_when_no_saturation() {
+        let frame = synth_disk_frame(200, 150, 100.0, 75.0, 12.0);
+        let centroids =
+            extract_multi_saturated_centroids(&frame, SaturatedBodyConfig::default(), None)
+                .unwrap();
+        assert!(centroids.is_empty());
+    }
+
+    /// Two equal-area saturated blobs sitting on backgrounds of
+    /// different sub-saturation brightness must produce
+    /// distinguishable `mean_intensity` values. Without the
+    /// halo-based proxy `mean_intensity` would collapse to the
+    /// saturation ceiling for both blobs, making the reflection-
+    /// pair photometric test (Test 2) degenerate.
+    #[test]
+    fn multi_saturated_halo_distinguishes_equal_area_blobs() {
+        #![allow(clippy::many_single_char_names)]
+        let w = 400_u32;
+        let h = 300_u32;
+        let mut pixels = vec![0u16; (w * h) as usize];
+        let cfg = SaturatedBodyConfig {
+            saturation_threshold: u16::MAX - 50,
+            min_area_px: 50,
+        };
+        // Two identical saturated disks centred at (100, 150)
+        // and (300, 150). Surround each with a square halo of
+        // sub-saturation pixels at different intensities so the
+        // halo proxy discriminates: A's halo at 10_000, B's at
+        // 40_000.
+        let r = 12_i32;
+        let halo = 18_i32;
+        for &(cx, cy, halo_val) in &[(100_i32, 150_i32, 10_000u16), (300, 150, 40_000)] {
+            for dy in -halo..=halo {
+                for dx in -halo..=halo {
+                    let x = (cx + dx) as usize;
+                    let y = (cy + dy) as usize;
+                    let idx = y * (w as usize) + x;
+                    if dx * dx + dy * dy <= r * r {
+                        pixels[idx] = u16::MAX;
+                    } else if dx.abs() <= halo && dy.abs() <= halo {
+                        pixels[idx] = halo_val;
+                    }
+                }
+            }
+        }
+        let frame = Frame::new(
+            w,
+            h,
+            pixels,
+            Tt::from_julian_date(JD_J2000),
+            1000,
+            Intrinsics::placeholder(w, h),
+        )
+        .unwrap();
+        let centroids = extract_multi_saturated_centroids(&frame, cfg, None).unwrap();
+        assert_eq!(centroids.len(), 2, "both blobs should pass min_area_px");
+        // Order by x so the assertion is deterministic.
+        let mut by_x = centroids;
+        by_x.sort_by(|a, b| a.x.partial_cmp(&b.x).unwrap());
+        assert!(
+            by_x[0].area_px == by_x[1].area_px,
+            "test setup expected equal areas, got {} vs {}",
+            by_x[0].area_px,
+            by_x[1].area_px,
+        );
+        // A's halo is 10000, B's halo is 40000. The halo-based
+        // mean_intensity must reflect this 4× ratio (within a
+        // small tolerance for halo geometry).
+        let ratio = by_x[1].mean_intensity / by_x[0].mean_intensity;
+        assert!(
+            ratio > 3.0,
+            "halo-based mean_intensity should reflect background brightness: \
+             got A={}, B={}, ratio {ratio}",
+            by_x[0].mean_intensity,
+            by_x[1].mean_intensity,
+        );
     }
 }
