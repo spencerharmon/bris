@@ -96,6 +96,13 @@ struct EngineState {
     last_classification: Option<bris_vision::Condition>,
     last_processed_frame_tt: Option<bris_core::time::Tt>,
     last_published_fix_tt: Option<bris_core::time::Tt>,
+    /// Snapshot of the most recently published fix, used to
+    /// build a [`bris_vision::PositionPrior`] for horizon
+    /// providers that benefit from a position prior (Phase 1:
+    /// the reflection-pair provider's catalog-consistency
+    /// Test 3). `None` until the first publication; DR
+    /// projection of a stale fix is a Phase 2 followup.
+    last_published_fix: Option<PublishedFix>,
     /// Resolution at which Stage C ran on the most recent
     /// processed frame. Mirrors
     /// [`crate::EngineDiagnostics::last_horizon_analysis_size`].
@@ -117,6 +124,43 @@ struct EngineState {
     /// See
     /// [`crate::EngineConfig::classifier_hysteresis_frames`].
     classifier_hysteresis: ClassifierHysteresis,
+}
+
+/// Maximum age (seconds) of a published fix before the
+/// engine treats it as stale and stops surfacing it as a
+/// [`bris_vision::PositionPrior`]. DR projection of stale
+/// fixes is a Phase 2 followup; see
+/// `docs/handoff/reflection-pair-phase1.md`.
+const POSITION_PRIOR_MAX_AGE_SECONDS: f64 = 30.0;
+
+/// Nautical mile in metres; for converting Fix sigma (nm) to
+/// the `PositionPrior`'s metric sigma. The same magic number is
+/// duplicated in `bris-nav` (`one_nautical_mile_m`) but inlined
+/// here to keep the conversion local to its single use site.
+const METRES_PER_NM: f64 = 1852.0;
+
+/// Build a [`bris_vision::PositionPrior`] from the last
+/// published fix, returning `None` when the fix is missing or
+/// stale beyond [`POSITION_PRIOR_MAX_AGE_SECONDS`].
+fn position_prior_from_state(state: &EngineState) -> Option<bris_vision::PositionPrior> {
+    let published = state.last_published_fix.as_ref()?;
+    if let Some(now_tt) = state.last_processed_frame_tt {
+        let age_s = (now_tt.julian_date() - published.timestamp.julian_date()) * 86_400.0;
+        if age_s > POSITION_PRIOR_MAX_AGE_SECONDS {
+            return None;
+        }
+    }
+    // Worst-axis sigma in metres: take the major axis of the
+    // covariance ellipse and convert nm to metres. Conservative
+    // and isotropic; honest about the lack of cross-correlation
+    // tracking in the prior.
+    let sigma_position_m = published.fix.sigma_major_nm * METRES_PER_NM;
+    Some(bris_vision::PositionPrior {
+        lat_rad: published.fix.lat.radians(),
+        lon_rad: published.fix.lon.radians(),
+        sigma_position_m,
+        timestamp: published.timestamp,
+    })
 }
 
 /// Update per-stage counters and last-classification / last-tt
@@ -257,6 +301,7 @@ impl StreamingEngine {
                 last_classification: None,
                 last_processed_frame_tt: None,
                 last_published_fix_tt: None,
+                last_published_fix: None,
                 last_horizon_analysis_size: None,
                 storage: Storage::new(config.input_ring_capacity),
                 sight_window: SightWindow::default(),
@@ -330,7 +375,18 @@ impl StreamingEngine {
         // Run Stages A + B + C synchronously. Pass the
         // hysteresis state by mutable reference so it advances
         // by exactly one observation per frame.
-        let mut outcome = process_frame(&pyramid, &self.config, &mut state.classifier_hysteresis);
+        // Build a position prior from the last published
+        // fix, if any. The reflection-pair provider (Phase 1)
+        // uses this for its catalog-consistency test; without
+        // it the provider runs in cold-start mode (Test 3
+        // dropped, Test 4 threshold raised).
+        let position_prior = position_prior_from_state(&state);
+        let mut outcome = process_frame(
+            &pyramid,
+            &self.config,
+            &mut state.classifier_hysteresis,
+            position_prior,
+        );
         let frame_tt = outcome.frame_tt;
 
         // ---- Stage D: plate solving (night/twilight only) ----
@@ -413,6 +469,7 @@ impl StreamingEngine {
         if let Some(published) = &stage_e_outcome.published {
             state.stages[STAGE_E].produced += 1;
             state.last_published_fix_tt = Some(published.timestamp);
+            state.last_published_fix = Some(published.clone());
             state.last_publication = Some(Instant::now());
             // Send on the fix channel. Failure means the
             // single consumer dropped; we silently swallow

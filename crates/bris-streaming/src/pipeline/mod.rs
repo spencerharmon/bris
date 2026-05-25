@@ -170,6 +170,7 @@ pub(crate) fn process_frame(
     pyramid: &bris_vision::FramePyramid,
     cfg: &EngineConfig,
     hysteresis: &mut ClassifierHysteresis,
+    position_prior: Option<bris_vision::PositionPrior>,
 ) -> StageOutcome {
     let frame = pyramid.full();
     // ---- Stage A: classify (raw) + apply hysteresis ----
@@ -210,7 +211,7 @@ pub(crate) fn process_frame(
         dispatched_condition,
         cfg,
         &[],
-        None,
+        position_prior,
         frame.capture_tt,
     );
     if let HorizonStageOutcome::Detected { detector, line, .. } = horizon {
@@ -494,6 +495,7 @@ mod tests {
             &bris_vision::FramePyramid::new(frame.clone()),
             &test_cfg(),
             &mut ClassifierHysteresis::default(),
+            None,
         );
         assert_eq!(outcome.classification.condition, Condition::Day);
         match outcome.body {
@@ -516,6 +518,7 @@ mod tests {
             &bris_vision::FramePyramid::new(frame.clone()),
             &test_cfg(),
             &mut ClassifierHysteresis::default(),
+            None,
         );
         assert_eq!(outcome.classification.condition, Condition::Night);
         assert!(matches!(outcome.body, BodyDetection::None));
