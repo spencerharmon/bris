@@ -40,7 +40,7 @@ pub use horizon::{
 pub use horizon_providers::{
     BodyCandidate, DirectSight, HorizonHypothesis, HorizonProvenance, HorizonProvider,
     HorizonProviderContext, OpticalKind, PositionPrior, ReflectionPairConfig,
-    ReflectionPairProvider, TemporalScope,
+    ReflectionPairProvider, ReflectionPairStats, TemporalScope,
 };
 pub use io::{
     load_frame_from_path, load_frame_from_path_with_rotation, save_frame_as_png, LoadError,

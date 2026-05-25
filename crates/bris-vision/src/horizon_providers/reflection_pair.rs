@@ -77,6 +77,35 @@ pub struct ReflectionPairProvider {
     pub config: ReflectionPairConfig,
 }
 
+/// Per-test rejection counters returned by
+/// [`ReflectionPairProvider::detect_with_stats`].
+///
+/// Cumulative within a single invocation: a `detect` call that
+/// evaluates N pairs may increment each `rejected_*` field up
+/// to N times. The streaming engine sums these per-frame
+/// counters into its long-running
+/// [`EngineDiagnostics`][bris_streaming_diag] surface
+/// (where `bris_streaming_diag` is `bris_streaming::EngineDiagnostics`
+/// — the doc link is via the prose to keep this crate free of
+/// a `bris-streaming` dependency).
+#[derive(Debug, Clone, Copy, Default)]
+#[allow(clippy::struct_field_names)]
+pub struct ReflectionPairStats {
+    /// Pair rejected by Test 1 (geometric: bisector not
+    /// forward, gravity not image-down, pair plane not
+    /// vertical).
+    pub rejected_geometric: u64,
+    /// Pair rejected by Test 2 (photometric: reflection
+    /// brighter than direct).
+    pub rejected_photometric: u64,
+    /// Pair rejected by Test 3 (catalog: predicted altitude
+    /// inconsistent with θ/2).
+    pub rejected_catalog: u64,
+    /// Attempt produced ≥ 1 surviving pair but no cluster met
+    /// the minimum-size threshold (Test 4 / cold-start gate).
+    pub rejected_no_cluster: u64,
+}
+
 /// One pair that has passed Tests 1–3.
 #[derive(Debug, Clone, Copy)]
 struct PairOutcome {
@@ -102,6 +131,23 @@ impl HorizonProvider for ReflectionPairProvider {
     }
 
     fn detect(&self, ctx: &HorizonProviderContext<'_>) -> Option<HorizonHypothesis> {
+        let mut stats = ReflectionPairStats::default();
+        self.detect_with_stats(ctx, &mut stats)
+    }
+}
+
+impl ReflectionPairProvider {
+    /// Same as [`HorizonProvider::detect`] but populates a
+    /// per-invocation [`ReflectionPairStats`] so the streaming
+    /// engine can fold the counters into its long-running
+    /// `EngineDiagnostics`. Used by `bris-streaming`; the
+    /// trait-method `detect` just wraps this with a discarded
+    /// stats buffer.
+    pub fn detect_with_stats(
+        &self,
+        ctx: &HorizonProviderContext<'_>,
+        stats: &mut ReflectionPairStats,
+    ) -> Option<HorizonHypothesis> {
         // Phase 1: Night-mode only. Day produces a single
         // centroid; Day-mode reflection-pair detection requires
         // Stage B to yield ≥ 2 candidates and is deferred to
@@ -120,7 +166,7 @@ impl HorizonProvider for ReflectionPairProvider {
                 } else {
                     (j, b, a)
                 };
-                if let Some(outcome) = self.evaluate_pair(ctx, up_idx, up, dn) {
+                if let Some(outcome) = self.evaluate_pair(ctx, up_idx, up, dn, stats) {
                     outcomes.push(outcome);
                 }
             }
@@ -132,7 +178,10 @@ impl HorizonProvider for ReflectionPairProvider {
 
         // Test 4: multi-pair agreement. Greedy clustering by
         // angular distance scaled by combined σ.
-        let cluster = self.largest_cluster(&outcomes)?;
+        let Some(cluster) = self.largest_cluster(&outcomes) else {
+            stats.rejected_no_cluster += 1;
+            return None;
+        };
         let has_prior = ctx.position_prior.is_some();
         let min_required = if has_prior {
             // With a prior, a single pair that passed Test 3
@@ -156,6 +205,7 @@ impl HorizonProvider for ReflectionPairProvider {
             self.config.cold_start_min_pairs
         };
         if cluster.len() < min_required {
+            stats.rejected_no_cluster += 1;
             return None;
         }
 
@@ -206,17 +256,20 @@ impl HorizonProvider for ReflectionPairProvider {
 impl ReflectionPairProvider {
     /// Evaluate one ordered pair `(up, dn)` against Tests 1–3.
     /// Returns `Some(PairOutcome)` when all applicable tests
-    /// pass; `None` on rejection.
+    /// pass; `None` on rejection. Increments the appropriate
+    /// counter in `stats` on each rejection.
     fn evaluate_pair(
         &self,
         ctx: &HorizonProviderContext<'_>,
         up_idx: usize,
         up: &BodyCandidate,
         dn: &BodyCandidate,
+        stats: &mut ReflectionPairStats,
     ) -> Option<PairOutcome> {
         // Test 2 (photometric): reflection ≤ direct (within tol).
         // Run first because it's the cheapest filter.
         if dn.brightness > up.brightness * (1.0 + self.config.photometric_tolerance) {
+            stats.rejected_photometric += 1;
             return None;
         }
 
@@ -240,8 +293,12 @@ impl ReflectionPairProvider {
         //    rays) must be near-vertical, i.e. its normal
         //    `r_up × r_dn` is near-horizontal in image space
         //    (small y component relative to its norm).
-        let bisector = bisector_normal(&up_ray.ray, &dn_ray.ray)?;
+        let Some(bisector) = bisector_normal(&up_ray.ray, &dn_ray.ray) else {
+            stats.rejected_geometric += 1;
+            return None;
+        };
         if bisector.z <= 0.0 {
+            stats.rejected_geometric += 1;
             return None;
         }
         let chord = CameraRay {
@@ -249,18 +306,24 @@ impl ReflectionPairProvider {
             y: dn_ray.ray.y - up_ray.ray.y,
             z: dn_ray.ray.z - up_ray.ray.z,
         };
-        let gravity = chord.normalize()?;
+        let Some(gravity) = chord.normalize() else {
+            stats.rejected_geometric += 1;
+            return None;
+        };
         if gravity.y <= 0.0 {
+            stats.rejected_geometric += 1;
             return None;
         }
         // Pair-plane verticality.
         let cross = up_ray.ray.cross(&dn_ray.ray);
         let cross_norm = cross.norm();
         if cross_norm < f64::EPSILON {
+            stats.rejected_geometric += 1;
             return None;
         }
         let horiz_offset = (cross.y / cross_norm).abs();
         if horiz_offset > self.config.max_bisector_horizontal_rad.sin() {
+            stats.rejected_geometric += 1;
             return None;
         }
 
@@ -287,6 +350,7 @@ impl ReflectionPairProvider {
                 (pred.sigma.value().powi(2) + half_angle_sigma.value().powi(2)).sqrt();
             let diff = (half_angle_rad - pred.value).abs();
             if diff > self.config.catalog_tolerance_sigma * combined_sigma {
+                stats.rejected_catalog += 1;
                 return None;
             }
         }
@@ -707,5 +771,87 @@ mod tests {
         let provider = ReflectionPairProvider::default();
         let ctx = ctx_for(&f, &i, &cands, None);
         assert!(provider.detect(&ctx).is_none());
+    }
+
+    #[test]
+    fn stats_increment_on_success_and_each_rejection_path() {
+        let f = frame();
+        let i = intr();
+        let provider = ReflectionPairProvider::default();
+
+        // (a) successful 3-pair cold-start → no rejections.
+        let alts = [0.20_f64, 0.21, 0.22];
+        let mut cands: Vec<BodyCandidate> = Vec::new();
+        for (k, alt) in alts.iter().enumerate() {
+            let (up, dn) = symmetric_pair(*alt, 0.5);
+            #[allow(clippy::cast_precision_loss)]
+            let x_off = k as f64 * 5.0;
+            cands.push(BodyCandidate {
+                pixel: (up.pixel.0 + x_off, up.pixel.1),
+                ..up
+            });
+            cands.push(BodyCandidate {
+                pixel: (dn.pixel.0 + x_off, dn.pixel.1),
+                ..dn
+            });
+        }
+        let ctx = ctx_for(&f, &i, &cands, None);
+        let mut stats = ReflectionPairStats::default();
+        assert!(provider.detect_with_stats(&ctx, &mut stats).is_some());
+        assert_eq!(stats.rejected_no_cluster, 0);
+        // The 3 same-altitude pairs cluster, but cross-pairs
+        // (e.g. up_0 × dn_1) get filtered by Test 1 / 2.
+        assert!(stats.rejected_geometric + stats.rejected_photometric > 0);
+
+        // (b) photometric reject: NOTE — with the current
+        // swap-to-brighter ordering in `evaluate_pair`, Test 2
+        // can never fire (up is always the brighter of the
+        // pair, so `dn.brightness > up.brightness * (1+tol)`
+        // is unreachable). The photometric counter is wired
+        // but unreachable until that ordering is revisited.
+        // See open questions in PR description.
+
+        // (c) geometric reject: non-vertical pair-plane.
+        let up_ray = CameraRay::from_unit_components(0.1, -0.2_f64.sin(), 0.2_f64.cos())
+            .normalize()
+            .unwrap();
+        let dn_ray = CameraRay::from_unit_components(-0.1, 0.2_f64.sin(), 0.2_f64.cos())
+            .normalize()
+            .unwrap();
+        let cands_c = vec![
+            BodyCandidate {
+                pixel: pixel_for_ray(&i, &up_ray),
+                brightness: 2.0,
+                position_sigma_px: 0.5,
+                predicted_altitude: None,
+            },
+            BodyCandidate {
+                pixel: pixel_for_ray(&i, &dn_ray),
+                brightness: 1.0,
+                position_sigma_px: 0.5,
+                predicted_altitude: None,
+            },
+        ];
+        let provider_strict = ReflectionPairProvider {
+            config: ReflectionPairConfig {
+                max_bisector_horizontal_rad: 0.01,
+                ..ReflectionPairConfig::default()
+            },
+        };
+        let ctx_c = ctx_for(&f, &i, &cands_c, None);
+        let mut stats_c = ReflectionPairStats::default();
+        assert!(provider_strict
+            .detect_with_stats(&ctx_c, &mut stats_c)
+            .is_none());
+        assert_eq!(stats_c.rejected_geometric, 1);
+
+        // (d) no-cluster reject: one valid pair, cold-start
+        // needs 3.
+        let (up1, dn1) = symmetric_pair(0.2, 0.5);
+        let cands_d = vec![up1, dn1];
+        let ctx_d = ctx_for(&f, &i, &cands_d, None);
+        let mut stats_d = ReflectionPairStats::default();
+        assert!(provider.detect_with_stats(&ctx_d, &mut stats_d).is_none());
+        assert_eq!(stats_d.rejected_no_cluster, 1);
     }
 }

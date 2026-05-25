@@ -124,6 +124,15 @@ struct EngineState {
     /// See
     /// [`crate::EngineConfig::classifier_hysteresis_frames`].
     classifier_hysteresis: ClassifierHysteresis,
+    /// Cumulative reflection-pair provider counters across
+    /// all processed frames. Surfaced verbatim in
+    /// [`crate::EngineDiagnostics`].
+    reflection_pair_attempts: u64,
+    reflection_pair_succeeded: u64,
+    reflection_pair_rejected_geometric: u64,
+    reflection_pair_rejected_photometric: u64,
+    reflection_pair_rejected_catalog: u64,
+    reflection_pair_rejected_no_cluster: u64,
 }
 
 /// Maximum age (seconds) of a published fix before the
@@ -242,6 +251,18 @@ fn update_stage_counters(
     state.last_classification = Some(outcome.classification.condition);
     state.last_processed_frame_tt = Some(outcome.frame_tt);
     state.last_horizon_analysis_size = Some(outcome.horizon_analyzed_size);
+
+    if outcome.reflection_pair_invoked {
+        state.reflection_pair_attempts += 1;
+    }
+    if outcome.reflection_pair_succeeded {
+        state.reflection_pair_succeeded += 1;
+    }
+    let rp = &outcome.reflection_pair_stats;
+    state.reflection_pair_rejected_geometric += rp.rejected_geometric;
+    state.reflection_pair_rejected_photometric += rp.rejected_photometric;
+    state.reflection_pair_rejected_catalog += rp.rejected_catalog;
+    state.reflection_pair_rejected_no_cluster += rp.rejected_no_cluster;
 }
 
 impl StreamingEngine {
@@ -307,6 +328,12 @@ impl StreamingEngine {
                 sight_window: SightWindow::default(),
                 last_publication: None,
                 classifier_hysteresis: ClassifierHysteresis::default(),
+                reflection_pair_attempts: 0,
+                reflection_pair_succeeded: 0,
+                reflection_pair_rejected_geometric: 0,
+                reflection_pair_rejected_photometric: 0,
+                reflection_pair_rejected_catalog: 0,
+                reflection_pair_rejected_no_cluster: 0,
             }),
             config,
             fix_tx,
@@ -541,6 +568,12 @@ impl StreamingEngine {
             last_processed_frame_tt: state.last_processed_frame_tt,
             last_published_fix_tt: state.last_published_fix_tt,
             last_horizon_analysis_size: state.last_horizon_analysis_size,
+            reflection_pair_attempts: state.reflection_pair_attempts,
+            reflection_pair_succeeded: state.reflection_pair_succeeded,
+            reflection_pair_rejected_geometric: state.reflection_pair_rejected_geometric,
+            reflection_pair_rejected_photometric: state.reflection_pair_rejected_photometric,
+            reflection_pair_rejected_catalog: state.reflection_pair_rejected_catalog,
+            reflection_pair_rejected_no_cluster: state.reflection_pair_rejected_no_cluster,
         }
     }
 

@@ -63,7 +63,7 @@ use bris_core::time::Tt;
 use bris_core::Sigma;
 use bris_vision::{
     centroid_saturated_body_in_mask, classify, detect_peaks, detect_peaks_above_horizon, Centroid,
-    Classification, Condition, Frame, HorizonLine, HorizonProvider, Peak, SaturatedBodyConfig,
+    Classification, Condition, Frame, HorizonLine, Peak, SaturatedBodyConfig,
 };
 use tracing::{debug, trace, warn};
 
@@ -156,6 +156,17 @@ pub(crate) struct StageOutcome {
     pub horizon_analyzed_size: (u32, u32),
     /// Frame's capture instant, threaded through for diagnostics.
     pub frame_tt: Tt,
+    /// Reflection-pair provider counters for this frame.
+    /// Folded into engine-level diagnostics. Zero when the
+    /// provider was not invoked.
+    pub reflection_pair_stats: bris_vision::ReflectionPairStats,
+    /// Whether the reflection-pair provider was invoked
+    /// (≥ 2 body candidates were present and dispatched
+    /// condition was actionable).
+    pub reflection_pair_invoked: bool,
+    /// Whether the reflection-pair provider produced a
+    /// hypothesis on this frame.
+    pub reflection_pair_succeeded: bool,
 }
 
 /// Process one frame through Stages A, B, and C synchronously.
@@ -261,6 +272,9 @@ pub(crate) fn process_frame(
     // when peaks were produced. See
     // docs/handoff/reflection-pair-phase1.md.
     let body_candidates = body_candidates_from_detection(&body);
+    let mut reflection_pair_stats = bris_vision::ReflectionPairStats::default();
+    let mut reflection_pair_invoked = false;
+    let mut reflection_pair_succeeded = false;
     if body_candidates.len() >= 2 && !matches!(dispatched_condition, Condition::Unusable) {
         let provider = bris_vision::ReflectionPairProvider::default();
         let ctx = bris_vision::HorizonProviderContext {
@@ -270,7 +284,9 @@ pub(crate) fn process_frame(
             position_prior,
             timestamp: frame.capture_tt,
         };
-        if let Some(hyp) = provider.detect(&ctx) {
+        reflection_pair_invoked = true;
+        if let Some(hyp) = provider.detect_with_stats(&ctx, &mut reflection_pair_stats) {
+            reflection_pair_succeeded = true;
             let replace = match horizon {
                 HorizonStageOutcome::Detected { line, .. } => {
                     hyp.line.altitude_sigma < line.altitude_sigma
@@ -294,6 +310,9 @@ pub(crate) fn process_frame(
         horizon,
         horizon_analyzed_size,
         frame_tt: frame.capture_tt,
+        reflection_pair_stats,
+        reflection_pair_invoked,
+        reflection_pair_succeeded,
     }
 }
 

@@ -201,4 +201,4 @@ pub trait HorizonProvider {
 
 pub mod reflection_pair;
 
-pub use reflection_pair::{ReflectionPairConfig, ReflectionPairProvider};
+pub use reflection_pair::{ReflectionPairConfig, ReflectionPairProvider, ReflectionPairStats};

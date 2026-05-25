@@ -1479,6 +1479,38 @@ references to the regression tests that pin the behavior. See
    per-stage σ, current sight window contents) is what the
    overlay reads.
 
+* Phase 3.6: Horizon providers (auto-detected artificial horizons)
+  Pluggable `HorizonProvider` trait in `bris-vision` plus the
+  first auto-horizon source. Design + roadmap:
+  `docs/design/horizon_autodetect.md`. Phase 1 handoff:
+  `docs/handoff/reflection-pair-phase1.md`.
+** DONE Phase 1: ReflectionPairProvider (intra-frame, Night)
+   `HorizonProvider` trait + five optical detectors refactored
+   onto it (no behavior change). `ReflectionPairProvider`
+   implements Tests 1–4 (Test 5 reflector-region deferred,
+   in-code TODO). `EngineState` carries `last_published_fix` so
+   the catalog-consistency test has a `PositionPrior` to read
+   (DR projection of stale fixes is a Phase 2 followup; current
+   staleness gate is 30 s). `EngineDiagnostics` gains six new
+   counters (`reflection_pair_attempts`,
+   `reflection_pair_succeeded`, four `_rejected_*`). Stage E
+   consumes the direct sight `Ho = θ/2` when present (option
+   (ii) of §10). Acceptance: 9 synthetic unit tests in
+   `bris-vision::horizon_providers::reflection_pair` plus
+   counter-increment coverage; full workspace `fmt + clippy +
+   test` green.
+** TODO Phase 2: Day-mode multi-centroid support
+   Extend Stage B to expose ≥ 2 candidates per Day frame; add
+   DR projection of stale position prior so the catalog test
+   stays available between fixes.
+** TODO Phase 3: Cross-frame registration
+   `TemporalScope::Window` provider mode per
+   `docs/design/horizon_autodetect.md` §11.
+** TODO Phase 4: Plumb / vanishing-point providers
+** TODO Phase 5: IMU provider
+   Mark the IMU-prior TODO at plan.org line ~1062 PARTIAL once
+   the provider trait carries the IMU implementation.
+
 * Phase 4: Sight reduction & fix
 ** TODO Per-stage uncertainty propagation
    Every pipeline stage that produces a measurement also produces a 1σ
