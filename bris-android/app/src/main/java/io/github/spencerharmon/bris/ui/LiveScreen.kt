@@ -2,7 +2,6 @@ package io.github.spencerharmon.bris.ui
 
 import android.text.format.Formatter
 import android.Manifest
-import android.net.Uri
 import android.content.pm.PackageManager
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -15,6 +14,12 @@ import androidx.camera.core.resolutionselector.ResolutionSelector
 import androidx.camera.core.resolutionselector.ResolutionStrategy
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -40,7 +45,6 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -55,7 +59,6 @@ import io.github.spencerharmon.bris.Prefs
 import io.github.spencerharmon.bris.engine.CalibrationSource
 import io.github.spencerharmon.bris.engine.CalibrationStore
 import io.github.spencerharmon.bris.engine.CameraConstants
-import io.github.spencerharmon.bris.engine.DebugBufferActions
 import io.github.spencerharmon.bris.engine.DebugCaptureBuffer
 import io.github.spencerharmon.bris.engine.EngineWrapper
 import io.github.spencerharmon.bris.engine.FixVerdict
@@ -67,7 +70,6 @@ import io.github.spencerharmon.bris.engine.SightLog
 import io.github.spencerharmon.bris.engine.resolveCalibration
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.launch
 import uniffi.bris_ffi.FfiEngineConfig
 import uniffi.bris_ffi.FfiIntrinsics
 import uniffi.bris_ffi.FfiObserver
@@ -203,28 +205,12 @@ fun LiveScreen(
     val captureActive = sessionStatus is SessionStatus.Capturing ||
         sessionStatus is SessionStatus.Saving
     val bufferState by debugBuffer.stateFlow.collectAsState()
-    val saveLocation by prefs.debugSaveLocationFlow.collectAsState(initial = null)
     val snackbarHost = remember { SnackbarHostState() }
-    val uiScope = rememberCoroutineScope()
-
-    val saveLauncher = rememberLauncherForActivityResult(
-        ActivityResultContracts.OpenDocumentTree(),
-    ) { uri ->
-        if (uri == null) return@rememberLauncherForActivityResult
-        val flags = android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION or
-            android.content.Intent.FLAG_GRANT_WRITE_URI_PERMISSION
-        try {
-            context.contentResolver.takePersistableUriPermission(uri, flags)
-        } catch (_: SecurityException) {
-            // Some pickers don't grant persistable rights; the
-            // immediately-following save still works on the
-            // ephemeral grant.
-        }
-        uiScope.launch {
-            prefs.setDebugSaveLocation(uri.toString())
-            performSave(context, debugBuffer, uri, snackbarHost)
-        }
-    }
+    val saveAction = rememberDebugSaveAction(
+        buffer = debugBuffer,
+        prefs = prefs,
+        snackbarHost = snackbarHost,
+    )
 
     Box(modifier = Modifier.fillMaxSize()) {
         CameraSurface(
@@ -274,16 +260,7 @@ fun LiveScreen(
             if (debugMode) {
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     Button(onClick = onSendFix) { Text("Send fix (debug)") }
-                    OutlinedButton(onClick = {
-                        val saved = saveLocation?.let { Uri.parse(it) }
-                        if (saved == null) {
-                            saveLauncher.launch(null)
-                        } else {
-                            uiScope.launch {
-                                performSave(context, debugBuffer, saved, snackbarHost)
-                            }
-                        }
-                    }) { Text("Save buffer") }
+                    OutlinedButton(onClick = saveAction) { Text("Save buffer") }
                 }
             }
         }
@@ -293,25 +270,6 @@ fun LiveScreen(
             modifier = Modifier.align(Alignment.BottomCenter).padding(12.dp),
         ) { data -> Snackbar(snackbarData = data) }
     }
-}
-
-private suspend fun performSave(
-    context: android.content.Context,
-    buffer: DebugCaptureBuffer,
-    treeUri: Uri,
-    snackbarHost: SnackbarHostState,
-) {
-    val result = DebugBufferActions.saveAll(context, buffer, treeUri)
-    val msg = when (result) {
-        is io.github.spencerharmon.bris.engine.SaveResult.Ok ->
-            "Saved ${result.frameCount} frames " +
-                "(${Formatter.formatShortFileSize(context, result.bytes)}) " +
-                "to ${result.destinationDisplay}"
-        is io.github.spencerharmon.bris.engine.SaveResult.Failed -> "Save failed: ${result.message}"
-        io.github.spencerharmon.bris.engine.SaveResult.NeedLocation ->
-            "Pick a save location to continue."
-    }
-    snackbarHost.showSnackbar(msg)
 }
 
 /**
@@ -443,6 +401,23 @@ private fun DebugBufferChip(
     }
     val recentMs = bufferState.lastAppendUnixMs ?: 0L
     val isLive = System.currentTimeMillis() - recentMs < 1500L
+    // Only pulse when actively recording; the static grey
+    // dot for the "paused but armed" state is intentionally
+    // not animated (drawing attention to it would mislead).
+    val dotAlpha = if (isLive) {
+        val transition = rememberInfiniteTransition(label = "rec-dot")
+        transition.animateFloat(
+            initialValue = 1.0f,
+            targetValue = 0.3f,
+            animationSpec = infiniteRepeatable(
+                animation = tween(durationMillis = 700, easing = LinearEasing),
+                repeatMode = RepeatMode.Reverse,
+            ),
+            label = "rec-dot-alpha",
+        ).value
+    } else {
+        1.0f
+    }
     val dotColor = if (isLive) Color(0xFFE53935) else Color(0xFF808080)
     Row(
         verticalAlignment = Alignment.CenterVertically,
@@ -451,7 +426,7 @@ private fun DebugBufferChip(
         Box(
             modifier = Modifier
                 .size(10.dp)
-                .background(dotColor, CircleShape),
+                .background(dotColor.copy(alpha = dotAlpha), CircleShape),
         )
         val size = Formatter.formatShortFileSize(context, bufferState.totalBytes)
         Text(

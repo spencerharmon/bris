@@ -101,4 +101,51 @@ class DebugCaptureBufferStateFlowTest {
         // frames dir was wiped; index removed.
         assertEquals(0, File(root, "frames").listFiles().orEmpty().size)
     }
+
+    @Test
+    fun forApp_returnsSameInstance() {
+        DebugCaptureBuffer.resetForTests()
+        val root = tmp.newFolder("app-files")
+        val bufRoot = File(root, "debug-capture")
+        val a = DebugCaptureBuffer.getOrCreate(bufRoot)
+        val b = DebugCaptureBuffer.getOrCreate(bufRoot)
+        org.junit.Assert.assertSame(a, b)
+        DebugCaptureBuffer.resetForTests()
+    }
+
+    @Test
+    fun walkTotalBytes_includesTopLevelFiles() {
+        val root = tmp.newFolder("buf")
+        File(root, "frames").mkdirs()
+        File(root, "frames/000000000000.pgm").writeBytes(ByteArray(100))
+        File(root, "index.jsonl").writeText("abc") // 3 bytes
+        File(root, "pbris.log").writeText("\$PBRIS,xx\n") // 10 bytes
+        val buffer = DebugCaptureBuffer(root)
+        // 100 + 3 + 10 = 113. (.seq is not created until
+        // appendFrame, so it doesn't factor in here.)
+        assertEquals(113L, buffer.stateFlow.value.totalBytes)
+    }
+
+    @Test
+    fun appendPbris_growsTotalBytes() {
+        val buffer = DebugCaptureBuffer(tmp.newFolder("buf"))
+        val before = buffer.stateFlow.value.totalBytes
+        buffer.appendPbris("\$PBRIS,line")
+        assertEquals(before + 12L, buffer.stateFlow.value.totalBytes)
+    }
+
+    @Test
+    fun evictIfOverCap_emptyRemainder_doesNotLeaveBlankLine() {
+        val root = tmp.newFolder("buf")
+        seedIndex(root, listOf(1L, 2L))
+        // Cap below the seeded total so every entry evicts.
+        val buffer = DebugCaptureBuffer(root, maxBytes = 1L)
+        buffer.evictForTests()
+        val s = buffer.stateFlow.value
+        assertEquals(0, s.frameCount)
+        // index.jsonl must be gone (no stray blank line that
+        // would make subsequent JSONObject parses throw).
+        val index = File(root, "index.jsonl")
+        assertTrue("index.jsonl should be removed when fully evicted", !index.exists())
+    }
 }

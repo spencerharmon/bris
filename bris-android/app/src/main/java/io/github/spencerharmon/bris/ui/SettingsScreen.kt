@@ -20,6 +20,9 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.RadioButton
+import androidx.compose.material3.Snackbar
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -36,10 +39,8 @@ import androidx.compose.ui.unit.dp
 import androidx.documentfile.provider.DocumentFile
 import io.github.spencerharmon.bris.BuildConfig
 import io.github.spencerharmon.bris.Prefs
-import io.github.spencerharmon.bris.engine.DebugBufferActions
 import io.github.spencerharmon.bris.engine.DebugCaptureBuffer
 import io.github.spencerharmon.bris.engine.LensCatalog
-import io.github.spencerharmon.bris.engine.SaveResult
 import kotlinx.coroutines.launch
 import java.time.Instant
 import java.time.ZoneId
@@ -222,51 +223,49 @@ private fun DebugCaptureSection(prefs: Prefs) {
     val buffer = remember(context) { DebugCaptureBuffer.forApp(context) }
     val state by buffer.stateFlow.collectAsState()
     val saveLocation by prefs.debugSaveLocationFlow.collectAsState(initial = null)
-    var pendingSaveAfterPick by remember { mutableStateOf(false) }
-    var statusMessage by remember { mutableStateOf<String?>(null) }
+    val snackbarHost = remember { SnackbarHostState() }
+    val saveAction = rememberDebugSaveAction(
+        buffer = buffer,
+        prefs = prefs,
+        snackbarHost = snackbarHost,
+    )
     var showClearDialog by remember { mutableStateOf(false) }
 
-    val pickLauncher = rememberLauncherForActivityResult(
+    // Picker dedicated to "Change save location" — does NOT
+    // trigger a save afterwards; only updates the stored URI.
+    val changeLocationPicker = rememberLauncherForActivityResult(
         ActivityResultContracts.OpenDocumentTree(),
     ) { uri ->
-        if (uri == null) {
-            pendingSaveAfterPick = false
-            return@rememberLauncherForActivityResult
-        }
+        if (uri == null) return@rememberLauncherForActivityResult
         val flags = android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION or
             android.content.Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+        var persisted = false
         try {
             context.contentResolver.takePersistableUriPermission(uri, flags)
+            persisted = true
         } catch (_: SecurityException) {
-            // Ephemeral grant is still good for the current save.
+            // Don't poison DataStore with a non-persistable URI;
+            // surface the failure in the snackbar instead.
         }
         scope.launch {
-            prefs.setDebugSaveLocation(uri.toString())
-            if (pendingSaveAfterPick) {
-                pendingSaveAfterPick = false
-                runSave(context, buffer, uri) { statusMessage = it }
+            if (persisted) {
+                prefs.setDebugSaveLocation(uri.toString())
+                snackbarHost.showSnackbar("Save location set.")
             } else {
-                statusMessage = "Save location set."
+                snackbarHost.showSnackbar(
+                    "Save location couldn't be persisted; pick a different folder.",
+                )
             }
         }
     }
 
     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-        Button(onClick = {
-            val saved = saveLocation?.let { Uri.parse(it) }
-            if (saved == null) {
-                pendingSaveAfterPick = true
-                pickLauncher.launch(null)
-            } else {
-                scope.launch { runSave(context, buffer, saved) { statusMessage = it } }
-            }
-        }) { Text("Save buffer now") }
+        Button(onClick = saveAction) { Text("Save buffer now") }
         OutlinedButton(onClick = { showClearDialog = true }) { Text("Clear buffer") }
     }
-    OutlinedButton(onClick = {
-        pendingSaveAfterPick = false
-        pickLauncher.launch(null)
-    }) { Text("Change save location") }
+    OutlinedButton(onClick = { changeLocationPicker.launch(null) }) {
+        Text("Change save location")
+    }
 
     val saveDisplay = saveLocation
         ?.let { Uri.parse(it) }
@@ -293,41 +292,28 @@ private fun DebugCaptureSection(prefs: Prefs) {
         }
     }
 
-    statusMessage?.let { Text(it) }
+    SnackbarHost(hostState = snackbarHost) { data -> Snackbar(snackbarData = data) }
 
     if (showClearDialog) {
         val size = Formatter.formatShortFileSize(context, state.totalBytes)
+        val frameCount = state.frameCount
         AlertDialog(
             onDismissRequest = { showClearDialog = false },
             title = { Text("Clear debug buffer?") },
-            text = { Text("Delete ${state.frameCount} frames ($size)? This cannot be undone.") },
+            text = { Text("Delete $frameCount frames ($size)? This cannot be undone.") },
             confirmButton = {
                 Button(onClick = {
                     showClearDialog = false
                     buffer.clear()
-                    statusMessage = "Cleared."
+                    scope.launch {
+                        snackbarHost.showSnackbar("Cleared $frameCount frames.")
+                    }
                 }) { Text("Delete") }
             },
             dismissButton = {
                 OutlinedButton(onClick = { showClearDialog = false }) { Text("Cancel") }
             },
         )
-    }
-}
-
-private suspend fun runSave(
-    context: android.content.Context,
-    buffer: DebugCaptureBuffer,
-    uri: Uri,
-    onMessage: (String) -> Unit,
-) {
-    when (val r = DebugBufferActions.saveAll(context, buffer, uri)) {
-        is SaveResult.Ok -> onMessage(
-            "Saved ${r.frameCount} frames " +
-                "(${Formatter.formatShortFileSize(context, r.bytes)}) to ${r.destinationDisplay}",
-        )
-        is SaveResult.Failed -> onMessage("Save failed: ${r.message}")
-        SaveResult.NeedLocation -> onMessage("Pick a location first.")
     }
 }
 

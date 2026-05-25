@@ -62,12 +62,10 @@ android {
         buildConfigField("String", "BRIS_COLLECTOR_BEARER_TOKEN", "\"$token\"")
         buildConfigField("String", "BRIS_APP_VERSION", "\"0.1.0\"")
         // Diagnostic-collection upload is a spike, not a
-        // production surface. Gate every "Send to collector"
-        // button behind this flag so the operator doesn't see
-        // a feature that doesn't really work yet. Flip in a
-        // local build via `-PbrisEnableRemoteSubmit=true`.
-        val remoteSubmit = (project.findProperty("brisEnableRemoteSubmit") as String?) == "true"
-        buildConfigField("boolean", "ENABLE_REMOTE_SUBMIT", remoteSubmit.toString())
+        // production surface. Hard-coded false so a developer
+        // building locally can't silently enable remote submit
+        // without editing source (visible in code review).
+        buildConfigField("boolean", "ENABLE_REMOTE_SUBMIT", "false")
     }
 
     buildFeatures {

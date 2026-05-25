@@ -2,6 +2,7 @@ package io.github.spencerharmon.bris.ui
 
 import android.widget.Toast
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -9,6 +10,9 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.Button
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Snackbar
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
@@ -17,16 +21,15 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import io.github.spencerharmon.bris.BuildConfig
 import io.github.spencerharmon.bris.Prefs
 import io.github.spencerharmon.bris.engine.CalibrationStore
-import io.github.spencerharmon.bris.engine.DebugBufferActions
 import io.github.spencerharmon.bris.engine.DebugCaptureBuffer
 import io.github.spencerharmon.bris.engine.Exporter
-import io.github.spencerharmon.bris.engine.SaveResult
 import io.github.spencerharmon.bris.location.CoarseLocation
 import io.github.spencerharmon.bris.upload.ManifestBuilder
 import io.github.spencerharmon.bris.upload.MediaPart
@@ -34,7 +37,6 @@ import io.github.spencerharmon.bris.upload.MediaSummary
 import io.github.spencerharmon.bris.upload.SubmitResult
 import io.github.spencerharmon.bris.upload.Submitter
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
@@ -78,7 +80,14 @@ fun PreUploadReviewScreen(
     // provider, or no cached fix.
     val gps = androidx.compose.runtime.remember(context) { CoarseLocation.getLastKnown(context) }
     var note by remember { mutableStateOf("") }
+    val snackbarHost = remember { SnackbarHostState() }
+    val saveAction = rememberDebugSaveAction(
+        buffer = debugBuffer,
+        prefs = prefs,
+        snackbarHost = snackbarHost,
+    )
 
+    Box(modifier = Modifier.fillMaxSize()) {
     Column(
         modifier = Modifier.fillMaxSize().padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp),
@@ -262,38 +271,27 @@ fun PreUploadReviewScreen(
             // off-device; collector upload stays gated by
             // BuildConfig.ENABLE_REMOTE_SUBMIT above.
             onClick = {
-                scope.launch {
-                    val savedUriStr = prefs.debugSaveLocationFlow.first()
-                    if (kind == "calibration") {
+                if (kind == "calibration") {
+                    scope.launch {
                         val sess = CalibrationStore.forApp(context).latestSession()
                         val dest = withContext(Dispatchers.IO) {
                             sess?.let { Exporter.forApp(context).exportCalibrationSession(it) }
                         }
                         val msg = dest?.let { "Saved to ${it.absolutePath}" }
                             ?: "Nothing to save (no calibration session)."
-                        Toast.makeText(context, msg, Toast.LENGTH_LONG).show()
-                    } else {
-                        val uri = savedUriStr?.let { android.net.Uri.parse(it) }
-                        if (uri == null) {
-                            Toast.makeText(
-                                context,
-                                "Pick a save location in Settings \u2192 Change save location first.",
-                                Toast.LENGTH_LONG,
-                            ).show()
-                        } else {
-                            val r = DebugBufferActions.saveAll(context, debugBuffer, uri)
-                            val msg = when (r) {
-                                is SaveResult.Ok -> "Saved ${r.frameCount} frames to ${r.destinationDisplay}"
-                                is SaveResult.Failed -> "Save failed: ${r.message}"
-                                SaveResult.NeedLocation -> "Pick a save location."
-                            }
-                            Toast.makeText(context, msg, Toast.LENGTH_LONG).show()
-                        }
+                        snackbarHost.showSnackbar(msg)
                     }
+                } else {
+                    saveAction()
                 }
             },
         ) { Text("Save to phone") }
         OutlinedButton(onClick = onBack) { Text("Cancel") }
+    }
+    SnackbarHost(
+        hostState = snackbarHost,
+        modifier = Modifier.align(Alignment.BottomCenter).padding(12.dp),
+    ) { data -> Snackbar(snackbarData = data) }
     }
 }
 

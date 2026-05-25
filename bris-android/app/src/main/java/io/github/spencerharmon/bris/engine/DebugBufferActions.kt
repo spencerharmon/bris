@@ -2,6 +2,7 @@ package io.github.spencerharmon.bris.engine
 
 import android.content.Context
 import android.net.Uri
+import android.provider.DocumentsContract
 import androidx.documentfile.provider.DocumentFile
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -43,7 +44,11 @@ object DebugBufferActions {
         if (savedTreeUri == null) return SaveResult.NeedLocation
         val tree = DocumentFile.fromTreeUri(context, savedTreeUri)
             ?: return SaveResult.Failed("Cannot open chosen folder.")
-        if (!tree.canWrite()) return SaveResult.Failed("No write access to chosen folder.")
+        // Intentionally no `tree.canWrite()` precheck: certain
+        // Downloads / SD-card providers report false from the
+        // tree-URI metadata probe even when writes succeed. The
+        // real failure signal is `createDirectory` /
+        // `createFile` returning null below.
 
         return withContext(Dispatchers.IO) {
             try {
@@ -83,7 +88,7 @@ object DebugBufferActions {
                     bytesWritten += streamCopy(context, src, dest.uri)
                 }
 
-                val display = tree.name ?: bundleName
+                val display = destinationDisplayName(tree, savedTreeUri)
                 SaveResult.Ok(
                     destinationDisplay = display,
                     frameCount = frameCount,
@@ -93,6 +98,20 @@ object DebugBufferActions {
                 SaveResult.Failed(e.message ?: "Save failed.")
             }
         }
+    }
+
+    private fun destinationDisplayName(tree: DocumentFile, uri: Uri): String {
+        tree.name?.takeIf { it.isNotBlank() }?.let { return it }
+        // `DocumentsContract.getTreeDocumentId` typically
+        // returns something like "primary:Download" for
+        // standard providers, which is more meaningful to the
+        // operator than the bundle ULID. Fall back to the
+        // URI's last path segment if even that's null.
+        return try {
+            DocumentsContract.getTreeDocumentId(uri)
+        } catch (_: IllegalArgumentException) {
+            null
+        } ?: uri.lastPathSegment ?: uri.toString()
     }
 
     private fun streamCopy(context: Context, src: File, destUri: Uri): Long {
