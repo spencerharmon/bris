@@ -42,6 +42,7 @@
 
 use bris_core::{Sigma, Uncertain};
 
+use crate::frame::Frame;
 use crate::ray::{bisector_normal, horizon_line_from_normal, BodyRay, CameraRay};
 
 use super::{
@@ -183,6 +184,11 @@ impl ReflectionPairProvider {
     /// `EngineDiagnostics`. Used by `bris-streaming`; the
     /// trait-method `detect` just wraps this with a discarded
     /// stats buffer.
+    // clippy::float_cmp: the pair-ordering fallback uses exact
+    // `proj_a == proj_b` equality on purpose — we only break
+    // ties to pixel-y ordering when the two ray projections
+    // along gravity are bitwise identical (a degeneracy).
+    #[allow(clippy::float_cmp)]
     pub fn detect_with_stats(
         &self,
         ctx: &HorizonProviderContext<'_>,
@@ -203,14 +209,25 @@ impl ReflectionPairProvider {
         // that the upper one is at least as bright (within
         // tolerance) — flipping the order here would make
         // Test 2 unreachable.
+        let expected_gravity = expected_gravity_axis(ctx.frame);
         let mut outcomes: Vec<PairOutcome> = Vec::new();
         for (i, a) in ctx.body_candidates.iter().enumerate() {
             for (j, b) in ctx.body_candidates.iter().enumerate().skip(i + 1) {
-                let (up_idx, up, dn) = if a.pixel.1 <= b.pixel.1 {
-                    (i, a, b)
-                } else {
-                    (j, b, a)
-                };
+                // Order so `up` is on the sky side of `dn`
+                // along the expected gravity axis (i.e. its
+                // camera ray projects *less* onto gravity).
+                // Falls back to pixel-y ordering when the two
+                // rays project identically (degenerate).
+                let ray_a = CameraRay::from_pixel(ctx.intrinsics, a.pixel.0, a.pixel.1);
+                let ray_b = CameraRay::from_pixel(ctx.intrinsics, b.pixel.0, b.pixel.1);
+                let proj_a = ray_a.dot(&expected_gravity);
+                let proj_b = ray_b.dot(&expected_gravity);
+                let (up_idx, up, dn) =
+                    if proj_a < proj_b || (proj_a == proj_b && a.pixel.1 <= b.pixel.1) {
+                        (i, a, b)
+                    } else {
+                        (j, b, a)
+                    };
                 if let Some(outcome) = self.evaluate_pair(ctx, up_idx, up, dn, stats) {
                     outcomes.push(outcome);
                 }
@@ -331,13 +348,19 @@ impl ReflectionPairProvider {
         //    positive so the camera looks forward.
         //  - Gravity is the chord `dn - up`, normalised: for
         //    a body at altitude +α above the horizon and its
-        //    reflection at -α, the chord points image-down
-        //    along the local vertical. Magnitude scales with
-        //    2·sin(α).
+        //    reflection at -α, the chord points toward the
+        //    *image-down* direction along the local vertical.
+        //    Magnitude scales with 2·sin(α). "Image-down" is
+        //    +y_cam only for portrait-mounted captures; for
+        //    sensor-landscape captures gravity runs along
+        //    ±x_cam. The expected gravity axis comes from
+        //    `Frame::gravity_camera_frame` when populated and
+        //    defaults to `(0, 1, 0)` otherwise. See
+        //    `docs/design/horizon_autodetect.md` §3.2.
         //  - The pair plane (the plane containing the two
-        //    rays) must be near-vertical, i.e. its normal
-        //    `r_up × r_dn` is near-horizontal in image space
-        //    (small y component relative to its norm).
+        //    rays) must contain the gravity axis, i.e. its
+        //    normal `r_up × r_dn` is perpendicular to gravity.
+        let expected_gravity = expected_gravity_axis(ctx.frame);
         let Some(bisector) = bisector_normal(&up_ray.ray, &dn_ray.ray) else {
             stats.rejected_geometric += 1;
             return None;
@@ -355,18 +378,36 @@ impl ReflectionPairProvider {
             stats.rejected_geometric += 1;
             return None;
         };
-        if gravity.y <= 0.0 {
+        // Inferred gravity must align with expected (positive dot).
+        // The ordering of `up`/`dn` was decided by pixel-y but
+        // gravity may not be along pixel-y; we accept the pair
+        // here if either orientation aligns with the expected
+        // axis. The bisector / θ/2 computations below are
+        // orientation-symmetric, so flipping the sign of
+        // `gravity` is harmless to downstream geometry.
+        if gravity.dot(&expected_gravity).abs() <= 0.0 {
             stats.rejected_geometric += 1;
             return None;
         }
-        // Pair-plane verticality.
+        let gravity = if gravity.dot(&expected_gravity) >= 0.0 {
+            gravity
+        } else {
+            CameraRay {
+                x: -gravity.x,
+                y: -gravity.y,
+                z: -gravity.z,
+            }
+        };
+        // Pair-plane verticality: the plane normal must be
+        // perpendicular to gravity (i.e. the plane *contains*
+        // gravity).
         let cross = up_ray.ray.cross(&dn_ray.ray);
         let cross_norm = cross.norm();
         if cross_norm < f64::EPSILON {
             stats.rejected_geometric += 1;
             return None;
         }
-        let horiz_offset = (cross.y / cross_norm).abs();
+        let horiz_offset = (cross.dot(&expected_gravity) / cross_norm).abs();
         if horiz_offset > self.config.max_bisector_horizontal_rad.sin() {
             stats.rejected_geometric += 1;
             return None;
@@ -451,6 +492,29 @@ impl ReflectionPairProvider {
         } else {
             Some(best)
         }
+    }
+}
+
+/// Expected camera-frame gravity direction (unit vector,
+/// pointing image-down) for a frame.
+///
+/// Prefers `Frame::gravity_camera_frame` when populated
+/// (e.g. fed in from Android `Sensor.TYPE_GRAVITY` composed
+/// with the camera-mount rotation). Otherwise falls back to
+/// `(0, 1, 0)` — image-down for a portrait-mounted sensor.
+/// Sensor-landscape captures that don't populate the field
+/// will reject reflection pairs whose chord is along
+/// pixel-x; populating the field is the correct fix.
+fn expected_gravity_axis(frame: &Frame) -> CameraRay {
+    if let Some((x, y, z)) = frame.gravity_camera_frame {
+        if let Some(g) = (CameraRay { x, y, z }).normalize() {
+            return g;
+        }
+    }
+    CameraRay {
+        x: 0.0,
+        y: 1.0,
+        z: 0.0,
     }
 }
 
@@ -853,6 +917,102 @@ mod tests {
             "altitude_sigma {} below floor 5e-3",
             hyp.line.altitude_sigma.value()
         );
+    }
+
+    /// Sensor-landscape variant: gravity points along
+    /// camera-frame +x. Direct and reflection differ in
+    /// pixel-x rather than pixel-y. The provider must accept
+    /// the pair when `Frame::gravity_camera_frame` declares
+    /// the landscape mount, mirroring the portrait
+    /// `synthetic_clean_pair_yields_expected_horizon` case.
+    #[test]
+    fn landscape_mount_pair_accepted_when_gravity_along_x() {
+        let intrinsics = intr();
+        // Gravity tilted slightly off pure +x so that the
+        // resulting horizon line (image-near-vertical) is
+        // representable as `y = m*x + b` — `horizon_line_from_normal`
+        // returns `None` for a perfectly vertical image line
+        // (normal.y == 0). The geometry under test (Test 1
+        // axis correctness) is unchanged by the small tilt.
+        let g_dir = CameraRay::from_unit_components(1.0, 0.05, 0.0)
+            .normalize()
+            .unwrap();
+        let alts = [0.20_f64, 0.21, 0.22];
+        let mut cands: Vec<BodyCandidate> = Vec::new();
+        for (k, alt) in alts.iter().enumerate() {
+            // Direct opposite gravity, reflection along gravity.
+            let up_ray = CameraRay::from_unit_components(
+                -alt.sin() * g_dir.x,
+                -alt.sin() * g_dir.y,
+                alt.cos(),
+            )
+            .normalize()
+            .unwrap();
+            let dn_ray = CameraRay::from_unit_components(
+                alt.sin() * g_dir.x,
+                alt.sin() * g_dir.y,
+                alt.cos(),
+            )
+            .normalize()
+            .unwrap();
+            let up_px = pixel_for_ray(&intrinsics, &up_ray);
+            let dn_px = pixel_for_ray(&intrinsics, &dn_ray);
+            #[allow(clippy::cast_precision_loss)]
+            let perp_off = k as f64 * 5.0;
+            // Distinct offset perpendicular to the chord so
+            // cross-pairs don't accidentally also pass Test 1.
+            cands.push(BodyCandidate {
+                pixel: (up_px.0 - perp_off * g_dir.y, up_px.1 + perp_off * g_dir.x),
+                brightness: 2.0,
+                position_sigma_px: 0.5,
+                predicted_altitude: None,
+            });
+            cands.push(BodyCandidate {
+                pixel: (dn_px.0 - perp_off * g_dir.y, dn_px.1 + perp_off * g_dir.x),
+                brightness: 1.0,
+                position_sigma_px: 0.5,
+                predicted_altitude: None,
+            });
+        }
+        let f = Frame::new(
+            32,
+            32,
+            vec![0_u16; 32 * 32],
+            Tt::from_julian_date(JD_J2000),
+            1000,
+            intrinsics,
+        )
+        .unwrap()
+        .with_gravity_camera_frame((g_dir.x, g_dir.y, g_dir.z));
+        let provider = ReflectionPairProvider::default();
+        let ctx = ctx_for(&f, &intrinsics, &cands, None);
+        let mut stats = ReflectionPairStats::default();
+        let hyp = provider
+            .detect_with_stats(&ctx, &mut stats)
+            .expect("landscape pair should detect when gravity declared");
+        assert!(matches!(
+            hyp.provenance,
+            HorizonProvenance::ReflectionPair { .. }
+        ));
+
+        // Without the gravity declaration, Test 1 falls back
+        // to image-down (+y) and rejects the chord that runs
+        // along pixel-x. Documents the bug PR #12 surfaced.
+        let f_no_grav = Frame::new(
+            32,
+            32,
+            vec![0_u16; 32 * 32],
+            Tt::from_julian_date(JD_J2000),
+            1000,
+            intrinsics,
+        )
+        .unwrap();
+        let ctx_no_grav = ctx_for(&f_no_grav, &intrinsics, &cands, None);
+        let mut stats2 = ReflectionPairStats::default();
+        assert!(provider
+            .detect_with_stats(&ctx_no_grav, &mut stats2)
+            .is_none());
+        assert!(stats2.rejected_geometric >= 1);
     }
 
     #[test]

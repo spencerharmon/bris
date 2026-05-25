@@ -170,7 +170,13 @@ fn moonlight_pond_produces_moon_lop() {
     // Load the frame at Rotation::Deg0 (sensor-landscape bytes,
     // per the task brief).
     let frame = load_frame_from_path_with_rotation(&frame_path, tt, 0, intrinsics, Rotation::Deg0)
-        .expect("load frame 10");
+        .expect("load frame 10")
+        // Sensor-landscape mount: gravity in camera frame is
+        // along +x (image-right). Without this declaration
+        // `ReflectionPairProvider` falls back to image-down and
+        // rejects the moon→reflection chord which runs along
+        // pixel-x. See `Frame::gravity_camera_frame`.
+        .with_gravity_camera_frame((1.0, 0.0, 0.0));
     assert_eq!(frame.width(), FRAME_WIDTH);
     assert_eq!(frame.height(), FRAME_HEIGHT);
 
