@@ -74,7 +74,10 @@ mod queue;
 mod stage_d;
 mod stage_e;
 
-pub(crate) use horizon::{merge_reflection_pair, HorizonStageOutcome, ReflectionPairMerge};
+pub(crate) use horizon::{
+    merge_reflection_pair, merge_vertical_line, HorizonStageOutcome, ReflectionPairMerge,
+    VerticalLineMerge,
+};
 pub(crate) use hysteresis::ClassifierHysteresis;
 pub(crate) use queue::{FrameId, Storage};
 pub(crate) use stage_d::{run as run_stage_d, StageDOutcome};
@@ -123,6 +126,7 @@ pub(crate) enum BodyDetection {
 /// per-stage statistics and (in commit 4+) enqueue the
 /// detections.
 #[derive(Debug, Clone)]
+#[allow(clippy::struct_excessive_bools)]
 pub(crate) struct StageOutcome {
     /// Stage A verdict (the *raw* per-frame classification).
     /// Always present (the classifier never errors; it returns
@@ -171,6 +175,14 @@ pub(crate) struct StageOutcome {
     /// Provider's hypothesis won the best-σ merge and is the
     /// horizon outcome surfaced from this frame.
     pub reflection_pair_used: bool,
+    /// Vertical-line provider counters for this frame.
+    pub vertical_line_stats: bris_vision::VerticalLineStats,
+    /// Provider returned a hypothesis (≥ 1 near-vertical line
+    /// passed all filters).
+    pub vertical_line_hypothesized: bool,
+    /// Provider's hypothesis won the best-σ merge and is the
+    /// horizon outcome surfaced from this frame.
+    pub vertical_line_used: bool,
 }
 
 /// Process one frame through Stages A, B, and C synchronously.
@@ -181,6 +193,7 @@ pub(crate) struct StageOutcome {
 /// `push_frame` itself, later a worker-thread loop) updates
 /// counters and enqueues records based on the returned
 /// [`StageOutcome`].
+#[allow(clippy::too_many_lines)]
 pub(crate) fn process_frame(
     pyramid: &bris_vision::FramePyramid,
     cfg: &EngineConfig,
@@ -301,6 +314,37 @@ pub(crate) fn process_frame(
         reflection_pair_used = used;
     }
 
+    // ---- Stage C (third pass): vertical-line provider ----
+    //
+    // Fires in all conditions (Day, Night, Twilight) and is
+    // independent of body candidates — the operator's plumb
+    // string / vertical edge is the evidence. Merged by best-σ
+    // through the same path used by the optical providers and
+    // the reflection-pair provider.
+    let mut vertical_line_stats = bris_vision::VerticalLineStats::default();
+    let mut vertical_line_hypothesized = false;
+    let mut vertical_line_used = false;
+    if !matches!(dispatched_condition, Condition::Unusable) {
+        let ctx = bris_vision::HorizonProviderContext {
+            frame,
+            intrinsics: &frame.intrinsics,
+            body_candidates: &body_candidates,
+            position_prior,
+            timestamp: frame.capture_tt,
+        };
+        let merge = merge_vertical_line(horizon, &ctx, cfg);
+        let VerticalLineMerge {
+            outcome,
+            stats,
+            hypothesized,
+            used,
+        } = merge;
+        horizon = outcome;
+        vertical_line_stats = stats;
+        vertical_line_hypothesized = hypothesized;
+        vertical_line_used = used;
+    }
+
     StageOutcome {
         classification,
         dispatched_condition,
@@ -312,6 +356,9 @@ pub(crate) fn process_frame(
         reflection_pair_invoked,
         reflection_pair_hypothesized,
         reflection_pair_used,
+        vertical_line_stats,
+        vertical_line_hypothesized,
+        vertical_line_used,
     }
 }
 

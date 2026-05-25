@@ -285,6 +285,12 @@ pub struct EngineConfig {
     /// Phase 2 followup; see
     /// `docs/handoff/reflection-pair-phase1.md`.
     pub position_prior_max_age_seconds: f64,
+
+    /// Vertical-line provider tunables. See
+    /// [`bris_vision::VerticalLineConfig`]. Defaults are
+    /// sensible (±20° from vertical, min 50 px line,
+    /// 1e-3 rad floor); operator may tune.
+    pub vertical_line_provider_config: bris_vision::VerticalLineConfig,
 }
 
 impl EngineConfig {
@@ -331,6 +337,7 @@ impl EngineConfig {
             per_star_sigma: Sigma::new(30.0 * std::f64::consts::PI / (180.0 * 3600.0))
                 .expect("30 arcsec is a valid Sigma"),
             position_prior_max_age_seconds: 30.0,
+            vertical_line_provider_config: bris_vision::VerticalLineConfig::default(),
         }
     }
 

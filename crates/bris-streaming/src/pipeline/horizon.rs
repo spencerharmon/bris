@@ -108,6 +108,9 @@ pub(crate) enum HorizonDetector {
     /// horizon-providers roadmap; see
     /// `docs/design/horizon_autodetect.md`).
     ReflectionPair,
+    /// Auto-detected single near-vertical line (plumb / edge).
+    /// See `docs/design/horizon_brainstorm.md` §B3.
+    VerticalLine,
 }
 
 /// Run Stage C on one frame.
@@ -222,6 +225,12 @@ pub(crate) fn detect(
     // Last resort: segmentation. Gated on the feature flag and
     // on the operator opting in by supplying a model path.
     run_segmentation(&ctx, cfg, &mut best, &mut best_direct_sight);
+    // Vertical-line provider runs as a second pass via
+    // [`merge_vertical_line`] so its per-frame stats land in
+    // a single, consistent counter path. It is independent of
+    // Stage B body candidates (the operator's plumb string is
+    // the evidence) but the merge structure mirrors
+    // [`merge_reflection_pair`] for symmetry.
     (finish(best, best_direct_sight), analyzed_size)
 }
 
@@ -289,6 +298,60 @@ pub(crate) fn merge_reflection_pair(
     }
 }
 
+/// Outcome of a [`merge_vertical_line`] call.
+pub(crate) struct VerticalLineMerge {
+    pub outcome: HorizonStageOutcome,
+    pub stats: bris_vision::VerticalLineStats,
+    /// Provider returned a hypothesis.
+    pub hypothesized: bool,
+    /// Hypothesis won the best-σ merge.
+    pub used: bool,
+}
+
+/// Run the vertical-line provider against an already-computed
+/// [`HorizonStageOutcome`] and merge by best-σ.
+pub(crate) fn merge_vertical_line(
+    prev: HorizonStageOutcome,
+    ctx: &HorizonProviderContext<'_>,
+    cfg: &EngineConfig,
+) -> VerticalLineMerge {
+    let mut stats = bris_vision::VerticalLineStats::default();
+    let provider = bris_vision::VerticalLineProvider {
+        config: cfg.vertical_line_provider_config,
+    };
+    let Some(hyp) = provider.detect_with_stats(ctx, &mut stats) else {
+        return VerticalLineMerge {
+            outcome: prev,
+            stats,
+            hypothesized: false,
+            used: false,
+        };
+    };
+    let mut best: Option<(HorizonDetector, HorizonLine)> = match prev {
+        HorizonStageOutcome::Detected { detector, line, .. } => Some((detector, line)),
+        HorizonStageOutcome::None => None,
+    };
+    let mut best_direct_sight: Option<bris_vision::DirectSight> = match prev {
+        HorizonStageOutcome::Detected { direct_sight, .. } => direct_sight,
+        HorizonStageOutcome::None => None,
+    };
+    let detector = detector_from_provenance(hyp.provenance);
+    let improved = match best {
+        Some((_, ref existing)) => hyp.line.altitude_sigma < existing.altitude_sigma,
+        None => true,
+    };
+    if improved {
+        best = Some((detector, hyp.line));
+        best_direct_sight = hyp.direct_sight;
+    }
+    VerticalLineMerge {
+        outcome: finish(best, best_direct_sight),
+        stats,
+        hypothesized: true,
+        used: improved,
+    }
+}
+
 /// Run one provider; update `best` (smallest σ wins) and
 /// record the winning hypothesis's direct sight, if any.
 fn run_provider<P: HorizonProvider>(
@@ -321,6 +384,7 @@ fn detector_from_provenance(p: HorizonProvenance) -> HorizonDetector {
     match p {
         HorizonProvenance::Optical(kind) => optical_kind_to_detector(kind),
         HorizonProvenance::ReflectionPair { .. } => HorizonDetector::ReflectionPair,
+        HorizonProvenance::VerticalLine { .. } => HorizonDetector::VerticalLine,
     }
 }
 

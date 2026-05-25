@@ -134,6 +134,9 @@ struct EngineState {
     reflection_pair_rejected_photometric: u64,
     reflection_pair_rejected_catalog: u64,
     reflection_pair_rejected_no_cluster: u64,
+    vertical_line_hypothesized: u64,
+    vertical_line_used: u64,
+    vertical_line_rejected_no_lines: u64,
 }
 
 /// Nautical mile in metres; for converting Fix sigma (nm) to
@@ -263,6 +266,14 @@ fn update_stage_counters(
     state.reflection_pair_rejected_photometric += rp.rejected_photometric;
     state.reflection_pair_rejected_catalog += rp.rejected_catalog;
     state.reflection_pair_rejected_no_cluster += rp.rejected_no_cluster;
+
+    if outcome.vertical_line_hypothesized {
+        state.vertical_line_hypothesized += 1;
+    }
+    if outcome.vertical_line_used {
+        state.vertical_line_used += 1;
+    }
+    state.vertical_line_rejected_no_lines += outcome.vertical_line_stats.rejected_no_lines;
 }
 
 impl StreamingEngine {
@@ -335,6 +346,9 @@ impl StreamingEngine {
                 reflection_pair_rejected_photometric: 0,
                 reflection_pair_rejected_catalog: 0,
                 reflection_pair_rejected_no_cluster: 0,
+                vertical_line_hypothesized: 0,
+                vertical_line_used: 0,
+                vertical_line_rejected_no_lines: 0,
             }),
             config,
             fix_tx,
@@ -576,6 +590,9 @@ impl StreamingEngine {
             reflection_pair_rejected_photometric: state.reflection_pair_rejected_photometric,
             reflection_pair_rejected_catalog: state.reflection_pair_rejected_catalog,
             reflection_pair_rejected_no_cluster: state.reflection_pair_rejected_no_cluster,
+            vertical_line_hypothesized: state.vertical_line_hypothesized,
+            vertical_line_used: state.vertical_line_used,
+            vertical_line_rejected_no_lines: state.vertical_line_rejected_no_lines,
         }
     }
 
