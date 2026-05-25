@@ -9,6 +9,38 @@ For the end-to-end pipeline architecture and data flow, see
 
 ---
 
+## Android: confidence ellipse + session views
+
+Kotlin-only PR consuming the post-PR-#18 FFI getters
+(`pool_sights`, `recent_sights(n)`, `last_persisted_fix`) and
+the per-fix covariance fields already on `FfiPublishedFix`.
+New operator-visible surfaces:
+
+- Top-right 120 dp confidence-ellipse overlay: north-up,
+  east-right; 1σ ellipse rotated by `orientation_rad`; faint
+  LOPs through the centre for each contributing sight; auto-
+  scaled 1 nm / 10 nm frame; central fix dot.
+- Pool summary chip: `Pool: N sights (Body: k, …)`, refreshed
+  on every published fix.
+- Recovered-fix banner on app open via `engine.lastPersistedFix()`,
+  fades after 10 s; current-fix overlay shows the recovered
+  value until a fresh fix arrives.
+- Sight log screen now has two sections: `Recent sights (200)`
+  backed by `engine.recentSights(200)` (newest-first) and the
+  existing `Saved captures` list.
+- Settings: scaffolded coarse-hemisphere radio (`Unset` / `North`
+  / `South`); persists locally, awaits FFI surfacing of
+  `EngineConfig::cold_start.coarse_hemisphere`.
+
+The engine is now owned by a process-lifetime `SessionHolder`
+singleton so navigation between Live and Sight-log screens
+doesn't tear it down (and the two screens share the same
+on-disk store handle through the engine).
+
+Docs: new `docs/operator/mobile-hud.md` describes the chrome.
+
+---
+
 ## Phase 3.5: Engine sight persistence landed
 
 New `crates/bris-streaming/src/store.rs` module persists

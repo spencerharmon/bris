@@ -102,6 +102,7 @@ class MainActivity : ComponentActivity() {
                                     val encoded = URLEncoder.encode(dirName, "UTF-8")
                                     nav.navigate("sight-log/$encoded")
                                 },
+                                engine = io.github.spencerharmon.bris.engine.SessionHolder.peek(),
                             )
                         }
                         composable("sight-log/{dir}") { backStack ->

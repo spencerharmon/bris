@@ -55,6 +55,18 @@ class Prefs(private val context: Context) {
      */
     val selectedLensIdFlow: Flow<String?> = context.dataStore.data.map { it[KEY_SELECTED_LENS_ID] }
 
+    /**
+     * Operator-supplied coarse hemisphere hint ("N", "S", or
+     * `null` = unset) for the cold-start CoP solver. Maps to
+     * `EngineConfig::cold_start.coarse_hemisphere` once the
+     * FFI surfaces that field; currently scaffolded so the UI
+     * has somewhere to write to.
+     *
+     * TODO(cold-start): wire to FFI once the cold-start
+     * fallback PR adds the field.
+     */
+    val coarseHemisphereFlow: Flow<String?> = context.dataStore.data.map { it[KEY_COARSE_HEMISPHERE] }
+
     suspend fun setDebugMode(enabled: Boolean) {
         context.dataStore.edit { it[KEY_DEBUG_MODE] = enabled }
     }
@@ -80,6 +92,14 @@ class Prefs(private val context: Context) {
         context.dataStore.edit { it[KEY_SELECTED_LENS_ID] = lensId }
     }
 
+    /** Persist the coarse-hemisphere hint, or clear with `null`. */
+    suspend fun setCoarseHemisphere(value: String?) {
+        context.dataStore.edit {
+            if (value == null) it.remove(KEY_COARSE_HEMISPHERE)
+            else it[KEY_COARSE_HEMISPHERE] = value
+        }
+    }
+
     /** Get or lazily generate the per-install device UUID. */
     suspend fun deviceUuid(): String {
         val current = context.dataStore.data.map { it[KEY_DEVICE_UUID] }.first()
@@ -96,5 +116,6 @@ class Prefs(private val context: Context) {
         private val KEY_DEVICE_UUID = stringPreferencesKey("device_uuid")
         private val KEY_SELECTED_LENS_ID = stringPreferencesKey("selected_lens_id")
         private val KEY_DEBUG_SAVE_URI = stringPreferencesKey("debug_save_uri")
+        private val KEY_COARSE_HEMISPHERE = stringPreferencesKey("coarse_hemisphere")
     }
 }

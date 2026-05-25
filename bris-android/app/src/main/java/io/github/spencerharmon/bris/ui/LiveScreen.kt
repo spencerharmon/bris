@@ -64,15 +64,22 @@ import io.github.spencerharmon.bris.engine.EngineWrapper
 import io.github.spencerharmon.bris.engine.FixVerdict
 import io.github.spencerharmon.bris.engine.FrameAnalyzer
 import io.github.spencerharmon.bris.engine.LensCatalog
+import io.github.spencerharmon.bris.engine.SessionHolder
 import io.github.spencerharmon.bris.engine.SessionRecorder
 import io.github.spencerharmon.bris.engine.SessionStatus
 import io.github.spencerharmon.bris.engine.SightLog
 import io.github.spencerharmon.bris.engine.resolveCalibration
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import uniffi.bris_ffi.FfiEngineConfig
 import uniffi.bris_ffi.FfiIntrinsics
 import uniffi.bris_ffi.FfiObserver
+import uniffi.bris_ffi.FfiPublishedFix
+import uniffi.bris_ffi.FfiSight
 import uniffi.bris_ffi.version
 import java.util.concurrent.Executors
 
@@ -177,10 +184,10 @@ fun LiveScreen(
     val sightLog = remember(context) { SightLog.forApp(context) }
 
     val engineScope = remember { CoroutineScope(SupervisorJob()) }
-    val engine = remember {
-        EngineWrapper.create(
-            config = defaultEngineConfig(),
-            scope = engineScope,
+    val engine = remember(context) {
+        SessionHolder.acquire(
+            context = context,
+            configFactory = { defaultEngineConfig() },
             pbrisSink = { line ->
                 if (debugCaptureEnabled) debugBuffer.appendPbris(line)
             },
@@ -197,11 +204,46 @@ fun LiveScreen(
         )
     }
     DisposableEffect(engine) {
-        onDispose { engine.close() }
+        onDispose {
+            // Engine is owned by SessionHolder for process lifetime;
+            // closing here would tear it down on navigation, defeating
+            // the SightLog screen's recent_sights() lookup.
+        }
     }
 
     val snapshot by engine.snapshot.collectAsState()
     val sessionStatus by recorder.status.collectAsState()
+
+    // ----- Pool / last-persisted / current-fix UI state -----
+    var lastPersistedFix by remember { mutableStateOf<FfiPublishedFix?>(null) }
+    var showRecoveredBanner by remember { mutableStateOf(false) }
+    var liveFix by remember { mutableStateOf<FfiPublishedFix?>(null) }
+    var poolSights by remember { mutableStateOf<List<FfiSight>>(emptyList()) }
+
+    // On screen entry, fetch the most-recent persisted fix off
+    // the UI thread and show the recovery banner for 10 s.
+    LaunchedEffect(engine) {
+        val recovered = withContext(Dispatchers.IO) {
+            runCatching { engine.lastPersistedFix() }.getOrNull()
+        }
+        if (recovered != null) {
+            lastPersistedFix = recovered
+            liveFix = liveFix ?: recovered
+            showRecoveredBanner = true
+            delay(RECOVERED_BANNER_MS)
+            showRecoveredBanner = false
+        }
+    }
+
+    // Every new published fix refreshes the live-fix overlay
+    // and re-reads the in-memory sight pool. `pool_sights()` is
+    // cheap (in-memory) so it's safe at fix cadence.
+    LaunchedEffect(engine) {
+        engine.fixes.collect { fix ->
+            liveFix = fix
+            poolSights = runCatching { engine.poolSights() }.getOrDefault(emptyList())
+        }
+    }
     val captureActive = sessionStatus is SessionStatus.Capturing ||
         sessionStatus is SessionStatus.Saving
     val bufferState by debugBuffer.stateFlow.collectAsState()
@@ -213,6 +255,18 @@ fun LiveScreen(
     )
 
     Box(modifier = Modifier.fillMaxSize()) {
+        // Top-right confidence-ellipse HUD. Sits above the
+        // diagnostic column so the ellipse is always visible
+        // even when the column scrolls; align manually because
+        // the column is left-aligned at (0,0).
+        ConfidenceEllipseOverlay(
+            fix = liveFix,
+            sights = poolSights,
+            modifier = Modifier
+                .align(Alignment.TopEnd)
+                .padding(12.dp),
+        )
+
         CameraSurface(
             lifecycleOwner = lifecycleOwner,
             captureActive = captureActive,
@@ -246,6 +300,8 @@ fun LiveScreen(
                 captureActive = captureActive,
                 bufferState = bufferState,
             )
+            RecoveredFixBanner(visible = showRecoveredBanner, fix = lastPersistedFix)
+            PoolSummaryChip(sights = poolSights)
             Spacer(Modifier.height(12.dp))
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 if (captureActive) {
@@ -677,3 +733,6 @@ private fun lensLabelFor(context: android.content.Context, lensId: String): Stri
     val match = LensCatalog.enumerate(context).firstOrNull { it.id == lensId }
     return match?.label ?: lensId
 }
+
+/** How long the "recovered from previous session" banner stays up. */
+private const val RECOVERED_BANNER_MS = 10_000L

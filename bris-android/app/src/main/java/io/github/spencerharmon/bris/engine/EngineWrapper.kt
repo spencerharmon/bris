@@ -18,6 +18,7 @@ import uniffi.bris_ffi.Engine as RustEngine
 import uniffi.bris_ffi.FfiEngineConfig
 import uniffi.bris_ffi.FfiFrame
 import uniffi.bris_ffi.FfiPublishedFix
+import uniffi.bris_ffi.FfiSight
 import uniffi.bris_ffi.FixSubscriber
 import uniffi.bris_ffi.engineNew
 import uniffi.bris_ffi.formatPbris
@@ -113,6 +114,22 @@ class EngineWrapper private constructor(
      * past those frames.
      */
     fun frameById(id: ULong): FfiFrame? = rust.frameById(id)
+
+    /** Sights currently in the operational (in-memory) pool. Cheap. */
+    fun poolSights(): List<FfiSight> = rust.poolSights()
+
+    /**
+     * Most-recent N sights from the on-disk store (current.log +
+     * archive). Reads from disk; call off the UI thread.
+     */
+    fun recentSights(n: UInt): List<FfiSight> = rust.recentSights(n)
+
+    /**
+     * Most-recent persisted fix on disk, or `null` if none has
+     * been written yet. Used on app open to restore the last
+     * known fix from a previous session.
+     */
+    fun lastPersistedFix(): FfiPublishedFix? = rust.lastPersistedFix()
 
     override fun close() {
         // Cancel the polling coroutine. The Rust engine stays

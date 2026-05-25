@@ -6,6 +6,9 @@ Available now:
 - [`calibration.md`](calibration.md) — lens calibration workflow:
   target preparation, capture procedure, running `bris calibrate`,
   interpreting the diagnostic, deploying the result.
+- [`mobile-hud.md`](mobile-hud.md) — Android live-HUD chrome: the
+  confidence ellipse, pool / recent-sights views, recovered-fix
+  banner.
 
 Planned (alongside future plan.org phases):
 - `chartplotter-symptoms.md` — every NMEA-visible Bris signal, what it

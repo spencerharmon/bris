@@ -135,6 +135,39 @@ fun SettingsScreen(prefs: Prefs, onBack: () -> Unit) {
 
         HorizontalDivider()
 
+        // ---- Coarse hemisphere hint (cold-start CoP) ----
+        // Disabled in this build: the cold-start fallback PR
+        // exposes `EngineConfig::cold_start.coarse_hemisphere`
+        // on the FFI, after which this toggle wires to it.
+        // Until then we persist the operator's pick locally so
+        // the value is ready to be picked up the moment the
+        // FFI catches up.
+        Text(
+            "Coarse hemisphere hint",
+            style = androidx.compose.material3.MaterialTheme.typography.titleMedium,
+        )
+        Text(
+            "Disambiguates the cold-start CoP solver between the two " +
+                "latitude solutions on the first fix. Requires the next " +
+                "engine update; setting it now persists the choice.",
+            style = androidx.compose.material3.MaterialTheme.typography.bodySmall,
+        )
+        val coarseHemi by prefs.coarseHemisphereFlow.collectAsState(initial = null)
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            for ((label, value) in listOf("Unset" to null, "North" to "N", "South" to "S")) {
+                RadioButton(
+                    selected = coarseHemi == value,
+                    onClick = { scope.launch { prefs.setCoarseHemisphere(value) } },
+                )
+                Text(label, modifier = Modifier.padding(start = 4.dp, end = 12.dp))
+            }
+        }
+
+        HorizontalDivider()
+
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.SpaceBetween,

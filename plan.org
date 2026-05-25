@@ -2112,6 +2112,19 @@ references to the regression tests that pin the behavior. See
    based sight UX described below is the next phase of work
    on the same project.
 
+   *Live-HUD chrome (Kotlin-only PR consuming the PR-#18 FFI
+   getters):* added a top-right confidence-ellipse overlay
+   (compass-rose-aligned 1σ ellipse + LOPs for the contributing
+   sights), a one-line pool summary chip backed by
+   ~engine.poolSights()~, a recovered-fix banner driven by
+   ~engine.lastPersistedFix()~ on screen entry, a recent-sights
+   section in the sight log backed by ~engine.recentSights(200)~,
+   and a scaffolded coarse-hemisphere radio in Settings
+   awaiting FFI exposure of ~EngineConfig::cold_start.coarse_hemisphere~.
+   The engine is now owned by a process-lifetime ~SessionHolder~
+   so Live + Sight-log share the same on-disk store handle.
+   Documented under [[file:docs/operator/mobile-hud.md][docs/operator/mobile-hud.md]].
+
    - CameraX capture → byte buffers → Rust core via UniFFI.
    - Foreground service for the duration of an active session only;
      stops when the session ends.
