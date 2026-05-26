@@ -84,12 +84,18 @@ pub enum ApparentPlaceError {
 /// Residual 1σ uncertainty after applying classical annual aberration.
 ///
 /// The classical formulation accounts for Earth's heliocentric orbital
-/// velocity (~30 km/s, peak shift ~20″). Unmodelled terms include
-/// diurnal aberration (observer rotation about Earth's axis, ≤ 0.32″),
-/// relativistic second-order terms (~v²/c², sub-mas), and the small
-/// difference between geocenter and observer in the velocity. Lump
-/// these into a 0.1″ residual.
-const ABERRATION_RESIDUAL_SIGMA_RAD: f64 = 0.1 * std::f64::consts::PI / (180.0 * 3600.0);
+/// velocity (~30 km/s, peak shift ~20″). Unmodelled or approximated
+/// contributions, summed in quadrature into a single conservative
+/// floor of ~0.5″ (≈ 2.4e-6 rad):
+///
+/// * Diurnal aberration (observer's rotational velocity about Earth's
+///   axis, peak ~0.32″ at the equator on the meridian) — not modeled.
+/// * Higher-order classical terms and the geocenter↔observer velocity
+///   difference (~0.1″).
+/// * Small numerical-derivative noise from the 60 s centered VSOP87
+///   finite difference used for Earth's heliocentric velocity (well
+///   below 0.01″ in practice).
+const ABERRATION_RESIDUAL_SIGMA_RAD: f64 = 0.5 * std::f64::consts::PI / (180.0 * 3600.0);
 
 /// Speed of light in m/s.
 const C_M_PER_S: f64 = 299_792_458.0;
@@ -475,7 +481,7 @@ fn finalize_to_horizontal(
     horizontal.altitude = alt_after_dip + refraction.value.radians();
 
     // Sigma budget: refraction sigma + horizon dip sigma + aberration
-    // placeholder. Combined in quadrature.
+    // residual. Combined in quadrature.
     let dip_sigma = observer.horizon_dip_sigma();
     let aberration_sigma = Sigma::new(ABERRATION_RESIDUAL_SIGMA_RAD).unwrap();
     let sigma = refraction
@@ -691,6 +697,114 @@ mod tests {
         assert!(
             (15.0..=25.0).contains(&arcsec),
             "aberration shift {arcsec}\" out of expected ~20.5\" band"
+        );
+    }
+
+    /// Skyfield cross-check: apparent (RA, Dec) of Vega at 2024-01-03
+    /// 05:00:00 UTC (near Earth perihelion, ~30.28 km/s heliocentric
+    /// speed). Reference computed offline with Skyfield + DE421, using
+    /// the BSC catalog values for Vega's position, proper motion, and
+    /// parallax. Tolerance is 1\" in each coordinate.
+    #[test]
+    fn vega_apparent_radec_matches_skyfield_at_perihelion() {
+        let utc = chrono::Utc
+            .with_ymd_and_hms(2024, 1, 3, 5, 0, 0)
+            .single()
+            .unwrap();
+        let tt = utc_to_tt(utc).unwrap();
+
+        // Hardcoded Skyfield reference (apparent of date, includes
+        // proper motion + precession + nutation + annual aberration
+        // + Sun light-deflection + frame bias).
+        let ref_ra_deg = 279.429_412_950_88;
+        let ref_dec_deg = 38.804_422_578_29;
+
+        // Build pipeline state for Vega (HR 7001) up through the
+        // aberration step, matching `star_apparent_place` minus the
+        // topocentric/horizontal stages.
+        let vega = crate::by_hr(7001).unwrap();
+        let pm = position_at(vega, tt);
+        let j2000_eq = Equatorial {
+            ra: pm.ra_rad,
+            dec: pm.dec_rad,
+        };
+        let mean_eq = apply_precession(j2000_eq, tt);
+        let nu = nutation(tt);
+        let true_eq = apply_nutation(mean_eq, nu.delta_psi, nu.delta_epsilon, tt);
+        let app = apply_annual_aberration(true_eq, tt);
+
+        let ra_deg = app.ra.to_degrees();
+        let dec_deg = app.dec.to_degrees();
+        let dra_arcsec = (ra_deg - ref_ra_deg) * 3600.0 * dec_deg.to_radians().cos();
+        let ddec_arcsec = (dec_deg - ref_dec_deg) * 3600.0;
+        assert!(
+            dra_arcsec.abs() < 1.0,
+            "Vega apparent RA differs from Skyfield by {dra_arcsec:.3}\" (>1\")"
+        );
+        assert!(
+            ddec_arcsec.abs() < 1.0,
+            "Vega apparent Dec differs from Skyfield by {ddec_arcsec:.3}\" (>1\")"
+        );
+    }
+
+    /// At the ecliptic pole, Earth's orbital velocity is perpendicular
+    /// to the line of sight, so classical aberration produces the
+    /// maximum shift v/c. At perihelion v ≈ 30.28 km/s ⇒ 20.83\";
+    /// at aphelion v ≈ 29.30 km/s ⇒ 20.16\". Verify the magnitude is
+    /// inside a 0.5\" band around the time-of-year expected value.
+    #[test]
+    fn ecliptic_pole_aberration_magnitude_within_half_arcsec() {
+        let utc = chrono::Utc
+            .with_ymd_and_hms(2024, 1, 3, 5, 0, 0)
+            .single()
+            .unwrap();
+        let tt = utc_to_tt(utc).unwrap();
+        let eps = crate::frame::mean_obliquity(tt);
+        let true_eq = Equatorial {
+            ra: 1.5 * std::f64::consts::PI,
+            dec: std::f64::consts::FRAC_PI_2 - eps,
+        };
+        let app = apply_annual_aberration(true_eq, tt);
+        let (sa0, ca0) = true_eq.ra.sin_cos();
+        let (sdec0, cdec0) = true_eq.dec.sin_cos();
+        let (sa1, ca1) = app.ra.sin_cos();
+        let (sdec1, cdec1) = app.dec.sin_cos();
+        let dot = (cdec0 * ca0) * (cdec1 * ca1) + (cdec0 * sa0) * (cdec1 * sa1) + sdec0 * sdec1;
+        let arcsec = dot.clamp(-1.0, 1.0).acos() * 180.0 * 3600.0 / std::f64::consts::PI;
+        // Expected ~20.83\" at perihelion; tolerance 0.5\".
+        let expected = 20.83;
+        assert!(
+            (arcsec - expected).abs() < 0.5,
+            "ecliptic-pole aberration shift {arcsec:.3}\" \
+             differs from expected {expected}\" by more than 0.5\""
+        );
+    }
+
+    /// A star at the apex of Earth's heliocentric motion (line of
+    /// sight parallel to v) receives zero classical-aberration shift.
+    /// At 2024-01-03 05:00 UTC the apex is at ICRS (RA ≈ 191.00°,
+    /// Dec ≈ -4.72°). Verify the shift is ≤ 2\".
+    #[test]
+    fn apex_direction_aberration_is_near_zero() {
+        let utc = chrono::Utc
+            .with_ymd_and_hms(2024, 1, 3, 5, 0, 0)
+            .single()
+            .unwrap();
+        let tt = utc_to_tt(utc).unwrap();
+        let true_eq = Equatorial {
+            ra: 190.997_677_f64.to_radians(),
+            dec: (-4.724_983_f64).to_radians(),
+        };
+        let app = apply_annual_aberration(true_eq, tt);
+        let (sa0, ca0) = true_eq.ra.sin_cos();
+        let (sdec0, cdec0) = true_eq.dec.sin_cos();
+        let (sa1, ca1) = app.ra.sin_cos();
+        let (sdec1, cdec1) = app.dec.sin_cos();
+        let dot = (cdec0 * ca0) * (cdec1 * ca1) + (cdec0 * sa0) * (cdec1 * sa1) + sdec0 * sdec1;
+        let arcsec = dot.clamp(-1.0, 1.0).acos() * 180.0 * 3600.0 / std::f64::consts::PI;
+        assert!(
+            arcsec <= 2.0,
+            "apex-direction aberration shift {arcsec:.3}\" should be ≤ 2\""
         );
     }
 }
