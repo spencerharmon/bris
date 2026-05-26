@@ -18,7 +18,7 @@
 use bris_core::time::{Tt, JD_J2000};
 use bris_vision::{
     extract_halo_pixels, extract_multi_saturated_centroids, refine_centroid_subpixel, Frame,
-    Intrinsics, SaturatedBodyConfig,
+    Intrinsics, SaturatedBodyConfig, DEFAULT_GAIN_E_PER_ADU,
 };
 
 #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
@@ -86,7 +86,7 @@ fn subpixel_refinement_beats_integer_sigma_on_saturated_disk() {
         halo.len()
     );
 
-    let refined = refine_centroid_subpixel(&frame, primary, &halo);
+    let refined = refine_centroid_subpixel(&frame, primary, &halo, DEFAULT_GAIN_E_PER_ADU);
     assert!(refined.refined, "Gaussian fit must converge on this synth");
 
     // Position recovered to within a fraction of a pixel — far
