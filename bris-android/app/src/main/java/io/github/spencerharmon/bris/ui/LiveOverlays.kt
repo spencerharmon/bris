@@ -47,11 +47,17 @@ fun ConfidenceEllipseOverlay(
     fix: FfiPublishedFix?,
     sights: List<FfiSight>,
     modifier: Modifier = Modifier,
+    recovered: Boolean = false,
 ) {
     if (fix == null) return
     if (!EllipseGeometry.isDrawable(fix.sigmaMajorNm, fix.sigmaMinorNm)) return
 
-    val scaleNm = EllipseGeometry.pickScaleNm(fix.sigmaMajorNm)
+    val (sMajor, sMinor, orient) = EllipseGeometry.canonicalize(
+        fix.sigmaMajorNm,
+        fix.sigmaMinorNm,
+        fix.orientationRad,
+    )
+    val scaleNm = EllipseGeometry.pickScaleNm(sMajor)
     val measurer = rememberTextMeasurer()
 
     Box(
@@ -95,16 +101,17 @@ fun ConfidenceEllipseOverlay(
 
             // Ellipse polyline.
             val pts = EllipseGeometry.ellipsePoints(
-                fix.sigmaMajorNm,
-                fix.sigmaMinorNm,
-                fix.orientationRad,
+                sMajor,
+                sMinor,
+                orient,
                 pxPerNm,
             )
+            val ellipseColor = if (recovered) Color(0xFFFFC107) else Color(0xFF35D673)
             for (i in pts.indices) {
                 val (e0, n0) = pts[i]
                 val (e1, n1) = pts[(i + 1) % pts.size]
                 drawLine(
-                    color = Color(0xFF35D673),
+                    color = ellipseColor,
                     start = Offset(cx + e0, cy - n0),
                     end = Offset(cx + e1, cy - n1),
                     strokeWidth = 2f,
@@ -118,8 +125,8 @@ fun ConfidenceEllipseOverlay(
                 center = Offset(cx, cy),
             )
 
-            // Scale label bottom-centre, e.g. "1 nm".
-            val scaleText = if (scaleNm >= 10.0) "10 nm" else "1 nm"
+            // Scale label bottom-centre, e.g. "1 nm" / "10 nm".
+            val scaleText = formatScaleLabel(scaleNm)
             val sl = measurer.measure(
                 scaleText,
                 style = TextStyle(color = Color.White, fontSize = 9.sp),
@@ -131,8 +138,46 @@ fun ConfidenceEllipseOverlay(
                     size.height - sl.size.height - 2f,
                 ),
             )
+
+            if (recovered) {
+                val badge = measurer.measure(
+                    "RECOVERED",
+                    style = TextStyle(color = Color(0xFFFFC107), fontSize = 8.sp),
+                )
+                drawText(
+                    badge,
+                    topLeft = Offset(
+                        size.width - badge.size.width - 2f,
+                        2f,
+                    ),
+                )
+                val ts = measurer.measure(
+                    formatTtJdHmsZ(fix.timestampTtJd),
+                    style = TextStyle(color = Color(0xFFFFC107), fontSize = 8.sp),
+                )
+                drawText(
+                    ts,
+                    topLeft = Offset(
+                        size.width - ts.size.width - 2f,
+                        badge.size.height.toFloat() + 2f,
+                    ),
+                )
+            }
         }
     }
+}
+
+private fun formatScaleLabel(scaleNm: Double): String = when {
+    scaleNm >= 999.5 -> "1000 nm"
+    scaleNm >= 99.5 -> "100 nm"
+    scaleNm >= 9.5 -> "10 nm"
+    else -> "1 nm"
+}
+
+private fun formatTtJdHmsZ(ttJd: Double): String {
+    val unixMs = ((ttJd - 2_440_587.5) * 86_400_000.0).toLong()
+    val fmt = java.text.SimpleDateFormat("HH:mm:ss z", java.util.Locale.US)
+    return fmt.format(java.util.Date(unixMs))
 }
 
 private const val ELLIPSE_OVERLAY_DP = 120
@@ -194,24 +239,43 @@ fun RecoveredFixBanner(visible: Boolean, fix: FfiPublishedFix?) {
                 color = Color.White,
                 fontSize = 12.sp,
             )
+            androidx.compose.material3.Text(
+                "original ${formatTtJdHmsZ(fix.timestampTtJd)}",
+                color = Color.White,
+                fontSize = 12.sp,
+            )
         }
     }
 }
 
 /**
- * Provenance badge for a fix (Saint-Hilaire vs cold-start). The
- * provenance field is not yet on the FFI [`FfiPublishedFix`];
- * this function exists so the call site is already wired and a
- * future commit only has to fill in the string lookup.
- *
- * TODO(provenance): once the cold-start fallback PR exposes a
- * `provenance` string on `FfiPublishedFix`, switch on it here.
+ * Provenance chip for a fix: `Saint-Hilaire`, `Cold start`, or
+ * `Cold start (ambiguous)`. Mapped from the stable string label
+ * exposed on [`FfiPublishedFix.provenance`].
  */
 @Composable
-fun ProvenanceBadge(fix: FfiPublishedFix?) {
-    // No-op placeholder. Once the cold-start fallback PR adds a
-    // `provenance` discriminator on FfiPublishedFix, this is
-    // where we render the "Saint-Hilaire" / "Cold start" /
-    // "Cold start (ambiguous)" badge.
-    @Suppress("UNUSED_PARAMETER") fix
+fun ProvenanceBadge(fix: FfiPublishedFix?, modifier: Modifier = Modifier) {
+    if (fix == null) return
+    val label = when (fix.provenance) {
+        "saint_hilaire" -> "Saint-Hilaire"
+        "cold_start" -> "Cold start"
+        "cold_start_ambiguous" -> "Cold start (ambiguous)"
+        else -> fix.provenance
+    }
+    val bg = if (fix.provenance == "saint_hilaire") {
+        Color(0xCC1B5E20)
+    } else {
+        Color(0xCCEF6C00)
+    }
+    Box(
+        modifier = modifier
+            .background(bg)
+            .padding(horizontal = 6.dp, vertical = 2.dp),
+    ) {
+        androidx.compose.material3.Text(
+            label,
+            color = Color.White,
+            fontSize = 10.sp,
+        )
+    }
 }

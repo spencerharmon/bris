@@ -71,7 +71,7 @@ use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 
 use bris_almanac::Observer;
-use bris_core::{time, Latitude, Longitude};
+use bris_core::{time, Hemisphere, Latitude, Longitude};
 use bris_streaming::{
     EngineConfig as CoreEngineConfig, EngineDiagnostics, PublishedFix, PushError, StreamingEngine,
 };
@@ -265,6 +265,14 @@ pub struct FfiEngineConfig {
     /// [`bris_streaming::EngineConfig::horizon_analysis_max_long_edge_px`]
     /// for the resolver contract.
     pub horizon_analysis_max_long_edge_px: Option<u32>,
+
+    /// Coarse hemisphere hint for the cold-start CoP solver,
+    /// expressed as the case-insensitive string `"N"` (or
+    /// `"north"`) / `"S"` (or `"south"`). `None` leaves the
+    /// engine default (no hint; two-candidate cold-start
+    /// results are not auto-published). Wires through to
+    /// [`bris_streaming::ColdStartEngineConfig::coarse_hemisphere`].
+    pub cold_start_coarse_hemisphere: Option<String>,
 }
 
 impl FfiEngineConfig {
@@ -307,6 +315,9 @@ impl FfiEngineConfig {
         // preserves the sensible behavior.
         if let Some(cap) = self.horizon_analysis_max_long_edge_px {
             cfg.horizon_analysis_max_long_edge_px = Some(cap);
+        }
+        if let Some(h) = self.cold_start_coarse_hemisphere {
+            cfg.cold_start.coarse_hemisphere = Some(parse_hemisphere(&h)?);
         }
         Ok(cfg)
     }
@@ -562,6 +573,18 @@ impl From<&EngineDiagnostics> for DiagnosticSnapshot {
 /// exhaustively; any future variant falls back to `"{:?}"`
 /// debug formatting so adding a provider does not gate a
 /// release on this FFI shim.
+fn parse_hemisphere(raw: &str) -> Result<Hemisphere, FfiError> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "n" | "north" => Ok(Hemisphere::North),
+        "s" | "south" => Ok(Hemisphere::South),
+        other => Err(FfiError::InvalidArgument {
+            detail: format!(
+                "cold_start_coarse_hemisphere={other:?} invalid; expected N/S/north/south"
+            ),
+        }),
+    }
+}
+
 fn format_horizon_provenance(p: bris_vision::HorizonProvenance) -> String {
     use bris_vision::{HorizonProvenance as HP, OpticalKind};
     #[allow(unreachable_patterns, clippy::match_wildcard_for_single_variants)]

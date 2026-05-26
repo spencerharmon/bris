@@ -39,7 +39,6 @@ import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -73,7 +72,9 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
 import uniffi.bris_ffi.FfiEngineConfig
 import uniffi.bris_ffi.FfiIntrinsics
@@ -187,7 +188,10 @@ fun LiveScreen(
     val engine = remember(context) {
         SessionHolder.acquire(
             context = context,
-            configFactory = { defaultEngineConfig() },
+            configFactory = {
+                val hemi = runBlocking { prefs.coarseHemisphereFlow.first() }
+                defaultEngineConfig(coarseHemisphere = hemi)
+            },
             pbrisSink = { line ->
                 if (debugCaptureEnabled) debugBuffer.appendPbris(line)
             },
@@ -203,32 +207,26 @@ fun LiveScreen(
             coreVersionProvider = { version().brisFfi },
         )
     }
-    DisposableEffect(engine) {
-        onDispose {
-            // Engine is owned by SessionHolder for process lifetime;
-            // closing here would tear it down on navigation, defeating
-            // the SightLog screen's recent_sights() lookup.
-        }
-    }
-
     val snapshot by engine.snapshot.collectAsState()
     val sessionStatus by recorder.status.collectAsState()
 
     // ----- Pool / last-persisted / current-fix UI state -----
-    var lastPersistedFix by remember { mutableStateOf<FfiPublishedFix?>(null) }
+    var recoveredFix by remember { mutableStateOf<FfiPublishedFix?>(null) }
     var showRecoveredBanner by remember { mutableStateOf(false) }
     var liveFix by remember { mutableStateOf<FfiPublishedFix?>(null) }
     var poolSights by remember { mutableStateOf<List<FfiSight>>(emptyList()) }
 
     // On screen entry, fetch the most-recent persisted fix off
-    // the UI thread and show the recovery banner for 10 s.
+    // the UI thread and show the recovery banner for 10 s. The
+    // recovered value renders into a *separate* overlay state
+    // (yellow ellipse, RECOVERED badge) so an operator can't
+    // mistake it for a live solution.
     LaunchedEffect(engine) {
         val recovered = withContext(Dispatchers.IO) {
             runCatching { engine.lastPersistedFix() }.getOrNull()
         }
         if (recovered != null) {
-            lastPersistedFix = recovered
-            liveFix = liveFix ?: recovered
+            recoveredFix = recovered
             showRecoveredBanner = true
             delay(RECOVERED_BANNER_MS)
             showRecoveredBanner = false
@@ -236,12 +234,18 @@ fun LiveScreen(
     }
 
     // Every new published fix refreshes the live-fix overlay
-    // and re-reads the in-memory sight pool. `pool_sights()` is
-    // cheap (in-memory) so it's safe at fix cadence.
+    // and re-reads the in-memory sight pool. Both `pool_sights()`
+    // and the collect itself originate on the engine's worker
+    // thread, but state writes happen on Main; explicitly hop
+    // to IO for the JNI getter so the Main thread never blocks
+    // on the engine mutex.
     LaunchedEffect(engine) {
         engine.fixes.collect { fix ->
             liveFix = fix
-            poolSights = runCatching { engine.poolSights() }.getOrDefault(emptyList())
+            recoveredFix = null
+            poolSights = withContext(Dispatchers.IO) {
+                runCatching { engine.poolSights() }.getOrDefault(emptyList())
+            }
         }
     }
     val captureActive = sessionStatus is SessionStatus.Capturing ||
@@ -260,8 +264,9 @@ fun LiveScreen(
         // even when the column scrolls; align manually because
         // the column is left-aligned at (0,0).
         ConfidenceEllipseOverlay(
-            fix = liveFix,
+            fix = liveFix ?: recoveredFix,
             sights = poolSights,
+            recovered = liveFix == null && recoveredFix != null,
             modifier = Modifier
                 .align(Alignment.TopEnd)
                 .padding(12.dp),
@@ -300,8 +305,9 @@ fun LiveScreen(
                 captureActive = captureActive,
                 bufferState = bufferState,
             )
-            RecoveredFixBanner(visible = showRecoveredBanner, fix = lastPersistedFix)
+            RecoveredFixBanner(visible = showRecoveredBanner, fix = recoveredFix)
             PoolSummaryChip(sights = poolSights)
+            ProvenanceBadge(fix = liveFix ?: recoveredFix)
             Spacer(Modifier.height(12.dp))
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 if (captureActive) {
@@ -696,7 +702,7 @@ private fun placeholderIntrinsicsFor(width: Int, height: Int): FfiIntrinsics {
  * (equator/Greenwich, 2 m eye height); real callers will read
  * the operator's stored observer settings.
  */
-private fun defaultEngineConfig(): FfiEngineConfig = FfiEngineConfig(
+private fun defaultEngineConfig(coarseHemisphere: String? = null): FfiEngineConfig = FfiEngineConfig(
     observer = FfiObserver(
         latitudeDeg = 0.0,
         longitudeDeg = 0.0,
@@ -722,6 +728,7 @@ private fun defaultEngineConfig(): FfiEngineConfig = FfiEngineConfig(
     horizonAnalysisWidth = null,
     horizonAnalysisHeight = null,
     horizonAnalysisMaxLongEdgePx = 1280u,
+    coldStartCoarseHemisphere = coarseHemisphere,
 )
 
 /**

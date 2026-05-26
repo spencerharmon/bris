@@ -17,15 +17,58 @@ import kotlin.math.hypot
 class EllipseGeometryTest {
 
     @Test
-    fun pickScaleNm_smallSigma_uses1nm() {
-        assertEquals(1.0, EllipseGeometry.pickScaleNm(0.1), 0.0)
-        assertEquals(1.0, EllipseGeometry.pickScaleNm(0.9), 0.0)
+    fun pickScaleNm_tiers_1_10_100_1000() {
+        assertEquals(1.0, EllipseGeometry.pickScaleNm(0.5), 0.0)
+        assertEquals(10.0, EllipseGeometry.pickScaleNm(5.0), 0.0)
+        assertEquals(100.0, EllipseGeometry.pickScaleNm(50.0), 0.0)
+        assertEquals(1000.0, EllipseGeometry.pickScaleNm(500.0), 0.0)
+        // Capped at 1000 nm even if the operator hands us a huge
+        // value; isDrawable will suppress drawing above MAX_DRAWABLE_NM.
+        assertEquals(1000.0, EllipseGeometry.pickScaleNm(5000.0), 0.0)
     }
 
     @Test
-    fun pickScaleNm_largeSigma_uses10nm() {
-        assertEquals(10.0, EllipseGeometry.pickScaleNm(5.0), 0.0)
-        assertEquals(10.0, EllipseGeometry.pickScaleNm(100.0), 0.0)
+    fun canonicalize_swapsAxesAndRotates90() {
+        val (major, minor, orient) =
+            EllipseGeometry.canonicalize(0.5, 5.0, 0.25)
+        assertEquals(5.0, major, 0.0)
+        assertEquals(0.5, minor, 0.0)
+        assertEquals(0.25 + Math.PI / 2.0, orient, 1e-12)
+    }
+
+    @Test
+    fun canonicalize_leavesWellOrderedInputsAlone() {
+        val (major, minor, orient) =
+            EllipseGeometry.canonicalize(5.0, 0.5, 0.3)
+        assertEquals(5.0, major, 0.0)
+        assertEquals(0.5, minor, 0.0)
+        assertEquals(0.3, orient, 0.0)
+    }
+
+    @Test
+    fun canonicalize_swappedEllipseMatchesOriginal() {
+        // Drawing the swapped (major, minor, orient + π/2) must
+        // produce the same point set as drawing (minor, major,
+        // orient) directly, modulo ordering.
+        val direct = EllipseGeometry.ellipsePoints(
+            sigmaMajorNm = 5.0,
+            sigmaMinorNm = 0.5,
+            orientationRad = 0.0,
+            pxPerNm = 10f,
+        )
+        val (m, n, o) = EllipseGeometry.canonicalize(0.5, 5.0, 0.0)
+        val swapped = EllipseGeometry.ellipsePoints(
+            sigmaMajorNm = m,
+            sigmaMinorNm = n,
+            orientationRad = o,
+            pxPerNm = 10f,
+        )
+        val directExtent = direct.maxOf { kotlin.math.hypot(it.first, it.second) }
+        val swappedExtent = swapped.maxOf { kotlin.math.hypot(it.first, it.second) }
+        assertEquals(directExtent.toDouble(), swappedExtent.toDouble(), 1e-3)
+        val directMaxN = direct.maxOf { kotlin.math.abs(it.second) }
+        val swappedMaxN = swapped.maxOf { kotlin.math.abs(it.second) }
+        assertEquals(directMaxN.toDouble(), swappedMaxN.toDouble(), 1e-3)
     }
 
     @Test

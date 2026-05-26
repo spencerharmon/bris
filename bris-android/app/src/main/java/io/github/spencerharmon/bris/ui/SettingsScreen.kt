@@ -136,20 +136,22 @@ fun SettingsScreen(prefs: Prefs, onBack: () -> Unit) {
         HorizontalDivider()
 
         // ---- Coarse hemisphere hint (cold-start CoP) ----
-        // Disabled in this build: the cold-start fallback PR
-        // exposes `EngineConfig::cold_start.coarse_hemisphere`
-        // on the FFI, after which this toggle wires to it.
-        // Until then we persist the operator's pick locally so
-        // the value is ready to be picked up the moment the
-        // FFI catches up.
+        // Wired through to
+        // `FfiEngineConfig::cold_start_coarse_hemisphere`,
+        // which the engine forwards to
+        // `bris_streaming::ColdStartEngineConfig::coarse_hemisphere`.
+        // Picked up the next time the streaming engine is
+        // constructed (process start / SessionHolder re-acquire);
+        // changing the setting mid-session does not retro-apply
+        // to the in-flight engine.
         Text(
             "Coarse hemisphere hint",
             style = androidx.compose.material3.MaterialTheme.typography.titleMedium,
         )
         Text(
             "Disambiguates the cold-start CoP solver between the two " +
-                "latitude solutions on the first fix. Requires the next " +
-                "engine update; setting it now persists the choice.",
+                "latitude solutions on the first fix. Applied to the next " +
+                "engine startup.",
             style = androidx.compose.material3.MaterialTheme.typography.bodySmall,
         )
         val coarseHemi by prefs.coarseHemisphereFlow.collectAsState(initial = null)

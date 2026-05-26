@@ -43,6 +43,7 @@ android {
         targetSdk = 34
         versionCode = 1
         versionName = "0.1.0"
+        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         // Restrict packaged ABIs to the two we actually cross-
         // compile bris-ffi for: arm64-v8a (real devices) and
         // x86_64 (emulator).
@@ -167,6 +168,15 @@ dependencies {
     // android.jar ships org.json as stubs ("Stub!" at runtime);
     // JVM unit tests need the real implementation.
     testImplementation("org.json:json:20240303")
+
+    // Instrumented tests (Compose smoke tests for HUD overlays).
+    // Run under Gradle's `connectedAndroidTest` task in CI.
+    androidTestImplementation("androidx.test:runner:1.6.2")
+    androidTestImplementation("androidx.test:rules:1.6.1")
+    androidTestImplementation("androidx.test.ext:junit:1.2.1")
+    androidTestImplementation(composeBom)
+    androidTestImplementation("androidx.compose.ui:ui-test-junit4")
+    debugImplementation("androidx.compose.ui:ui-test-manifest")
 }
 
 // ---------------------------------------------------------------------------
