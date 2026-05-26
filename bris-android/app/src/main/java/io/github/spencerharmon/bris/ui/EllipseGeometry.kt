@@ -1,7 +1,10 @@
 package io.github.spencerharmon.bris.ui
 
+import kotlin.math.ceil
 import kotlin.math.cos
+import kotlin.math.log10
 import kotlin.math.max
+import kotlin.math.pow
 import kotlin.math.sin
 
 /**
@@ -24,12 +27,19 @@ object EllipseGeometry {
 
     /**
      * Pick the displayed scale (in nautical miles) for the ellipse
-     * frame. Auto-scales between two operator-friendly steps so the
-     * scale label is always either "1 nm" or "10 nm" — easier to
-     * read at a glance than an arbitrary number.
+     * frame. Tiers 1 / 10 / 100 / 1000 nm: the smallest power of
+     * ten ≥ `sigma_major_nm * 1.2` (with the 20 % slack chosen so
+     * the ellipse outline doesn't kiss the frame at the picked
+     * tier). Capped at 1000 nm — anything larger is suppressed by
+     * [`isDrawable`] anyway.
      */
-    fun pickScaleNm(sigmaMajorNm: Double): Double =
-        if (sigmaMajorNm > LARGE_ELLIPSE_THRESHOLD_NM) 10.0 else 1.0
+    fun pickScaleNm(sigmaMajorNm: Double): Double {
+        if (!sigmaMajorNm.isFinite() || sigmaMajorNm <= 0.0) return 1.0
+        val target = sigmaMajorNm * SCALE_SLACK
+        val exp = ceil(log10(target)).toInt().coerceAtLeast(0)
+        val picked = 10.0.pow(exp)
+        return picked.coerceAtMost(MAX_SCALE_NM)
+    }
 
     /**
      * Pixels-per-nm given a square canvas of [canvasPx] pixels on a
@@ -99,9 +109,25 @@ object EllipseGeometry {
         return (-east * r to -north * r) to (east * r to north * r)
     }
 
-    /** Largest σ_major (nm) before we switch to the 10-nm scale. */
-    private const val LARGE_ELLIPSE_THRESHOLD_NM = 1.0
     private const val MARGIN_FRAC = 0.12f
+    private const val SCALE_SLACK = 1.2
+    private const val MAX_SCALE_NM = 1000.0
+
+    /**
+     * If `sigma_minor > sigma_major`, swap them and add π/2 to
+     * the orientation so the semi-major axis remains the longer
+     * one. The covariance interpretation is preserved.
+     */
+    fun canonicalize(
+        sigmaMajorNm: Double,
+        sigmaMinorNm: Double,
+        orientationRad: Double,
+    ): Triple<Double, Double, Double> =
+        if (sigmaMinorNm > sigmaMajorNm) {
+            Triple(sigmaMinorNm, sigmaMajorNm, orientationRad + Math.PI / 2.0)
+        } else {
+            Triple(sigmaMajorNm, sigmaMinorNm, orientationRad)
+        }
 
     /** True when the covariance is non-pathological enough to draw. */
     fun isDrawable(sigmaMajorNm: Double, sigmaMinorNm: Double): Boolean =

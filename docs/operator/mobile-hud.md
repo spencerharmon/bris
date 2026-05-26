@@ -8,16 +8,24 @@ camera preview:
 A compass-rose-aligned (north-up, east-right) overlay showing the
 current fix's 1σ covariance ellipse:
 
-- Frame: square box with a `N` label at the top and either
-  `1 nm` or `10 nm` along the bottom (auto-selected at the 1 nm
-  σ_major threshold).
+- Frame: square box with a `N` label at the top and an
+  auto-selected `1 nm` / `10 nm` / `100 nm` / `1000 nm` scale
+  along the bottom (smallest power of ten that comfortably
+  fits the current σ_major).
 - Ellipse semi-axes scaled by `sigma_major_nm` /
   `sigma_minor_nm`, rotated by `orientation_rad` (clockwise
-  from north of the semi-major axis).
+  from north of the semi-major axis). The major/minor pair is
+  canonicalised before drawing — if the engine reports
+  `sigma_minor > sigma_major`, the axes are swapped and the
+  orientation rotated 90°.
 - Centre dot marks the fix point.
 - Faint blue lines through the centre are the contributing
   sights' lines of position (perpendicular to each sight's
   azimuth) — the classic "cocked-hat" intersection picture.
+- When the displayed fix is the *recovered* fix (no live fix
+  yet this session), the ellipse outline is yellow and a
+  yellow `RECOVERED` badge plus the fix's original timestamp
+  (`HH:mm:ss z`) appear in the top-right of the chip.
 
 Empty / non-finite / pathological covariances suppress the
 overlay rather than drawing nonsense.
@@ -32,10 +40,22 @@ on every published fix from the in-memory sight pool
 ## Recovered-fix banner
 
 When the screen opens, the engine's `lastPersistedFix()` is
-consulted. If present, a blue banner reads "Recovered fix from
-previous session" with the lat/lon/σ, and fades after 10 s.
-The current fix overlay shows the recovered value until a new
-fix arrives.
+consulted (off the Main thread). If present, a blue banner reads
+"Recovered fix from previous session" with the lat/lon/σ and
+the fix's original timestamp, and fades after 10 s. The
+confidence-ellipse overlay shows the recovered fix in the
+yellow `RECOVERED` style until the engine publishes its first
+live fix this session, at which point the recovered state is
+cleared and the overlay reverts to the normal green ellipse.
+
+## Provenance badge
+
+A small chip below the action buttons labels the displayed
+fix's solver provenance: `Saint-Hilaire` (green) for the
+standard intercept-method fix, `Cold start` (orange) for the
+cold-start CoP fallback, or `Cold start (ambiguous)` (orange)
+when the cold-start solver returned two candidates and the
+coarse-hemisphere hint picked one.
 
 ## Sight log screen
 
@@ -51,8 +71,10 @@ Now split into two sections:
 
 ## Settings — coarse-hemisphere hint
 
-Settings now has a `Coarse hemisphere hint` radio group
-(`Unset` / `North` / `South`). The choice is persisted locally
-but does not yet propagate to the engine; the next engine
-update will wire it to `EngineConfig::cold_start.coarse_hemisphere`
-for cold-start CoP disambiguation.
+Settings has a `Coarse hemisphere hint` radio group
+(`Unset` / `North` / `South`). The choice persists locally and
+is applied to the next streaming-engine startup as
+`FfiEngineConfig.cold_start_coarse_hemisphere`, which the
+engine forwards to `ColdStartEngineConfig::coarse_hemisphere`
+for cold-start CoP disambiguation. Changing the setting
+mid-session does not retro-apply to the in-flight engine.
