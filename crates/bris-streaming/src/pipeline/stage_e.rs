@@ -96,8 +96,9 @@ use crate::config::EngineConfig;
 use crate::fix::{DominantSource, FixProvenance, PublishedFix};
 use crate::pipeline::BodyDetection;
 use bris_almanac::{
-    body_apparent_place, coord::last_rad, frame::nutation, mean_obliquity, star_apparent_place,
-    ApparentPlace, Observer, SolarSystemBody,
+    body_apparent_place, body_geocentric_apparent, coord::gmst_rad, frame::nutation,
+    mean_obliquity, star_apparent_place, star_geocentric_apparent, ApparentPlace, Observer,
+    SolarSystemBody,
 };
 use bris_core::time::Tt;
 use bris_core::{Sigma, Uncertain};
@@ -388,6 +389,7 @@ pub(crate) fn run(
     window: &mut SightWindow,
     cfg: &EngineConfig,
     last_publication: Option<Instant>,
+    has_prior: bool,
 ) -> StageEOutcome {
     let mut out = StageEOutcome::default();
 
@@ -454,7 +456,7 @@ pub(crate) fn run(
         debug!("Stage E: skipping publication (throttle window not yet elapsed)",);
         return out;
     }
-    try_publish(window, now_tt, cfg, &mut out);
+    try_publish(window, now_tt, cfg, has_prior, &mut out);
     if out.published.is_some() {
         let _ = window.take_change_count();
     }
@@ -760,6 +762,7 @@ fn try_publish(
     window: &SightWindow,
     now_tt: Option<Tt>,
     cfg: &EngineConfig,
+    has_prior: bool,
     out: &mut StageEOutcome,
 ) {
     out.publish_attempted = true;
@@ -779,10 +782,20 @@ fn try_publish(
     if !cfg.cold_start.enabled {
         return;
     }
-    if !matches!(saint_hilaire_err, FixError::SingularGeometry) {
-        // InsufficientSights / NonFinite are not the
-        // cold-start trigger; cold-start needs >= 2 valid
-        // sights too, and NonFinite would propagate.
+    // Cold-start triggers when either (a) LSQ is singular OR
+    // (b) the engine has no PositionPrior at all and SH could
+    // not produce a fix (cold-start is the only way to bootstrap
+    // the very first fix without a prior). TODO: also trigger
+    // when SH succeeds but |intercept| exceeds a configurable
+    // threshold; deferred to keep this change focused on the
+    // PR #22 BLOCKER.
+    let trigger_singular = matches!(saint_hilaire_err, FixError::SingularGeometry);
+    let trigger_no_prior = !has_prior
+        && matches!(
+            saint_hilaire_err,
+            FixError::SingularGeometry | FixError::InsufficientSights(_)
+        );
+    if !(trigger_singular || trigger_no_prior) {
         return;
     }
     let circles = circles_from_sights(window, cfg.observer);
@@ -809,11 +822,14 @@ fn try_publish(
             primary, secondary, ..
         }) => {
             let Some(hemi) = cfg.cold_start.coarse_hemisphere else {
-                info!(
-                    "cold-start fix has 2 candidates, no hemisphere hint configured; not publishing"
-                );
+                // Counter (cold_start_ambiguous_skipped) is the
+                // operator-visible source of truth; we log at
+                // TRACE to avoid the once-per-Stage-E INFO spam.
                 // TODO: surface candidates on a follow-up
                 // FFI channel so the operator can pick one.
+                trace!(
+                    "cold-start fix has 2 candidates, no hemisphere hint configured; not publishing"
+                );
                 out.cold_start_ambiguous_skipped = true;
                 return;
             };
@@ -826,7 +842,7 @@ fn try_publish(
                 // one closer to the hint hemisphere (primary by
                 // default) but treat as ambiguous skip so the
                 // operator sees the hint disagreement.
-                info!(
+                trace!(
                     primary_lat_deg = primary.lat.degrees(),
                     secondary_lat_deg = secondary.lat.degrees(),
                     "cold-start two candidates: neither in configured hemisphere; not publishing"
@@ -855,7 +871,7 @@ fn try_publish(
             }
         }
         Ok(ColdStartResult::Inconsistent { .. }) => {
-            info!("cold-start fix returned Inconsistent; not publishing");
+            trace!("cold-start fix returned Inconsistent; not publishing");
             out.cold_start_inconsistent = true;
         }
         Err(ColdStartError::Disjoint) => {
@@ -974,34 +990,13 @@ fn circles_from_sights(window: &SightWindow, observer: Observer) -> Vec<CircleOf
     let mut out = Vec::with_capacity(window.len());
     for s in window.iter() {
         let jd_ut1 = s.anchor_tt.julian_date();
-        let apparent_at_obs = match &s.body {
-            SightBody::SolarSystem(body) => {
-                body_apparent_place(*body, s.anchor_tt, jd_ut1, observer)
-            }
-            SightBody::Star { hr } => {
-                let Some(rec) = bris_almanac::by_hr(*hr) else {
-                    trace!(hr, "circles_from_sights: unknown HR id; skipping");
-                    continue;
-                };
-                star_apparent_place(rec, s.anchor_tt, jd_ut1, observer)
-            }
-        };
-        let Ok(_apparent) = apparent_at_obs else {
-            continue;
-        };
-        // Body GP: declination from equatorial coordinates,
-        // longitude from -GHA. Both derived from the same
-        // apparent-place chain via the equatorial-of-date /
-        // LAST relationship: GHA(body) = LAST(observer) -
-        // observer_lon - RA(body), but we already have the
-        // horizontal direction at `observer`, so reconstruct
-        // (dec, GHA) by inverting the equatorial->horizontal
-        // step at the equator (lon = 0, the body's GP is the
-        // sub-point).
-        //
-        // Cleaner: recompute geocentric equatorial of the
-        // body and convert to GP directly via GMST at the
-        // sight instant.
+        // Body GP from the *geocentric* apparent place: latitude =
+        // declination, longitude = -GHA. Running the full
+        // apparent-place chain (which applies refraction + diurnal
+        // parallax at the engine observer) would bake observer-
+        // dependent biases into the GP — systematically wrong by
+        // tens of arcmin (refraction at low altitude) and up to ~1°
+        // (lunar parallax). See PR #22 review.
         let Some((gp_lat_rad, gp_lon_rad)) = body_geographic_position(s.body, s.anchor_tt, jd_ut1)
         else {
             continue;
@@ -1051,67 +1046,36 @@ fn circles_from_sights(window: &SightWindow, observer: Observer) -> Vec<CircleOf
 /// Compute the body's geographic (sub-point) position at the
 /// given instant: latitude = declination, longitude = -GHA
 /// wrapped to (-π, π].
+///
+/// Derived from the GEOCENTRIC apparent equatorial-of-date
+/// (RA, Dec) via [`bris_almanac::body_geocentric_apparent`] (or
+/// the stellar sibling) and Greenwich Apparent Sidereal Time:
+/// GHA = GAST - RA, GP longitude = -GHA. No observer, no
+/// refraction, no diurnal parallax — those are observer-
+/// dependent shifts and must not enter the GP.
 fn body_geographic_position(body: SightBody, tt: Tt, jd_ut1: f64) -> Option<(f64, f64)> {
-    // Use a sub-point observer (lat=0, lon=0, eye_height=0) so
-    // the apparent-place chain runs without diurnal-parallax
-    // distortion on the *geocentric* RA/Dec we care about; we
-    // recover GHA from LAST at lon=0 = GAST.
-    let observer = Observer {
-        latitude: bris_core::Latitude::EQUATOR,
-        longitude: bris_core::Longitude::PRIME_MERIDIAN,
-        eye_height_m: 0.0,
-        eye_height_sigma_m: 1.0,
-        atmosphere: bris_almanac::refraction::Atmosphere::STANDARD,
-    };
-    // Run apparent_place but recover (RA, Dec) via the
-    // intermediate horizontal: at observer (0, 0) with LAST =
-    // GAST, the hour angle H = GAST - RA, and altitude/azimuth
-    // determine (RA, Dec) only up to the horizontal rotation.
-    // We instead bypass: compute GAST directly and run the
-    // ecliptic/equatorial chain inline. To avoid duplicating
-    // the chain, we leverage the fact that `equatorial_to_
-    // horizontal` at (φ=0, LAST=GAST) gives H = GAST - RA and
-    // altitude = arcsin(cosδ cos H); solving for (δ, RA) from
-    // (alt, az) at the equator is well-defined and one-to-one.
-    //
-    // To keep this concrete and avoid re-deriving the chain,
-    // compute apparent_place at the equator/prime-meridian
-    // observer; from (alt, az) and LAST=GAST recover (H, δ)
-    // then RA = GAST - H.
-    let ap = match body {
-        SightBody::SolarSystem(b) => body_apparent_place(b, tt, jd_ut1, observer).ok()?,
+    let eq = match body {
+        SightBody::SolarSystem(b) => body_geocentric_apparent(b, tt),
         SightBody::Star { hr } => {
             let rec = bris_almanac::by_hr(hr)?;
-            star_apparent_place(rec, tt, jd_ut1, observer).ok()?
+            star_geocentric_apparent(rec, tt)
         }
     };
+    if !eq.ra.is_finite() || !eq.dec.is_finite() {
+        return None;
+    }
+    // GAST = GMST + Δψ cosε (equation of the equinoxes).
     let nu = nutation(tt);
     let eps = mean_obliquity(tt);
-    let gast = last_rad(jd_ut1, 0.0, nu.delta_psi, eps);
-    // Invert equatorial_to_horizontal at φ=0:
-    //   sin(alt) = cosδ cos H
-    //   sin(az) = -sin H cosδ / cos(alt)   (az from north CW)
-    //   cos(az) = (sinδ - sinφ sin(alt))/(cosφ cos(alt)) = sinδ / cos(alt)
-    // Therefore:
-    //   sinδ = cos(alt) cos(az)
-    //   cosδ sin H = -cos(alt) sin(az)
-    //   cosδ cos H = sin(alt)
-    let (sin_alt, cos_alt) = ap.direction.altitude.sin_cos();
-    let (sin_az, cos_az) = ap.direction.azimuth.sin_cos();
-    let sin_dec = (cos_alt * cos_az).clamp(-1.0, 1.0);
-    let dec = sin_dec.asin();
-    let h = (-cos_alt * sin_az).atan2(sin_alt);
-    let ra = (gast - h).rem_euclid(std::f64::consts::TAU);
-    // GHA = GAST - RA, sub-point longitude = -GHA (east-
-    // positive), wrapped to (-π, π].
-    let gha = (gast - ra).rem_euclid(std::f64::consts::TAU);
+    let gast = (gmst_rad(jd_ut1) + nu.delta_psi * eps.cos()).rem_euclid(std::f64::consts::TAU);
+    let gha = (gast - eq.ra).rem_euclid(std::f64::consts::TAU);
     let mut lon = -gha;
     if lon <= -std::f64::consts::PI {
         lon += std::f64::consts::TAU;
     } else if lon > std::f64::consts::PI {
         lon -= std::f64::consts::TAU;
     }
-    Some((dec, lon))
+    Some((eq.dec, lon))
 }
 
 /// Max minus min azimuth across the window's sights, accounting
@@ -1278,7 +1242,7 @@ mod tests {
 
     fn run_try_publish(window: &SightWindow, now: Option<Tt>) -> Option<PublishedFix> {
         let mut out = StageEOutcome::default();
-        try_publish(window, now, &test_cfg_no_cold_start(), &mut out);
+        try_publish(window, now, &test_cfg_no_cold_start(), true, &mut out);
         out.published
     }
 
@@ -1384,16 +1348,49 @@ mod tests {
         }
     }
 
+    /// Build a Sun sight at the given anchor time with a fixed
+    /// LOP azimuth and zero intercept anchored at the AP. The
+    /// LOP azimuth is controlled independently of the Sun's
+    /// actual azimuth so callers can force parallel LOPs (→
+    /// singular LSQ) while still having two distinct body GPs
+    /// for the cold-start circle solver to chew on.
+    fn sun_sight_with_fixed_lop_azimuth(
+        ap_lat_deg: f64,
+        ap_lon_deg: f64,
+        tt_offset_s: f64,
+        lop_azimuth_rad: f64,
+        frame_id: u64,
+    ) -> Sight {
+        let tt = Tt::from_julian_date(JD_J2000 + tt_offset_s / 86_400.0);
+        let ap_lat = bris_core::Latitude::from_degrees(ap_lat_deg).unwrap();
+        let ap_lon = bris_core::Longitude::from_degrees(ap_lon_deg).unwrap();
+        let lop = LineOfPosition {
+            assumed_lat: ap_lat,
+            assumed_lon: ap_lon,
+            azimuth_rad: lop_azimuth_rad,
+            intercept_nm: 0.0,
+            intercept_sigma_nm: Sigma::new(0.1).unwrap(),
+        };
+        Sight {
+            lop,
+            anchor_tt: tt,
+            altitude_sigma_rad: 1e-4,
+            body: SightBody::SolarSystem(SolarSystemBody::Sun),
+            azimuth_rad: lop_azimuth_rad,
+            source_frame_id: FrameId(frame_id),
+            horizon_frame_id: FrameId(frame_id),
+        }
+    }
+
     #[test]
     fn cold_start_path_publishes_when_multi_sight_fix_singular() {
-        // Two same-body sights minutes apart → multi_sight_fix
-        // returns SingularGeometry (azimuth diversity below
-        // threshold). cold_start_fix should produce a result
-        // (TwoCandidates); with a hemisphere hint we publish.
-        // AP chosen so the Sun is above the horizon at
-        // JD_J2000 (UT noon, Sun declination ~-23°).
-        let s1 = realistic_sun_sight(-23.0, 0.0, 0.0, 1);
-        let s2 = realistic_sun_sight(-23.0, 0.0, 60.0, 2);
+        // Two Sun sights with PARALLEL LOPs (same azimuth) →
+        // rank-deficient design → multi_sight_fix returns
+        // SingularGeometry. Anchor times an hour apart so the
+        // Sun's geocentric GP moves ≈15° in longitude, giving
+        // cold-start two distinct circles to intersect.
+        let s1 = sun_sight_with_fixed_lop_azimuth(-23.0, 0.0, 0.0, 0.0, 1);
+        let s2 = sun_sight_with_fixed_lop_azimuth(-23.0, 0.0, 3600.0, 0.0, 2);
         let mut w = SightWindow::default();
         w.try_insert(s1, 5);
         w.try_insert(s2, 5);
@@ -1408,27 +1405,33 @@ mod tests {
         cfg.publication_gate.max_ellipse_axis_ratio = f64::INFINITY;
         cfg.publication_gate.max_position_sigma_nm = f64::INFINITY;
         let mut out = StageEOutcome::default();
-        try_publish(&w, Some(s2.anchor_tt), &cfg, &mut out);
+        try_publish(&w, Some(s2.anchor_tt), &cfg, true, &mut out);
         // Either Saint-Hilaire succeeded (unlikely with same-
         // body 60 s apart) OR cold-start published.
         assert!(
             out.published.is_some(),
             "expected a published fix via cold-start fallback"
         );
-        if out.cold_start_attempted {
-            assert!(out.cold_start_published);
-            let p = out.published.unwrap();
-            assert!(matches!(
+        assert!(
+            out.cold_start_attempted,
+            "cold-start path must be attempted with two colocated-GP sights"
+        );
+        assert!(out.cold_start_published);
+        let p = out.published.unwrap();
+        assert!(
+            matches!(
                 p.provenance,
                 FixProvenance::ColdStart | FixProvenance::ColdStartAmbiguous
-            ));
-        }
+            ),
+            "published provenance must be ColdStart*, got {:?}",
+            p.provenance
+        );
     }
 
     #[test]
     fn cold_start_ambiguous_without_hint_skips_publication() {
-        let s1 = realistic_sun_sight(-23.0, 0.0, 0.0, 1);
-        let s2 = realistic_sun_sight(-23.0, 0.0, 60.0, 2);
+        let s1 = sun_sight_with_fixed_lop_azimuth(-23.0, 0.0, 0.0, 0.0, 1);
+        let s2 = sun_sight_with_fixed_lop_azimuth(-23.0, 0.0, 3600.0, 0.0, 2);
         let mut w = SightWindow::default();
         w.try_insert(s1, 5);
         w.try_insert(s2, 5);
@@ -1436,23 +1439,19 @@ mod tests {
         cfg.cold_start.enabled = true;
         cfg.cold_start.coarse_hemisphere = None;
         let mut out = StageEOutcome::default();
-        try_publish(&w, Some(s2.anchor_tt), &cfg, &mut out);
-        if out.cold_start_attempted
-            && !matches!(
-                out.published.as_ref().map(|p| p.provenance),
-                Some(FixProvenance::SaintHilaire)
-            )
-        {
-            // If cold-start ran and SH didn't quietly produce
-            // a fix, the ambiguous-no-hint path should skip.
-            assert!(
-                out.cold_start_ambiguous_skipped || out.cold_start_published,
-                "cold-start fallback should either publish (Fix variant) or skip ambiguously"
-            );
-            if out.cold_start_ambiguous_skipped {
-                assert!(out.published.is_none());
-            }
-        }
+        try_publish(&w, Some(s2.anchor_tt), &cfg, true, &mut out);
+        assert!(
+            out.cold_start_attempted,
+            "cold-start path must be attempted with two colocated-GP sights"
+        );
+        assert!(
+            out.cold_start_ambiguous_skipped,
+            "ambiguous-no-hint path must mark cold_start_ambiguous_skipped"
+        );
+        assert!(
+            out.published.is_none(),
+            "no fix may publish without a hemisphere hint"
+        );
     }
 
     #[test]
@@ -1466,7 +1465,13 @@ mod tests {
         w.try_insert(dummy_sight(0.001, 10.0_f64.to_radians(), 0.0), 5);
         let cfg = EngineConfig::new(Observer::default_dev());
         let mut out = StageEOutcome::default();
-        try_publish(&w, Some(Tt::from_julian_date(JD_J2000)), &cfg, &mut out);
+        try_publish(
+            &w,
+            Some(Tt::from_julian_date(JD_J2000)),
+            &cfg,
+            true,
+            &mut out,
+        );
         assert!(out.published.is_none(), "10°-spread fix must be gated");
         assert!(out.publish_attempted);
         // Either the LSQ rejected (singular) or the gate did;
@@ -1498,7 +1503,13 @@ mod tests {
         w.try_insert(bad(std::f64::consts::FRAC_PI_2), 5);
         let cfg = EngineConfig::new(Observer::default_dev());
         let mut out = StageEOutcome::default();
-        try_publish(&w, Some(Tt::from_julian_date(JD_J2000)), &cfg, &mut out);
+        try_publish(
+            &w,
+            Some(Tt::from_julian_date(JD_J2000)),
+            &cfg,
+            true,
+            &mut out,
+        );
         assert!(out.published.is_none(), "huge-σ fix must be gated");
         assert!(out.publication_gate_rejection);
     }
@@ -1516,7 +1527,13 @@ mod tests {
         let mut out = StageEOutcome::default();
         // anchor = JD_J2000 (the "younger" sight's anchor);
         // the 7200-s-old sight is 7200s behind it.
-        try_publish(&w, Some(Tt::from_julian_date(JD_J2000)), &cfg, &mut out);
+        try_publish(
+            &w,
+            Some(Tt::from_julian_date(JD_J2000)),
+            &cfg,
+            true,
+            &mut out,
+        );
         assert!(out.published.is_none(), "motion-stale fix must be gated");
         assert!(out.publication_gate_rejection);
     }
@@ -1528,7 +1545,13 @@ mod tests {
         w.try_insert(dummy_sight(0.001, std::f64::consts::FRAC_PI_2, 0.0), 5);
         let cfg = EngineConfig::new(Observer::default_dev());
         let mut out = StageEOutcome::default();
-        try_publish(&w, Some(Tt::from_julian_date(JD_J2000)), &cfg, &mut out);
+        try_publish(
+            &w,
+            Some(Tt::from_julian_date(JD_J2000)),
+            &cfg,
+            true,
+            &mut out,
+        );
         assert!(out.published.is_some(), "clean fix must publish");
         assert!(out.publish_attempted);
         assert!(!out.publication_gate_rejection);

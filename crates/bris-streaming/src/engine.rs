@@ -706,9 +706,17 @@ impl StreamingEngine {
                 ref storage,
                 ref mut sight_window,
                 last_publication,
+                ref last_published_fix,
                 ..
             } = *state;
-            run_stage_e(storage, sight_window, &self.config, last_publication)
+            let has_prior = last_published_fix.is_some();
+            run_stage_e(
+                storage,
+                sight_window,
+                &self.config,
+                last_publication,
+                has_prior,
+            )
         };
         state.stages[STAGE_E].entered += 1;
         if stage_e_outcome.cold_start_attempted {
