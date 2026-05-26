@@ -17,7 +17,8 @@ pub mod observer;
 pub mod refraction;
 
 pub use apparent::{
-    body_apparent_place, star_apparent_place, ApparentPlace, ApparentPlaceError, SolarSystemBody,
+    body_apparent_place, body_geocentric_apparent, star_apparent_place, star_geocentric_apparent,
+    ApparentPlace, ApparentPlaceError, SolarSystemBody,
 };
 pub use catalog::{all_stars, by_hr, navigational_stars, position_at, StarPosition, StarRecord};
 pub use coord::{
