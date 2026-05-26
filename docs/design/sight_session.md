@@ -98,6 +98,33 @@ notion of session.
 └───────────────────────────────────────────────────────────┘
 ```
 
+## Engine defaults relevant to sessions
+
+The streaming engine's default tuning, as of the
+`feat/engine-tuning-gates-counters` PR, supports the
+opportunistic multi-capture flow described above:
+
+- `sight_window_seconds = 7200` (2 h) — a session can take
+  same-body sights 30+ minutes apart and still find them all
+  in the active pool when it composes a fix.
+- `sight_window_capacity = 50` — several bodies x several
+  sights per body fit comfortably.
+- `publication_gate` — fixes are gated on geometric diversity
+  (30° minimum azimuth spread), ellipse axis ratio (≤ 10:1),
+  absolute σ (≤ 50 nm major axis), and assumed observer
+  motion (default 0 kn; operators on the move set
+  `assumed_max_speed_kn` to a plausible bound). See
+  `docs/design/observer_motion_staleness.md` for the
+  motion-staleness rationale.
+
+Fixes that fail any of these gates are *not* delivered on the
+`fix_stream` and therefore never reach a session recorder.
+Cumulative counters
+(`fixes_published_total`, `fix_publish_attempts`,
+`singular_geometry_rejections`, `publication_gate_rejections`,
+`sights_inserted_total`, `sights_evicted_total`) are exposed
+via `EngineDiagnostics` for operator-visible health.
+
 ## Threshold model
 
 Each published fix scores into one of three bands by σ_major:

@@ -41,6 +41,25 @@ Docs: new `docs/operator/mobile-hud.md` describes the chrome.
 
 ---
 
+## Phase 3.5: Engine tuning landed
+
+The streaming engine now defaults to a 2-hour sight window
+(`sight_window_seconds = 7200`) with a 50-sight pool
+(`sight_window_capacity = 50`), matching the operator's
+multi-capture / same-body-30-min-apart opportunistic flow.
+New `EngineConfig::publication_gate` (`PublicationGateConfig`)
+gates fixes on geometric diversity (≥ 30° azimuth spread),
+ellipse axis ratio (≤ 10:1), absolute σ (≤ 50 nm major), and
+assumed observer motion (`assumed_max_speed_kn`, default
+0 kn). The motion-staleness σ inflation is documented in
+`docs/design/observer_motion_staleness.md`. Six new cumulative
+`EngineDiagnostics` counters track publish attempts, gate
+rejections, sights inserted/evicted, and successful
+publications. Four new gate unit tests in `stage_e`; all
+existing tests pass with the new defaults.
+
+---
+
 ## Phase 3.5: Engine sight persistence landed
 
 New `crates/bris-streaming/src/store.rs` module persists

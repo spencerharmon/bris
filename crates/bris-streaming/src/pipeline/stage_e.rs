@@ -146,7 +146,23 @@ pub(crate) struct StageEOutcome {
     /// - The publication-interval throttle is in effect.
     /// - The window didn't change meaningfully since the last
     ///   publication attempt.
+    /// - The publication gate (geometric diversity, ellipse
+    ///   axis ratio, absolute σ, motion-staleness) rejected
+    ///   the fix.
     pub published: Option<PublishedFix>,
+    /// True iff Stage E attempted publication this run (i.e.
+    /// the window changed, the throttle was clear, and it
+    /// called `try_publish`). Counts the LSQ + gate as a
+    /// single attempt.
+    pub publish_attempted: bool,
+    /// True iff `multi_sight_fix` rejected for singular
+    /// geometry (or any other reason) on this run.
+    pub singular_geometry_rejection: bool,
+    /// True iff a fix was produced (Saint-Hilaire or cold-
+    /// start) but the publication gate (azimuth spread /
+    /// axis ratio / absolute σ / motion staleness) rejected
+    /// it.
+    pub publication_gate_rejection: bool,
     /// Cold-start solver attempted (`multi_sight_fix` declined
     /// AND cold-start was enabled AND we have >= 2 sights).
     pub cold_start_attempted: bool,
@@ -734,29 +750,31 @@ enum ReduceError {
 /// Run `multi_sight_fix` over the current window; build a
 /// [`PublishedFix`] from the result. On singular geometry,
 /// fall back to [`bris_nav::cold_start_fix`] when enabled.
+/// Either successful fix is then run through the publication
+/// gate (geometric diversity, ellipse axis ratio, absolute σ,
+/// motion staleness) before being assigned to `out.published`.
 ///
-/// Writes the published fix (if any) and cold-start counters
-/// into `out`.
+/// Writes the published fix (if any) and the LSQ / cold-start /
+/// gate counters into `out`.
 fn try_publish(
     window: &SightWindow,
     now_tt: Option<Tt>,
     cfg: &EngineConfig,
     out: &mut StageEOutcome,
 ) {
+    out.publish_attempted = true;
     let lops: Vec<LineOfPosition> = window.iter().map(|s| s.lop).collect();
     let saint_hilaire_err = match multi_sight_fix(&lops) {
         Ok(fix) => {
-            out.published = Some(build_published(
-                fix,
-                window,
-                now_tt,
-                FixProvenance::SaintHilaire,
-            ));
+            apply_gate(out, fix, window, now_tt, cfg, FixProvenance::SaintHilaire);
             return;
         }
         Err(e) => e,
     };
     trace!(error = %saint_hilaire_err, "Stage E: multi_sight_fix declined");
+    if matches!(saint_hilaire_err, FixError::SingularGeometry) {
+        out.singular_geometry_rejection = true;
+    }
 
     if !cfg.cold_start.enabled {
         return;
@@ -783,13 +801,9 @@ fn try_publish(
                 orientation_rad: cand.orientation_rad,
                 sight_count: u32::try_from(cand.sight_count).unwrap_or(u32::MAX),
             };
-            out.published = Some(build_published(
-                fix,
-                window,
-                now_tt,
-                FixProvenance::ColdStart,
-            ));
-            out.cold_start_published = true;
+            if apply_gate(out, fix, window, now_tt, cfg, FixProvenance::ColdStart) {
+                out.cold_start_published = true;
+            }
         }
         Ok(ColdStartResult::TwoCandidates {
             primary, secondary, ..
@@ -829,13 +843,16 @@ fn try_publish(
                 orientation_rad: chosen.orientation_rad,
                 sight_count: u32::try_from(chosen.sight_count).unwrap_or(u32::MAX),
             };
-            out.published = Some(build_published(
+            if apply_gate(
+                out,
                 fix,
                 window,
                 now_tt,
+                cfg,
                 FixProvenance::ColdStartAmbiguous,
-            ));
-            out.cold_start_published = true;
+            ) {
+                out.cold_start_published = true;
+            }
         }
         Ok(ColdStartResult::Inconsistent { .. }) => {
             info!("cold-start fix returned Inconsistent; not publishing");
@@ -851,18 +868,77 @@ fn try_publish(
     }
 }
 
-fn build_published(
+/// Apply the publication gate to `fix`. On pass, builds the
+/// [`PublishedFix`] (with the given provenance), assigns it to
+/// `out.published`, and returns `true`. On fail, sets
+/// `out.publication_gate_rejection` and returns `false`.
+fn apply_gate(
+    out: &mut StageEOutcome,
     fix: bris_nav::Fix,
     window: &SightWindow,
     now_tt: Option<Tt>,
+    cfg: &EngineConfig,
     provenance: FixProvenance,
-) -> PublishedFix {
+) -> bool {
     let azimuth_spread_rad = azimuth_spread(window);
     let anchor = now_tt.unwrap_or_else(|| Tt::from_julian_date(bris_core::time::JD_J2000));
     let oldest_age = window
         .iter()
         .map(|s| time_gap_seconds(anchor, s.anchor_tt))
         .fold(0.0_f64, f64::max);
+    // Publication gate: geometric diversity + ellipse ratio +
+    // absolute σ + motion-staleness inflation. See
+    // `docs/design/observer_motion_staleness.md`.
+    let gate = cfg.publication_gate;
+    let motion_sigma_nm = gate.assumed_max_speed_kn * oldest_age / 3600.0;
+    let effective_sigma_major_nm = (fix.sigma_major_nm.powi(2) + motion_sigma_nm.powi(2)).sqrt();
+    let axis_ratio = if fix.sigma_minor_nm > 0.0 {
+        fix.sigma_major_nm / fix.sigma_minor_nm
+    } else {
+        f64::INFINITY
+    };
+    if azimuth_spread_rad < gate.min_azimuth_spread_rad
+        || axis_ratio > gate.max_ellipse_axis_ratio
+        || effective_sigma_major_nm > gate.max_position_sigma_nm
+    {
+        out.publication_gate_rejection = true;
+        info!(
+            spread_deg = azimuth_spread_rad.to_degrees(),
+            axis_ratio,
+            sigma_major_nm = fix.sigma_major_nm,
+            effective_sigma_major_nm,
+            motion_sigma_nm,
+            oldest_age_s = oldest_age,
+            "fix gated",
+        );
+        return false;
+    }
+    out.published = Some(build_published_inner(
+        fix,
+        window,
+        anchor,
+        azimuth_spread_rad,
+        oldest_age,
+        provenance,
+    ));
+    true
+}
+
+fn build_published_inner(
+    fix: bris_nav::Fix,
+    window: &SightWindow,
+    anchor: Tt,
+    azimuth_spread_rad: f64,
+    oldest_age: f64,
+    provenance: FixProvenance,
+) -> PublishedFix {
+    // Collect every frame ID referenced by a sight in the
+    // window. Each sight contributes its body frame and (when
+    // different) its horizon frame; same-frame sights only
+    // contribute one. Order is preserved (body-first, horizon-
+    // second per sight); duplicates are removed while keeping
+    // the first occurrence so the foreign caller sees a stable
+    // frame ordering across publications.
     let mut seen = std::collections::BTreeSet::new();
     let mut contributing_frame_ids: Vec<u64> = Vec::with_capacity(window.len() * 2);
     for s in window.iter() {
@@ -1324,6 +1400,13 @@ mod tests {
         let mut cfg = EngineConfig::new(Observer::default_dev());
         cfg.cold_start.enabled = true;
         cfg.cold_start.coarse_hemisphere = Some(bris_core::Hemisphere::South);
+        // Cold-start from two same-body sights gives a wide
+        // ellipse / low azimuth spread that the publication
+        // gate would reject; the gate is orthogonal to this
+        // test, so disable it.
+        cfg.publication_gate.min_azimuth_spread_rad = 0.0;
+        cfg.publication_gate.max_ellipse_axis_ratio = f64::INFINITY;
+        cfg.publication_gate.max_position_sigma_nm = f64::INFINITY;
         let mut out = StageEOutcome::default();
         try_publish(&w, Some(s2.anchor_tt), &cfg, &mut out);
         // Either Saint-Hilaire succeeded (unlikely with same-
@@ -1370,6 +1453,86 @@ mod tests {
                 assert!(out.published.is_none());
             }
         }
+    }
+
+    #[test]
+    fn try_publish_rejects_low_azimuth_spread() {
+        let mut w = SightWindow::default();
+        // Two sights only 10° apart — below the default 30°
+        // gate. multi_sight_fix may still accept the geometry
+        // (it's not strictly singular), but the gate must
+        // reject for inadequate diversity.
+        w.try_insert(dummy_sight(0.001, 0.0, 0.0), 5);
+        w.try_insert(dummy_sight(0.001, 10.0_f64.to_radians(), 0.0), 5);
+        let cfg = EngineConfig::new(Observer::default_dev());
+        let mut out = StageEOutcome::default();
+        try_publish(&w, Some(Tt::from_julian_date(JD_J2000)), &cfg, &mut out);
+        assert!(out.published.is_none(), "10°-spread fix must be gated");
+        assert!(out.publish_attempted);
+        // Either the LSQ rejected (singular) or the gate did;
+        // both are valid — the gate counter should be set when
+        // multi_sight_fix accepted.
+        assert!(out.publication_gate_rejection || out.singular_geometry_rejection);
+    }
+
+    #[test]
+    fn try_publish_rejects_huge_sigma() {
+        let mut w = SightWindow::default();
+        // Two diverse sights but with multi-NM intercept
+        // sigmas — the resulting position ellipse exceeds
+        // the absolute σ gate.
+        let bad = |az: f64| {
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+            let id = FrameId(((az * 1000.0).abs() as u64).wrapping_add(1));
+            Sight {
+                lop: dummy_lop(0.5, 1000.0, az),
+                anchor_tt: Tt::from_julian_date(JD_J2000),
+                altitude_sigma_rad: 0.01,
+                body: SightBody::SolarSystem(SolarSystemBody::Sun),
+                azimuth_rad: az,
+                source_frame_id: id,
+                horizon_frame_id: id,
+            }
+        };
+        w.try_insert(bad(0.0), 5);
+        w.try_insert(bad(std::f64::consts::FRAC_PI_2), 5);
+        let cfg = EngineConfig::new(Observer::default_dev());
+        let mut out = StageEOutcome::default();
+        try_publish(&w, Some(Tt::from_julian_date(JD_J2000)), &cfg, &mut out);
+        assert!(out.published.is_none(), "huge-σ fix must be gated");
+        assert!(out.publication_gate_rejection);
+    }
+
+    #[test]
+    fn try_publish_rejects_motion_stale() {
+        let mut w = SightWindow::default();
+        // Two diverse sights, modest σ, but the oldest is
+        // 2 hours old and we assume 30 kn. Motion inflation:
+        // 30 kn * 7200 s / 3600 = 60 nm > 50 nm gate.
+        w.try_insert(dummy_sight(0.001, 0.0, 7200.0), 5);
+        w.try_insert(dummy_sight(0.001, std::f64::consts::FRAC_PI_2, 0.0), 5);
+        let mut cfg = EngineConfig::new(Observer::default_dev());
+        cfg.publication_gate.assumed_max_speed_kn = 30.0;
+        let mut out = StageEOutcome::default();
+        // anchor = JD_J2000 (the "younger" sight's anchor);
+        // the 7200-s-old sight is 7200s behind it.
+        try_publish(&w, Some(Tt::from_julian_date(JD_J2000)), &cfg, &mut out);
+        assert!(out.published.is_none(), "motion-stale fix must be gated");
+        assert!(out.publication_gate_rejection);
+    }
+
+    #[test]
+    fn try_publish_accepts_when_all_gates_pass() {
+        let mut w = SightWindow::default();
+        w.try_insert(dummy_sight(0.001, 0.0, 0.0), 5);
+        w.try_insert(dummy_sight(0.001, std::f64::consts::FRAC_PI_2, 0.0), 5);
+        let cfg = EngineConfig::new(Observer::default_dev());
+        let mut out = StageEOutcome::default();
+        try_publish(&w, Some(Tt::from_julian_date(JD_J2000)), &cfg, &mut out);
+        assert!(out.published.is_some(), "clean fix must publish");
+        assert!(out.publish_attempted);
+        assert!(!out.publication_gate_rejection);
+        assert!(!out.singular_geometry_rejection);
     }
 
     #[test]

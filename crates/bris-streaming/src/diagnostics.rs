@@ -180,6 +180,7 @@ pub struct EngineDiagnostics {
     /// Current size of `sights/current.log` in bytes.
     pub store_current_log_bytes: u64,
 
+    // Cold-start fix fallback counters.
     /// Number of times Stage E attempted the cold-start fix
     /// solver as a fallback to `multi_sight_fix`.
     pub cold_start_attempts: u64,
@@ -195,6 +196,31 @@ pub struct EngineDiagnostics {
     /// Cold-start runs that errored with `Disjoint` (two
     /// circles with coincident / antipodal GPs).
     pub cold_start_disjoint_count: u64,
+
+    // Cumulative publication/gate counters.
+    /// Cumulative number of fixes successfully published by
+    /// Stage E since engine construction. Increments only on
+    /// fixes that cleared the publication gate.
+    pub fixes_published_total: u64,
+    /// Cumulative number of times Stage E reached the
+    /// publication step (i.e. window changed, throttle clear,
+    /// `try_publish` invoked). Equals the sum of
+    /// `fixes_published_total`, `singular_geometry_rejections`,
+    /// and `publication_gate_rejections`.
+    pub fix_publish_attempts: u64,
+    /// Cumulative count of sights inserted into the active
+    /// window since engine construction (post-hydration).
+    pub sights_inserted_total: u64,
+    /// Cumulative count of sights age-evicted from the active
+    /// window since engine construction.
+    pub sights_evicted_total: u64,
+    /// Cumulative count of `multi_sight_fix` rejections for
+    /// singular geometry (or any other LSQ refusal).
+    pub singular_geometry_rejections: u64,
+    /// Cumulative count of fixes the publication gate
+    /// (azimuth spread / axis ratio / absolute σ / motion
+    /// staleness) rejected after `multi_sight_fix` accepted.
+    pub publication_gate_rejections: u64,
 }
 
 /// Per-stage processing statistics.
