@@ -278,7 +278,7 @@ pub(crate) fn process_frame(
         HorizonStageOutcome::None => None,
     };
     let body = match dispatched_condition {
-        Condition::Day => detect_day_body(frame, cfg.saturated_body_cfg),
+        Condition::Day => detect_day_body(frame, cfg.saturated_body_cfg, horizon_line),
         Condition::Night => detect_night_peaks(frame, cfg, horizon_line),
         Condition::Twilight => detect_twilight(frame, cfg.saturated_body_cfg, cfg, horizon_line),
         Condition::Unusable => {
@@ -434,7 +434,11 @@ fn body_candidates_from_detection(
     }
 }
 
-fn detect_day_body(frame: &Frame, cfg: SaturatedBodyConfig) -> BodyDetection {
+fn detect_day_body(
+    frame: &Frame,
+    cfg: SaturatedBodyConfig,
+    horizon_line: Option<HorizonLine>,
+) -> BodyDetection {
     // Extract every saturated component above the area gate.
     // The largest is the primary (Sun / Moon); any remaining
     // ones are exposed as secondaries so the reflection-pair
@@ -457,12 +461,40 @@ fn detect_day_body(frame: &Frame, cfg: SaturatedBodyConfig) -> BodyDetection {
             let radius = radius_f.max(1.0) as u32;
             let halo =
                 bris_vision::extract_halo_pixels(frame, primary, cfg.saturation_threshold, radius);
-            let refined = bris_vision::refine_centroid_subpixel(frame, primary, &halo);
+            // TODO: thread a measured `gain_e_per_adu` from
+            // bris-capture V4L2 controls / bris-android
+            // CameraCharacteristics so the Poisson weights
+            // reflect real sensor gain. For now the default
+            // (1 e⁻/ADU) preserves prior behaviour.
+            let refined = bris_vision::refine_centroid_subpixel(
+                frame,
+                primary,
+                &halo,
+                bris_vision::DEFAULT_GAIN_E_PER_ADU,
+            );
             if refined.refined {
                 primary.x = refined.x;
                 primary.y = refined.y;
-                let max_sigma_px = refined.sigma_x_px.max(refined.sigma_y_px);
-                if let Ok(s) = bris_core::Sigma::new(max_sigma_px) {
+                // Project the (σx, σy, cov_xy) covariance
+                // onto the image-frame altitude axis (the
+                // direction perpendicular to the apparent
+                // horizon, where altitude increases). If
+                // Stage C has no horizon this frame, fall
+                // back to the per-axis maximum.
+                let sigma_alt_px = match horizon_line {
+                    Some(line) => {
+                        let slope = line.slope;
+                        let norm = (1.0 + slope * slope).sqrt();
+                        let ux = -slope / norm;
+                        let uy = 1.0 / norm;
+                        let var = refined.sigma_x_px * refined.sigma_x_px * ux * ux
+                            + refined.sigma_y_px * refined.sigma_y_px * uy * uy
+                            + 2.0 * refined.cov_xy_px2 * ux * uy;
+                        var.max(0.0).sqrt()
+                    }
+                    None => refined.sigma_x_px.max(refined.sigma_y_px),
+                };
+                if let Ok(s) = bris_core::Sigma::new(sigma_alt_px) {
                     primary.position_sigma_px = s;
                 }
             }
@@ -528,7 +560,7 @@ fn detect_twilight(
     cfg: &EngineConfig,
     horizon: Option<HorizonLine>,
 ) -> BodyDetection {
-    match detect_day_body(frame, sat_cfg) {
+    match detect_day_body(frame, sat_cfg, horizon) {
         BodyDetection::Day(c, _) => BodyDetection::Day(c, Vec::new()),
         // None or Night from day-path call shouldn't happen
         // (it only returns Day or None); IdentifiedStars

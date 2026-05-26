@@ -30,6 +30,7 @@ pub use centroid::{
 };
 pub use centroid_refine::{
     extract_halo_pixels, refine_centroid_subpixel, HaloPixel, RefinedCentroid,
+    DEFAULT_GAIN_E_PER_ADU,
 };
 pub use condition::{
     classify, AstronomicalEvidence, Classification, Condition, ConditionConfig, ImageEvidence,
