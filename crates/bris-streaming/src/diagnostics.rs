@@ -196,6 +196,12 @@ pub struct EngineDiagnostics {
     /// Cold-start runs that errored with `Disjoint` (two
     /// circles with coincident / antipodal GPs).
     pub cold_start_disjoint_count: u64,
+    /// Cold-start runs that beat a successful but stale-prior
+    /// Saint-Hilaire fix and were published instead. Triggered
+    /// when SH's max |intercept| exceeds
+    /// `EngineConfig::cold_start.stale_prior_intercept_threshold_nm`
+    /// and cold-start converges with a tighter `sigma_major_nm`.
+    pub cold_start_preferred_over_stale_sh: u64,
 
     // Cumulative publication/gate counters.
     /// Cumulative number of fixes successfully published by

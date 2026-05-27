@@ -343,6 +343,18 @@ window. The cold-start result publishes via the same
 flag for the FFI surface (operator-visible "this is a
 cold-start fix, not yet AP-anchored").
 
+Stale-prior trigger: when `multi_sight_fix` *succeeds* but
+the maximum |intercept| across the window's sights exceeds
+[`bris_streaming::ColdStartEngineConfig::stale_prior_intercept_threshold_nm`]
+(default 60 nm ≈ 1°), the LSQ linearization around the
+assumed position is suspect (operator-entered AP off by
+>60 nm, or a recovered fix from hours ago after a long
+drive). Stage E runs `cold_start_fix` as a comparison and
+publishes the cold-start fix in place of Saint-Hilaire iff
+it converges with a tighter `sigma_major_nm`. The
+`cold_start_preferred_over_stale_sh` diagnostics counter
+tracks each replacement.
+
 When `cold_start_fix` returns `TwoCandidates` with a
 configured `coarse_hemisphere` hint
 ([`bris_streaming::ColdStartEngineConfig::coarse_hemisphere`]),

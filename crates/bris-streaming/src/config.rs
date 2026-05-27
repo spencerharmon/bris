@@ -357,7 +357,7 @@ pub struct EngineConfig {
 /// `SingularGeometry` (or no position prior is available at
 /// all). See `docs/design/circle_of_position.md`,
 /// "Engine integration".
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy)]
 pub struct ColdStartEngineConfig {
     /// Master switch. When `false`, Stage E never falls back to
     /// the cold-start solver; a Saint-Hilaire failure simply
@@ -372,6 +372,13 @@ pub struct ColdStartEngineConfig {
     /// operator-prompt FFI channel is a follow-up). Default
     /// `None`.
     pub coarse_hemisphere: Option<Hemisphere>,
+    /// When Saint-Hilaire publishes a fix whose max |intercept|
+    /// exceeds this threshold, the assumed position is likely
+    /// so wrong that cold-start may produce a tighter answer;
+    /// cold-start runs as a comparison and is preferred when
+    /// it converges with tighter `σ_major`. Default 60 nm = 1°
+    /// intercept = AP is more than 60 nm off-position.
+    pub stale_prior_intercept_threshold_nm: f64,
 }
 
 /// Pre-publication gate on a freshly-solved fix.
@@ -424,6 +431,16 @@ pub struct PublicationGateConfig {
     /// sailing yacht, ~30 kn for a power vessel). See
     /// `docs/design/observer_motion_staleness.md`.
     pub assumed_max_speed_kn: f64,
+}
+
+impl Default for ColdStartEngineConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            coarse_hemisphere: None,
+            stale_prior_intercept_threshold_nm: 60.0,
+        }
+    }
 }
 
 impl Default for PublicationGateConfig {
@@ -488,6 +505,7 @@ impl EngineConfig {
             cold_start: ColdStartEngineConfig {
                 enabled: true,
                 coarse_hemisphere: None,
+                stale_prior_intercept_threshold_nm: 60.0,
             },
             publication_gate: PublicationGateConfig::default(),
         }
