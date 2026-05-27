@@ -71,6 +71,7 @@ use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 
 use bris_almanac::Observer;
+use bris_core::SensorGain;
 use bris_core::{time, Hemisphere, Latitude, Longitude};
 use bris_streaming::{
     EngineConfig as CoreEngineConfig, EngineDiagnostics, PublishedFix, PushError, StreamingEngine,
@@ -431,6 +432,17 @@ pub struct FfiFrame {
     pub exposure_us: u32,
     /// Camera intrinsics under which this frame was captured.
     pub intrinsics: FfiIntrinsics,
+    /// Sensor analog conversion gain (electrons per ADU)
+    /// under which the pixel intensities were quantized.
+    /// The Android side derives this from the per-frame
+    /// `CaptureResult.SENSOR_SENSITIVITY` (ISO) scaled by
+    /// the per-camera factory profile (see
+    /// `FactoryCalibration`). Pass `0.0` or `NaN` when no
+    /// measured value is available; the FFI substitutes
+    /// [`bris_core::SensorGain::UNITY`] (1.0 e⁻/ADU)
+    /// silently, and the centroid refinement degrades to
+    /// its pre-plumbing behaviour.
+    pub gain_e_per_adu: f64,
 }
 
 /// One stage's processing counts, for diagnostic display.
@@ -920,6 +932,7 @@ fn frame_to_ffi(frame: Frame) -> FfiFrame {
             p1: intr.p1,
             p2: intr.p2,
         },
+        gain_e_per_adu: frame.gain.e_per_adu(),
     }
 }
 
@@ -1079,6 +1092,7 @@ fn convert_frame(frame: FfiFrame) -> Result<Frame, FfiError> {
             }
         })?;
     f.source_rotation = Rotation::Deg0;
+    f.gain = SensorGain::new(frame.gain_e_per_adu);
     Ok(f)
 }
 

@@ -461,16 +461,15 @@ fn detect_day_body(
             let radius = radius_f.max(1.0) as u32;
             let halo =
                 bris_vision::extract_halo_pixels(frame, primary, cfg.saturation_threshold, radius);
-            // TODO: thread a measured `gain_e_per_adu` from
-            // bris-capture V4L2 controls / bris-android
-            // CameraCharacteristics so the Poisson weights
-            // reflect real sensor gain. For now the default
-            // (1 e⁻/ADU) preserves prior behaviour.
+            // Use the frame-attached measured sensor gain
+            // for the Poisson weights; falls back to UNITY
+            // when no measurement is available (see
+            // `bris_core::SensorGain`).
             let refined = bris_vision::refine_centroid_subpixel(
                 frame,
                 primary,
                 &halo,
-                bris_vision::DEFAULT_GAIN_E_PER_ADU,
+                frame.gain.e_per_adu(),
             );
             if refined.refined {
                 primary.x = refined.x;

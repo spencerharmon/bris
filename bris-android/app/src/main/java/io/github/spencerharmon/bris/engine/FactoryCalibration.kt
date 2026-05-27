@@ -67,6 +67,22 @@ object FactoryCalibration {
         val intrinsics: CalibrationStore.PersistedIntrinsics,
         /** Short label for the diagnostic overlay (e.g. `"S62 main"`). */
         val label: String,
+        /**
+         * Sensor analog conversion gain (electrons per ADU)
+         * **at the camera's minimum ISO**. The runtime
+         * scales this by `currentIso / minIso` to recover the
+         * effective per-frame gain.
+         *
+         * "Measured" means analog gain only. Digital gain is
+         * post-quantization and must not be folded in (see
+         * `bris_core::SensorGain`).
+         *
+         * For the Cat S62 main camera the value below is a
+         * datasheet-derived **placeholder** until a real
+         * per-unit measurement is performed; see the
+         * inline comment on the profile entry.
+         */
+        val gainEPerAduAtMinIso: Double,
     )
 
     /**
@@ -150,6 +166,18 @@ object FactoryCalibration {
                 height = 3024,
                 rmsPx = 0.7331791456580863,
             ),
+            // Placeholder analog conversion gain. The S62
+            // main sensor's per-unit e⁻/ADU at base ISO has
+            // not been independently measured; 4.0 is a
+            // representative figure for modern phone
+            // back-illuminated CMOS at ISO ~50–80. Replace
+            // with a measured value (e.g. via a photon-
+            // transfer-curve session) when available.
+            //
+            // TODO: add a Robolectric test that asserts
+            // FrameAnalyzer scales this by currentIso / minIso
+            // when the test infrastructure grows.
+            gainEPerAduAtMinIso = 4.0,
         ),
     )
 }
