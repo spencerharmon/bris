@@ -181,8 +181,12 @@ pub(crate) struct StageEOutcome {
     pub cold_start_ambiguous_skipped: bool,
     /// Cold-start returned `Inconsistent`.
     pub cold_start_inconsistent: bool,
-    /// Cold-start errored with `Disjoint`.
+    /// Cold-start returned `Disjoint`.
     pub cold_start_disjoint: bool,
+    /// Cold-start beat a successful Saint-Hilaire fix whose
+    /// max |intercept| exceeded the stale-prior threshold and
+    /// was published in its stead.
+    pub cold_start_preferred_over_stale_sh: bool,
 }
 
 /// Identifier for the body that produced a sight.
@@ -775,8 +779,42 @@ fn try_publish(
     out.publish_attempted = true;
     let lops: Vec<LineOfPosition> = window.iter().map(|s| s.lop).collect();
     let saint_hilaire_err = match multi_sight_fix(&lops) {
-        Ok(fix) => {
-            apply_gate(out, fix, window, now_tt, cfg, FixProvenance::SaintHilaire);
+        Ok(sh_fix) => {
+            // Stale-prior trigger: a successful SH fix whose max
+            // |intercept| exceeds the configured threshold (default
+            // 60 nm ≈ 1°) implies the assumed position is so far off
+            // that the LSQ linearization is suspect. Run cold-start
+            // as a comparison; prefer it iff it converges with a
+            // tighter sigma_major_nm. See
+            // `docs/design/circle_of_position.md` "Engine integration".
+            let max_intercept_nm = window
+                .iter()
+                .map(|s| s.lop.intercept_nm.abs())
+                .fold(0.0_f64, f64::max);
+            if cfg.cold_start.enabled
+                && max_intercept_nm > cfg.cold_start.stale_prior_intercept_threshold_nm
+            {
+                let circles = circles_from_sights(window, cfg.observer);
+                if circles.len() >= 2 {
+                    if let Some((cs_fix, cs_provenance)) = solve_cold_start(&circles, cfg, out) {
+                        if cs_fix.sigma_major_nm < sh_fix.sigma_major_nm {
+                            out.cold_start_preferred_over_stale_sh = true;
+                            if apply_gate(out, cs_fix, window, now_tt, cfg, cs_provenance) {
+                                out.cold_start_published = true;
+                            }
+                            return;
+                        }
+                    }
+                }
+            }
+            apply_gate(
+                out,
+                sh_fix,
+                window,
+                now_tt,
+                cfg,
+                FixProvenance::SaintHilaire,
+            );
             return;
         }
         Err(e) => e,
@@ -792,10 +830,9 @@ fn try_publish(
     // Cold-start triggers when either (a) LSQ is singular OR
     // (b) the engine has no PositionPrior at all and SH could
     // not produce a fix (cold-start is the only way to bootstrap
-    // the very first fix without a prior). TODO: also trigger
-    // when SH succeeds but |intercept| exceeds a configurable
-    // threshold; deferred to keep this change focused on the
-    // PR #22 BLOCKER.
+    // the very first fix without a prior). The third trigger
+    // — SH succeeded but |intercept| exceeds a configurable
+    // threshold — is handled in the `Ok` arm above.
     let trigger_singular = matches!(saint_hilaire_err, FixError::SingularGeometry);
     let trigger_no_prior = !has_prior
         && matches!(
@@ -809,10 +846,27 @@ fn try_publish(
     if circles.len() < 2 {
         return;
     }
+    if let Some((fix, provenance)) = solve_cold_start(&circles, cfg, out) {
+        if apply_gate(out, fix, window, now_tt, cfg, provenance) {
+            out.cold_start_published = true;
+        }
+    }
+}
+
+/// Run `cold_start_fix` and translate its result into a
+/// `(Fix, FixProvenance)` pair, updating the cold-start
+/// outcome counters. Returns `None` for non-publishable
+/// outcomes (Inconsistent / Disjoint / two-candidate without
+/// a resolvable hemisphere hint).
+fn solve_cold_start(
+    circles: &[CircleOfPosition],
+    cfg: &EngineConfig,
+    out: &mut StageEOutcome,
+) -> Option<(bris_nav::Fix, FixProvenance)> {
     out.cold_start_attempted = true;
-    match cold_start_fix(&circles, &ColdStartConfig::default()) {
-        Ok(ColdStartResult::Fix(cand)) => {
-            let fix = bris_nav::Fix {
+    match cold_start_fix(circles, &ColdStartConfig::default()) {
+        Ok(ColdStartResult::Fix(cand)) => Some((
+            bris_nav::Fix {
                 lat: cand.lat,
                 lon: cand.lon,
                 covariance_nm2: cand.covariance_nm2,
@@ -820,73 +874,58 @@ fn try_publish(
                 sigma_minor_nm: cand.sigma_minor_nm.value(),
                 orientation_rad: cand.orientation_rad,
                 sight_count: u32::try_from(cand.sight_count).unwrap_or(u32::MAX),
-            };
-            if apply_gate(out, fix, window, now_tt, cfg, FixProvenance::ColdStart) {
-                out.cold_start_published = true;
-            }
-        }
+            },
+            FixProvenance::ColdStart,
+        )),
         Ok(ColdStartResult::TwoCandidates {
             primary, secondary, ..
         }) => {
             let Some(hemi) = cfg.cold_start.coarse_hemisphere else {
-                // Counter (cold_start_ambiguous_skipped) is the
-                // operator-visible source of truth; we log at
-                // TRACE to avoid the once-per-Stage-E INFO spam.
-                // TODO: surface candidates on a follow-up
-                // FFI channel so the operator can pick one.
                 trace!(
                     "cold-start fix has 2 candidates, no hemisphere hint configured; not publishing"
                 );
                 out.cold_start_ambiguous_skipped = true;
-                return;
+                return None;
             };
             let chosen = if hemi.contains(primary.lat) {
                 primary
             } else if hemi.contains(secondary.lat) {
                 secondary
             } else {
-                // Neither candidate matches the hint; pick the
-                // one closer to the hint hemisphere (primary by
-                // default) but treat as ambiguous skip so the
-                // operator sees the hint disagreement.
                 trace!(
                     primary_lat_deg = primary.lat.degrees(),
                     secondary_lat_deg = secondary.lat.degrees(),
                     "cold-start two candidates: neither in configured hemisphere; not publishing"
                 );
                 out.cold_start_ambiguous_skipped = true;
-                return;
+                return None;
             };
-            let fix = bris_nav::Fix {
-                lat: chosen.lat,
-                lon: chosen.lon,
-                covariance_nm2: chosen.covariance_nm2,
-                sigma_major_nm: chosen.sigma_major_nm.value(),
-                sigma_minor_nm: chosen.sigma_minor_nm.value(),
-                orientation_rad: chosen.orientation_rad,
-                sight_count: u32::try_from(chosen.sight_count).unwrap_or(u32::MAX),
-            };
-            if apply_gate(
-                out,
-                fix,
-                window,
-                now_tt,
-                cfg,
+            Some((
+                bris_nav::Fix {
+                    lat: chosen.lat,
+                    lon: chosen.lon,
+                    covariance_nm2: chosen.covariance_nm2,
+                    sigma_major_nm: chosen.sigma_major_nm.value(),
+                    sigma_minor_nm: chosen.sigma_minor_nm.value(),
+                    orientation_rad: chosen.orientation_rad,
+                    sight_count: u32::try_from(chosen.sight_count).unwrap_or(u32::MAX),
+                },
                 FixProvenance::ColdStartAmbiguous,
-            ) {
-                out.cold_start_published = true;
-            }
+            ))
         }
         Ok(ColdStartResult::Inconsistent { .. }) => {
             trace!("cold-start fix returned Inconsistent; not publishing");
             out.cold_start_inconsistent = true;
+            None
         }
         Err(ColdStartError::Disjoint) => {
             trace!("cold-start fix returned Disjoint");
             out.cold_start_disjoint = true;
+            None
         }
         Err(e) => {
             trace!(error = ?e, "cold-start fix errored");
+            None
         }
     }
 }
@@ -1648,6 +1687,163 @@ mod tests {
         assert!(out.publish_attempted);
         assert!(!out.publication_gate_rejection);
         assert!(!out.singular_geometry_rejection);
+    }
+
+    /// Build a Sun sight whose Ho is computed at
+    /// `true_lat_deg`/`true_lon_deg` but whose LOP is anchored
+    /// at the AP. The resulting LOP carries a large intercept
+    /// proportional to the AP-to-true-position offset.
+    #[allow(clippy::similar_names)]
+    fn sun_sight_with_offset_ap(
+        true_lat_deg: f64,
+        true_lon_deg: f64,
+        ap_lat_deg: f64,
+        ap_lon_deg: f64,
+        tt_offset_s: f64,
+        frame_id: u64,
+    ) -> Sight {
+        let tt = Tt::from_julian_date(JD_J2000 + tt_offset_s / 86_400.0);
+        let jd_ut1 = tt.julian_date();
+        let true_lat = bris_core::Latitude::from_degrees(true_lat_deg).unwrap();
+        let true_lon = bris_core::Longitude::from_degrees(true_lon_deg).unwrap();
+        let ap_lat = bris_core::Latitude::from_degrees(ap_lat_deg).unwrap();
+        let ap_lon = bris_core::Longitude::from_degrees(ap_lon_deg).unwrap();
+        let mut true_obs = Observer::default_dev();
+        true_obs.latitude = true_lat;
+        true_obs.longitude = true_lon;
+        let mut ap_obs = Observer::default_dev();
+        ap_obs.latitude = ap_lat;
+        ap_obs.longitude = ap_lon;
+        let ap_true = body_apparent_place(SolarSystemBody::Sun, tt, jd_ut1, true_obs).unwrap();
+        let ap_ap = body_apparent_place(SolarSystemBody::Sun, tt, jd_ut1, ap_obs).unwrap();
+        let obs_alt = Uncertain::new(ap_true.direction.altitude, Sigma::new(1e-4).unwrap());
+        let computed = Uncertain::new(ap_ap.direction.altitude, ap_ap.altitude_sigma);
+        let lop =
+            line_of_position(ap_lat, ap_lon, obs_alt, computed, ap_ap.direction.azimuth).unwrap();
+        Sight {
+            lop,
+            anchor_tt: tt,
+            altitude_sigma_rad: 1e-4,
+            body: SightBody::SolarSystem(SolarSystemBody::Sun),
+            azimuth_rad: ap_ap.direction.azimuth,
+            source_frame_id: FrameId(frame_id),
+            horizon_frame_id: FrameId(frame_id),
+        }
+    }
+
+    fn distance_nm(
+        lat1: bris_core::Latitude,
+        lon1: bris_core::Longitude,
+        lat2: bris_core::Latitude,
+        lon2: bris_core::Longitude,
+    ) -> f64 {
+        let lat1r = lat1.radians();
+        let lat2r = lat2.radians();
+        let dlat = lat2r - lat1r;
+        let dlon = lon2.radians() - lon1.radians();
+        let a = (dlat / 2.0).sin().powi(2) + lat1r.cos() * lat2r.cos() * (dlon / 2.0).sin().powi(2);
+        let c = 2.0 * a.sqrt().asin();
+        c.to_degrees() * 60.0
+    }
+
+    #[test]
+    fn cold_start_preferred_when_sh_intercept_exceeds_threshold() {
+        // J2000 noon TT: Sun declination ≈ -23° (winter
+        // solstice). True position: -23°/0° (Sun near zenith
+        // at t=0). AP: -21° / +2°, ≈ 170 nm off. Sights 1.5 hr
+        // apart to keep Sun comfortably above horizon at all
+        // three anchors.
+        let true_lat = -23.0;
+        let true_lon = 0.0;
+        let ap_lat = -10.0;
+        let ap_lon = 10.0;
+        let s1 = sun_sight_with_offset_ap(true_lat, true_lon, ap_lat, ap_lon, 0.0, 1);
+        let s2 = sun_sight_with_offset_ap(true_lat, true_lon, ap_lat, ap_lon, 1.5 * 3600.0, 2);
+        let s3 = sun_sight_with_offset_ap(true_lat, true_lon, ap_lat, ap_lon, 3.0 * 3600.0, 3);
+        let mut w = SightWindow::default();
+        w.try_insert(s1, 5);
+        w.try_insert(s2, 5);
+        w.try_insert(s3, 5);
+        let max_ic = w
+            .iter()
+            .map(|s| s.lop.intercept_nm.abs())
+            .fold(0.0, f64::max);
+        assert!(
+            max_ic > 60.0,
+            "test precondition: max |intercept| ({max_ic} nm) must exceed 60 nm"
+        );
+        let mut observer = Observer::default_dev();
+        observer.latitude = bris_core::Latitude::from_degrees(ap_lat).unwrap();
+        observer.longitude = bris_core::Longitude::from_degrees(ap_lon).unwrap();
+        let mut cfg = EngineConfig::new(observer);
+        cfg.cold_start.enabled = true;
+        cfg.cold_start.coarse_hemisphere = Some(bris_core::Hemisphere::South);
+        cfg.cold_start.stale_prior_intercept_threshold_nm = 60.0;
+        cfg.publication_gate.min_azimuth_spread_rad = 0.0;
+        cfg.publication_gate.max_ellipse_axis_ratio = f64::INFINITY;
+        cfg.publication_gate.max_position_sigma_nm = f64::INFINITY;
+        let mut out = StageEOutcome::default();
+        try_publish(&w, Some(s3.anchor_tt), &cfg, true, &mut out);
+        assert!(out.cold_start_attempted, "cold-start must be attempted");
+        let p = out.published.expect("a fix must be published");
+        assert!(
+            matches!(
+                p.provenance,
+                FixProvenance::ColdStart | FixProvenance::ColdStartAmbiguous
+            ),
+            "provenance must be ColdStart*, got {:?}",
+            p.provenance
+        );
+        assert!(out.cold_start_preferred_over_stale_sh);
+        let true_lat_t = bris_core::Latitude::from_degrees(true_lat).unwrap();
+        let true_lon_t = bris_core::Longitude::from_degrees(true_lon).unwrap();
+        let ap_lat_t = bris_core::Latitude::from_degrees(ap_lat).unwrap();
+        let ap_lon_t = bris_core::Longitude::from_degrees(ap_lon).unwrap();
+        let d_true = distance_nm(p.fix.lat, p.fix.lon, true_lat_t, true_lon_t);
+        let d_ap = distance_nm(p.fix.lat, p.fix.lon, ap_lat_t, ap_lon_t);
+        assert!(
+            d_true < d_ap,
+            "cold-start fix should be closer to true ({d_true} nm) than AP ({d_ap} nm)"
+        );
+    }
+
+    #[test]
+    fn sh_kept_when_intercept_below_threshold() {
+        // Sun-zenith position at J2000 for stable visibility.
+        let lat = -23.0;
+        let lon = 0.0;
+        let s1 = sun_sight_with_offset_ap(lat, lon, lat, lon, 0.0, 1);
+        let s2 = sun_sight_with_offset_ap(lat, lon, lat, lon, 1.5 * 3600.0, 2);
+        let s3 = sun_sight_with_offset_ap(lat, lon, lat, lon, 3.0 * 3600.0, 3);
+        let mut w = SightWindow::default();
+        w.try_insert(s1, 5);
+        w.try_insert(s2, 5);
+        w.try_insert(s3, 5);
+        let max_ic = w
+            .iter()
+            .map(|s| s.lop.intercept_nm.abs())
+            .fold(0.0, f64::max);
+        assert!(
+            max_ic < 60.0,
+            "test precondition: max |intercept| ({max_ic} nm) must be below 60 nm"
+        );
+        let mut observer = Observer::default_dev();
+        observer.latitude = bris_core::Latitude::from_degrees(lat).unwrap();
+        observer.longitude = bris_core::Longitude::from_degrees(lon).unwrap();
+        let mut cfg = EngineConfig::new(observer);
+        cfg.cold_start.enabled = true;
+        cfg.cold_start.stale_prior_intercept_threshold_nm = 60.0;
+        cfg.publication_gate.min_azimuth_spread_rad = 0.0;
+        cfg.publication_gate.max_ellipse_axis_ratio = f64::INFINITY;
+        cfg.publication_gate.max_position_sigma_nm = f64::INFINITY;
+        let mut out = StageEOutcome::default();
+        try_publish(&w, Some(s3.anchor_tt), &cfg, true, &mut out);
+        let p = out
+            .published
+            .expect("SH fix must publish for small intercepts");
+        assert!(matches!(p.provenance, FixProvenance::SaintHilaire));
+        assert!(!out.cold_start_attempted);
+        assert!(!out.cold_start_preferred_over_stale_sh);
     }
 
     #[test]

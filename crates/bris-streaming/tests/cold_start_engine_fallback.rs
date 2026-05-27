@@ -40,6 +40,7 @@ fn cold_start_config_can_be_constructed_with_hemisphere_hint() {
     let cfg = ColdStartEngineConfig {
         enabled: true,
         coarse_hemisphere: Some(Hemisphere::North),
+        stale_prior_intercept_threshold_nm: 60.0,
     };
     assert_eq!(cfg.coarse_hemisphere, Some(Hemisphere::North));
 }
@@ -67,4 +68,5 @@ fn engine_constructs_with_cold_start_hemisphere_hint() {
     assert_eq!(diag.cold_start_ambiguous_skipped, 0);
     assert_eq!(diag.cold_start_inconsistent_count, 0);
     assert_eq!(diag.cold_start_disjoint_count, 0);
+    assert_eq!(diag.cold_start_preferred_over_stale_sh, 0);
 }

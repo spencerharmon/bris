@@ -229,6 +229,7 @@ struct EngineState {
     cold_start_ambiguous_skipped: u64,
     cold_start_inconsistent_count: u64,
     cold_start_disjoint_count: u64,
+    cold_start_preferred_over_stale_sh: u64,
     fixes_published_total: u64,
     fix_publish_attempts: u64,
     sights_inserted_total: u64,
@@ -544,6 +545,7 @@ impl StreamingEngine {
                 cold_start_ambiguous_skipped: 0,
                 cold_start_inconsistent_count: 0,
                 cold_start_disjoint_count: 0,
+                cold_start_preferred_over_stale_sh: 0,
                 fixes_published_total: 0,
                 fix_publish_attempts: 0,
                 sights_inserted_total: 0,
@@ -734,6 +736,9 @@ impl StreamingEngine {
         if stage_e_outcome.cold_start_disjoint {
             state.cold_start_disjoint_count += 1;
         }
+        if stage_e_outcome.cold_start_preferred_over_stale_sh {
+            state.cold_start_preferred_over_stale_sh += 1;
+        }
         // Cumulative counters from this Stage E pass.
         state.sights_inserted_total += stage_e_outcome.sights_inserted as u64;
         state.sights_evicted_total += stage_e_outcome.sights_evicted as u64;
@@ -872,6 +877,7 @@ impl StreamingEngine {
             cold_start_ambiguous_skipped: state.cold_start_ambiguous_skipped,
             cold_start_inconsistent_count: state.cold_start_inconsistent_count,
             cold_start_disjoint_count: state.cold_start_disjoint_count,
+            cold_start_preferred_over_stale_sh: state.cold_start_preferred_over_stale_sh,
             fixes_published_total: state.fixes_published_total,
             fix_publish_attempts: state.fix_publish_attempts,
             sights_inserted_total: state.sights_inserted_total,
