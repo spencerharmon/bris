@@ -9,6 +9,24 @@ For the end-to-end pipeline architecture and data flow, see
 
 ---
 
+## Almanac: explicit diurnal aberration
+
+`bris-almanac` now models diurnal aberration explicitly
+(Meeus Ch. 23) via `apply_diurnal_aberration`. The
+observer's rotational velocity `v = ω × r` (peak ~465 cos φ
+m/s) is applied with the same classical `u_app =
+normalize(u + v/c)` formula used for annual aberration, and
+the correction sits between topocentric parallax and
+refraction in the apparent-place chain. Peak shift ~0.32″ at
+the equator on the meridian, vanishing at the poles. Only
+the topocentric `body_apparent_place` /
+`star_apparent_place` paths apply it; `body_geocentric_apparent`
+(used by the cold-start GP fallback) deliberately does not.
+With diurnal aberration now modelled, `ABERRATION_RESIDUAL_SIGMA_RAD`
+drops from 0.5″ (PR #25) to 0.15″.
+
+---
+
 ## Android: confidence ellipse + session views
 
 Kotlin-only PR consuming the post-PR-#18 FFI getters

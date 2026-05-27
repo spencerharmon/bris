@@ -23,10 +23,15 @@
 //!    (diurnal parallax; only the Moon is large, but applied to Sun
 //!    and planets uniformly for consistency). Uses Meeus Ch. 40.
 //!    See [`topocentric_equatorial`].
-//! 7. Equatorial → horizontal via [`coord::equatorial_to_horizontal`]
+//! 7. Apply diurnal aberration (Meeus Ch. 23): shift the direction
+//!    by the observer's rotational velocity v = ω × r about Earth's
+//!    axis. Peak ~0.32″ at the equator, 0 at the poles. Observer-
+//!    dependent, so only the topocentric path applies it.
+//!    See [`apply_diurnal_aberration`].
+//! 8. Equatorial → horizontal via [`coord::equatorial_to_horizontal`]
 //!    using local apparent sidereal time.
-//! 8. Subtract horizon dip from altitude (eye-height effect).
-//! 9. Apply atmospheric refraction.
+//! 9. Subtract horizon dip from altitude (eye-height effect).
+//! 10. Apply atmospheric refraction.
 //!
 //! # Pipeline (star)
 //!
@@ -51,6 +56,7 @@ use crate::observer::Observer;
 use crate::refraction::{bennett, RefractionError};
 use bris_core::time::Tt;
 use bris_core::Sigma;
+use std::f64::consts::TAU;
 
 /// What an observer sees at the eyepiece: altitude and azimuth, with
 /// an attached 1σ uncertainty in altitude.
@@ -81,21 +87,26 @@ pub enum ApparentPlaceError {
     NonFinite,
 }
 
-/// Residual 1σ uncertainty after applying classical annual aberration.
+/// Residual 1σ uncertainty after applying classical annual + diurnal
+/// aberration.
 ///
-/// The classical formulation accounts for Earth's heliocentric orbital
-/// velocity (~30 km/s, peak shift ~20″). Unmodelled or approximated
-/// contributions, summed in quadrature into a single conservative
-/// floor of ~0.5″ (≈ 2.4e-6 rad):
+/// Both the heliocentric (~30 km/s, peak shift ~20″) and the
+/// observer's rotational (~0.465 cos φ km/s, peak ~0.32″ at the
+/// equator) classical aberration terms are modeled explicitly.
+/// Remaining contributions, summed in quadrature into a ~0.15″
+/// (≈ 7.3e-7 rad) floor:
 ///
-/// * Diurnal aberration (observer's rotational velocity about Earth's
-///   axis, peak ~0.32″ at the equator on the meridian) — not modeled.
-/// * Higher-order classical terms and the geocenter↔observer velocity
-///   difference (~0.1″).
+/// * Higher-order (v²/c²) classical terms and the geocenter↔observer
+///   velocity difference beyond the rigid-rotation model (~0.05″).
 /// * Small numerical-derivative noise from the 60 s centered VSOP87
-///   finite difference used for Earth's heliocentric velocity (well
-///   below 0.01″ in practice).
-const ABERRATION_RESIDUAL_SIGMA_RAD: f64 = 0.5 * std::f64::consts::PI / (180.0 * 3600.0);
+///   finite difference used for Earth's heliocentric velocity
+///   (well below 0.01″ in practice).
+/// * Small implementation imprecision in the Meeus closed-form
+///   constants and obliquity rotation (~0.1″ budget).
+const ABERRATION_RESIDUAL_SIGMA_RAD: f64 = 0.15 * std::f64::consts::PI / (180.0 * 3600.0);
+
+/// Earth's sidereal rotation rate, rad/s (IERS conventions 2010).
+const EARTH_ROTATION_RATE_RAD_PER_S: f64 = 7.292_115_146_706_4e-5;
 
 /// Speed of light in m/s.
 const C_M_PER_S: f64 = 299_792_458.0;
@@ -108,6 +119,11 @@ const SECS_PER_DAY: f64 = 86_400.0;
 /// Returns `BelowHorizon` if the body is below the geometric horizon
 /// (post-refraction altitude < 0), since refraction is not defined
 /// there in our model.
+///
+/// Unlike [`body_geocentric_apparent`], this topocentric path applies
+/// diurnal aberration (Meeus Ch. 23): a sub-arcsecond shift driven by
+/// the observer's rotational velocity about Earth's axis. Peak
+/// ~0.32″ at the equator on the meridian, 0 at the poles.
 pub fn body_apparent_place(
     body: SolarSystemBody,
     tt: Tt,
@@ -266,18 +282,25 @@ fn apply_nutation(p: Equatorial, dpsi_rad: f64, deps_rad: f64, tt: Tt) -> Equato
 /// body.
 ///
 /// Runs the apparent-place chain through *nutation* and *annual
-/// aberration*, but STOPS BEFORE topocentric parallax, horizon dip,
-/// and refraction. The result is the geocentric (RA, Dec) of date
-/// suitable for deriving the body's sub-point (geographic position):
-/// latitude = Dec, longitude = -(GAST - RA) wrapped, with GAST
-/// computed from [`coord::gmst_rad`] and [`frame::nutation`].
+/// aberration*, but STOPS BEFORE topocentric parallax, diurnal
+/// aberration, horizon dip, and refraction. The result is the
+/// geocentric (RA, Dec) of date suitable for deriving the body's
+/// sub-point (geographic position): latitude = Dec, longitude =
+/// -(GAST - RA) wrapped, with GAST computed from
+/// [`coord::gmst_rad`] and [`frame::nutation`].
 ///
 /// This is the right primitive for the streaming engine's cold-start
 /// fallback: that path needs each body's geocentric GP — declination
 /// and -GHA — to construct true circles of position. Running the full
 /// apparent-place chain at the engine observer instead would bake
-/// refraction (~tens of arcmin at low altitude) and diurnal parallax
-/// (~1° for the Moon) into the GP, biasing every cold-start fix.
+/// refraction (~tens of arcmin at low altitude), diurnal parallax
+/// (~1° for the Moon), and diurnal aberration (sub-arcsecond, but
+/// observer-dependent) into the GP, biasing every cold-start fix.
+///
+/// Diurnal aberration is **not** applied here: it depends on the
+/// observer's geocentric position and velocity, which a geocentric
+/// primitive does not have. The topocentric [`body_apparent_place`]
+/// path applies it.
 #[must_use]
 pub fn body_geocentric_apparent(body: SolarSystemBody, tt: Tt) -> Equatorial {
     let geo_ecl = body_geocentric_ecliptic(body, tt);
@@ -488,6 +511,64 @@ fn topocentric_equatorial(
     }
 }
 
+/// Apply classical diurnal aberration (Meeus Ch. 23).
+///
+/// The observer's instantaneous velocity due to Earth's sidereal
+/// rotation is `v = ω × r`, where ω is along the celestial north
+/// pole and r is the observer's geocentric position vector. In the
+/// equatorial-of-date frame with the x-axis toward the true equinox
+/// of date,
+///   r = a (ρ cos φ' cos θ,  ρ cos φ' sin θ,  ρ sin φ'),
+/// where θ is the local apparent sidereal time (the right ascension
+/// of the observer's meridian) and (ρ sin φ', ρ cos φ') is the
+/// observer's geocentric latitude factor from Meeus Ch. 11/40. Then
+///   v = ω × r = a ω ρ cos φ' (-sin θ, cos θ, 0).
+///
+/// The apparent direction follows the standard aberration formula
+/// `u_app = normalize(u + v / c)`. Magnitude on the meridian for a
+/// body at the celestial equator at the equator: |v|/c ≈ 1.55e-6 rad
+/// ≈ 0.32″, vanishing at the poles.
+#[must_use]
+pub fn apply_diurnal_aberration(
+    eq: Equatorial,
+    observer: Observer,
+    last_rad_val: f64,
+) -> Equatorial {
+    let phi = observer.latitude.radians();
+    let h_over_a = observer.eye_height_m.max(0.0) / EARTH_EQUATORIAL_RADIUS_M;
+    let one_minus_f = 1.0 - EARTH_FLATTENING;
+    let u = (one_minus_f * phi.tan()).atan();
+    let cos_u = u.cos();
+    let cos_phi = phi.cos();
+    let rho_cos_phip = cos_u + h_over_a * cos_phi;
+
+    // |v| at the equator (ρ cos φ' = 1) is ω · a ≈ 465.10 m/s.
+    let v_mag = EARTH_ROTATION_RATE_RAD_PER_S * EARTH_EQUATORIAL_RADIUS_M * rho_cos_phip;
+
+    let (sin_th, cos_th) = last_rad_val.sin_cos();
+    let vx = -v_mag * sin_th;
+    let vy = v_mag * cos_th;
+    let vz = 0.0;
+
+    let (sa, ca) = eq.ra.sin_cos();
+    let (sdec, cdec) = eq.dec.sin_cos();
+    let ux = cdec * ca;
+    let uy = cdec * sa;
+    let uz = sdec;
+
+    let dx = ux + vx / C_M_PER_S;
+    let dy = uy + vy / C_M_PER_S;
+    let dz = uz + vz / C_M_PER_S;
+    let inv_len = 1.0 / (dx * dx + dy * dy + dz * dz).sqrt();
+    let dx = dx * inv_len;
+    let dy = dy * inv_len;
+    let dz = dz * inv_len;
+
+    let ra = dy.atan2(dx).rem_euclid(TAU);
+    let dec = dz.clamp(-1.0, 1.0).asin();
+    Equatorial { ra, dec }
+}
+
 /// Final stage shared by Solar-System and stellar paths.
 fn finalize_to_horizontal(
     true_eq: Equatorial,
@@ -506,6 +587,13 @@ fn finalize_to_horizontal(
         Some(d_au) if d_au > 0.0 => topocentric_equatorial(true_eq, last, observer, d_au * AU_M),
         _ => true_eq,
     };
+
+    // Diurnal aberration (Meeus Ch. 23): shift the apparent direction
+    // by the observer's rotational velocity v = ω × r. Observer-
+    // dependent, so it lives on this topocentric path and not on
+    // `body_geocentric_apparent`. Stars at infinity receive the same
+    // v/c shift (the formula does not depend on body distance).
+    let topo_eq = apply_diurnal_aberration(topo_eq, observer, last);
 
     // Equatorial → horizontal.
     let mut horizontal = equatorial_to_horizontal(topo_eq, last, observer.latitude.radians());
@@ -670,10 +758,12 @@ mod tests {
         //   alt = 18.9431°, az = 257.9499°
         // Without diurnal parallax bris reported 19.8354° (≈54′ high).
         //
-        // After applying topocentric correction (this commit) Hc must
-        // agree with Skyfield to better than 1′ in altitude. Tighter
-        // residuals (a few arcseconds) are limited by the truncated
-        // ELP series and our aberration stub; do not weaken below 1′.
+        // After applying topocentric correction Hc agrees with Skyfield
+        // to better than 1′ in altitude. After explicitly modelling
+        // diurnal aberration (Meeus Ch. 23) the residual tightens
+        // further (Skyfield includes diurnal aberration in apparent
+        // place). Remaining residuals are limited by the truncated ELP
+        // series.
         let utc = chrono::Utc
             .timestamp_millis_opt(1_779_690_546_752)
             .single()
@@ -704,21 +794,161 @@ mod tests {
 
     #[test]
     fn aberration_residual_sigma_is_small() {
-        // After applying classical annual aberration, the contribution
-        // is ~0.1″. The historical placeholder was 20″; verify it is
-        // no longer combined into the altitude sigma by checking the
-        // total is below the old floor (refraction + dip alone is
-        // ~19.6″ at default_dev; adding 20″ in quadrature would push
-        // past 28″).
+        // After applying classical annual + diurnal aberration the
+        // residual is ~0.15″. The historical placeholder was 20″;
+        // PR #25 raised it to 0.5″ to cover unmodelled diurnal
+        // aberration. With diurnal now explicit the residual drops
+        // back. Check the total altitude sigma is well below the old
+        // floor and that the aberration contribution alone is < 0.2″.
+        let arcsec_per_rad = 180.0 * 3600.0 / std::f64::consts::PI;
+        let aberration_arcsec = ABERRATION_RESIDUAL_SIGMA_RAD * arcsec_per_rad;
+        assert!(
+            aberration_arcsec < 0.2,
+            "aberration residual σ {aberration_arcsec}″ should be < 0.2″ \
+             after explicit diurnal modelling"
+        );
         let (tt, jd_ut1) = june_solstice_noon_at_greenwich();
         let obs = Observer::default_dev();
         let ap = body_apparent_place(SolarSystemBody::Sun, tt, jd_ut1, obs).unwrap();
-        let arcsec = ap.altitude_sigma.value() * 180.0 * 3600.0 / std::f64::consts::PI;
+        let arcsec = ap.altitude_sigma.value() * arcsec_per_rad;
         assert!(
             arcsec < 25.0,
             "altitude sigma {arcsec}\" should no longer carry a 20\" \
              aberration placeholder (combined with dip+refraction ≈ 19.6\", \
              the placeholder would push this past 28\")"
+        );
+    }
+
+    #[test]
+    fn diurnal_aberration_zero_at_poles() {
+        // At the geographic pole the observer's rotational velocity
+        // is zero (ρ cos φ' → 0 as φ → ±90°). The shift must be
+        // <0.01″ in both coordinates.
+        let utc = chrono::Utc
+            .with_ymd_and_hms(2024, 6, 21, 12, 0, 0)
+            .single()
+            .unwrap();
+        let tt = utc_to_tt(utc).unwrap();
+        let jd_ut1 = chrono_to_jd_utc(utc);
+        let obs = Observer {
+            latitude: bris_core::Latitude::from_degrees(90.0).unwrap(),
+            longitude: bris_core::Longitude::PRIME_MERIDIAN,
+            eye_height_m: 0.0,
+            eye_height_sigma_m: 0.5,
+            atmosphere: crate::refraction::Atmosphere::STANDARD,
+        };
+        let eps = crate::frame::mean_obliquity(tt);
+        let last = crate::coord::last_rad(
+            jd_ut1,
+            obs.longitude.radians(),
+            crate::frame::nutation(tt).delta_psi,
+            eps,
+        );
+        let eq = Equatorial { ra: 0.5, dec: 0.3 };
+        let app = apply_diurnal_aberration(eq, obs, last);
+        let arcsec_per_rad = 180.0 * 3600.0 / std::f64::consts::PI;
+        let dra_arcsec = (app.ra - eq.ra) * eq.dec.cos() * arcsec_per_rad;
+        let ddec_arcsec = (app.dec - eq.dec) * arcsec_per_rad;
+        assert!(
+            dra_arcsec.abs() < 0.01 && ddec_arcsec.abs() < 0.01,
+            "diurnal aberration at pole shifted ({dra_arcsec:.4}″, {ddec_arcsec:.4}″); \
+             expected < 0.01″ each"
+        );
+    }
+
+    #[test]
+    fn diurnal_aberration_magnitude_at_equator() {
+        // At the equator the observer's rotational velocity points
+        // east in the equatorial frame. A body on the local meridian
+        // (RA = LAST) has its line of sight perpendicular to v, so
+        // the classical aberration shift is purely along the east
+        // (RA) direction with magnitude |v|/c ≈ 0.32″, independent
+        // of Dec when expressed as ΔRA · cos(Dec). ΔDec is near zero.
+        let utc = chrono::Utc
+            .with_ymd_and_hms(2024, 6, 21, 0, 0, 0)
+            .single()
+            .unwrap();
+        let tt = utc_to_tt(utc).unwrap();
+        let jd_ut1 = chrono_to_jd_utc(utc);
+        let obs = Observer {
+            latitude: bris_core::Latitude::from_degrees(0.0).unwrap(),
+            longitude: bris_core::Longitude::PRIME_MERIDIAN,
+            eye_height_m: 0.0,
+            eye_height_sigma_m: 0.5,
+            atmosphere: crate::refraction::Atmosphere::STANDARD,
+        };
+        let eps = crate::frame::mean_obliquity(tt);
+        let last = crate::coord::last_rad(
+            jd_ut1,
+            obs.longitude.radians(),
+            crate::frame::nutation(tt).delta_psi,
+            eps,
+        );
+        let arcsec_per_rad = 180.0 * 3600.0 / std::f64::consts::PI;
+        for dec_deg in [-30.0_f64, 0.0, 30.0, 60.0] {
+            let dec = dec_deg.to_radians();
+            let eq = Equatorial { ra: last, dec };
+            let app = apply_diurnal_aberration(eq, obs, last);
+            let dra_cos = ((app.ra - eq.ra + std::f64::consts::PI).rem_euclid(TAU)
+                - std::f64::consts::PI)
+                * dec.cos()
+                * arcsec_per_rad;
+            let ddec_arcsec = (app.dec - eq.dec) * arcsec_per_rad;
+            assert!(
+                (0.25..=0.40).contains(&dra_cos.abs()),
+                "diurnal ΔRA cos(Dec) at equator (Dec={dec_deg}°) = {dra_cos:.3}″, \
+                 expected magnitude in [0.25″, 0.40″]"
+            );
+            assert!(
+                ddec_arcsec.abs() < 0.05,
+                "diurnal ΔDec at equator meridian (Dec={dec_deg}°) = {ddec_arcsec:.3}″, \
+                 expected near zero"
+            );
+        }
+    }
+
+    #[test]
+    fn ecliptic_pole_annual_plus_diurnal_within_one_arcsec() {
+        // Body at the ecliptic pole: annual aberration produces the
+        // maximum shift ~20.5″, and diurnal aberration adds a much
+        // smaller (≤0.32″) term. The combined apparent direction
+        // should still lie within ~1″ of the annual-only result
+        // (diurnal is below 1″ even at its peak).
+        let utc = chrono::Utc
+            .with_ymd_and_hms(2024, 1, 3, 5, 0, 0)
+            .single()
+            .unwrap();
+        let tt = utc_to_tt(utc).unwrap();
+        let jd_ut1 = chrono_to_jd_utc(utc);
+        let eps = crate::frame::mean_obliquity(tt);
+        let true_eq = Equatorial {
+            ra: 1.5 * std::f64::consts::PI,
+            dec: std::f64::consts::FRAC_PI_2 - eps,
+        };
+        let annual = apply_annual_aberration(true_eq, tt);
+        let obs = Observer {
+            latitude: bris_core::Latitude::from_degrees(0.0).unwrap(),
+            longitude: bris_core::Longitude::PRIME_MERIDIAN,
+            eye_height_m: 0.0,
+            eye_height_sigma_m: 0.5,
+            atmosphere: crate::refraction::Atmosphere::STANDARD,
+        };
+        let last = crate::coord::last_rad(
+            jd_ut1,
+            obs.longitude.radians(),
+            crate::frame::nutation(tt).delta_psi,
+            eps,
+        );
+        let combined = apply_diurnal_aberration(annual, obs, last);
+        let (sa0, ca0) = annual.ra.sin_cos();
+        let (sdec0, cdec0) = annual.dec.sin_cos();
+        let (sa1, ca1) = combined.ra.sin_cos();
+        let (sdec1, cdec1) = combined.dec.sin_cos();
+        let dot = (cdec0 * ca0) * (cdec1 * ca1) + (cdec0 * sa0) * (cdec1 * sa1) + sdec0 * sdec1;
+        let arcsec = dot.clamp(-1.0, 1.0).acos() * 180.0 * 3600.0 / std::f64::consts::PI;
+        assert!(
+            arcsec < 1.0,
+            "diurnal aberration on top of annual at ecliptic pole = {arcsec:.3}″, expected < 1″"
         );
     }
 
