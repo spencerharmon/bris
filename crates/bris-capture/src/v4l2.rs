@@ -31,15 +31,27 @@ use bris_streaming::StreamingEngine;
 use bris_vision::{Frame, Intrinsics};
 use tracing::{debug, info, warn};
 use v4l::buffer::Type as BufferType;
+use v4l::control::Value as ControlValue;
 use v4l::format::FourCC;
 use v4l::io::traits::CaptureStream;
 use v4l::prelude::{Device, MmapStream};
 use v4l::video::Capture;
 use v4l::Format;
 
+use bris_core::SensorGain;
+
 use crate::error::CaptureError;
 use crate::format::yuyv_to_grayscale_u16;
+use crate::sensor_gain::{map_for_card, SensorMapKind};
 use crate::time::{buffer_to_mid_exposure_tt, MonotonicAnchor};
+
+/// V4L2 control id for analog (pre-ADC) gain. Per
+/// `<linux/videodev2.h>`: `V4L2_CID_CAMERA_CLASS_BASE + 3`.
+const V4L2_CID_ANALOGUE_GAIN: u32 = 0x009a_0903;
+/// V4L2 control id for the user-class generic gain control.
+/// Per `<linux/videodev2.h>`: `V4L2_CID_BASE + 19`. Used as a
+/// fallback when `V4L2_CID_ANALOGUE_GAIN` is unsupported.
+const V4L2_CID_GAIN: u32 = 0x0098_0913;
 
 /// Fourcc of the only pixel format this backend currently
 /// accepts. Cameras that don't list YUYV in their
@@ -111,6 +123,8 @@ pub struct V4l2Capture {
     intrinsics: Intrinsics,
     anchor: MonotonicAnchor,
     actual_format: Format,
+    sensor_map: SensorMapKind,
+    card_name: String,
 }
 
 impl std::fmt::Debug for V4l2Capture {
@@ -230,12 +244,36 @@ impl V4l2Capture {
         }
 
         let anchor = MonotonicAnchor::now();
+        let (card_name, sensor_map) = match device.query_caps() {
+            Ok(caps) => {
+                let kind = map_for_card(&caps.card);
+                info!(
+                    card = %caps.card,
+                    driver = %caps.driver,
+                    sensor_map = ?kind,
+                    "V4l2Capture: identified sensor for gain mapping",
+                );
+                if matches!(kind, SensorMapKind::Unknown) {
+                    warn!(
+                        card = %caps.card,
+                        "V4l2Capture: no SensorGainMap for this card; centroid weights will use SensorGain::UNITY",
+                    );
+                }
+                (caps.card, kind)
+            }
+            Err(e) => {
+                warn!(error = %e, "V4l2Capture: VIDIOC_QUERYCAP failed; defaulting to SensorGain::UNITY");
+                (String::new(), SensorMapKind::Unknown)
+            }
+        };
         Ok(Self {
             device,
             config,
             intrinsics,
             anchor,
             actual_format,
+            sensor_map,
+            card_name,
         })
     }
 
@@ -373,6 +411,8 @@ where
         intrinsics,
         anchor,
         actual_format,
+        sensor_map,
+        card_name,
     } = capture;
     info!(
         device = %config.device_path.display(),
@@ -393,14 +433,17 @@ where
         exposure_us: config.exposure_us,
         intrinsics,
     };
+    let gain_ctx = GainContext::new(sensor_map, card_name);
 
     let mut stats = CaptureStats::default();
     while !shutdown.load(Ordering::Relaxed) {
         let (buf, meta) = stream.next()?;
         let buffer_monotonic: Duration = meta.timestamp.into();
         let bytes = &buf[..meta.bytesused as usize];
+        let gain = gain_ctx.read_gain(&device);
         match convert_to_frame(bytes, buffer_monotonic, &convert_ctx) {
             Ok(frame) => {
+                let frame = frame.with_sensor_gain(gain);
                 stats.frames_captured += 1;
                 if matches!(on_frame(frame), CaptureLoopAction::Stop) {
                     debug!("V4L2 capture loop: callback requested stop");
@@ -473,6 +516,61 @@ struct ConvertContext {
     anchor: MonotonicAnchor,
     exposure_us: u32,
     intrinsics: Intrinsics,
+}
+
+/// Holds the sensor-gain mapping and tracks whether we've
+/// already warned for an unsupported gain control on this
+/// stream (warn-once semantics).
+#[derive(Debug)]
+struct GainContext {
+    sensor_map: SensorMapKind,
+    card_name: String,
+    warned_no_control: std::sync::atomic::AtomicBool,
+}
+
+impl GainContext {
+    fn new(sensor_map: SensorMapKind, card_name: String) -> Self {
+        Self {
+            sensor_map,
+            card_name,
+            warned_no_control: std::sync::atomic::AtomicBool::new(false),
+        }
+    }
+
+    /// Read the current analog gain from the device and
+    /// convert via the selected [`SensorMapKind`]. Falls
+    /// back to [`SensorGain::UNITY`] on any ioctl error,
+    /// warning at most once per stream.
+    fn read_gain(&self, device: &Device) -> SensorGain {
+        let driver_value = match device.control(V4L2_CID_ANALOGUE_GAIN) {
+            Ok(c) => integer_value(&c.value),
+            Err(_) => match device.control(V4L2_CID_GAIN) {
+                Ok(c) => integer_value(&c.value),
+                Err(_) => None,
+            },
+        };
+        if let Some(v) = driver_value {
+            self.sensor_map.to_sensor_gain(v)
+        } else {
+            if !self
+                .warned_no_control
+                .swap(true, std::sync::atomic::Ordering::Relaxed)
+            {
+                warn!(
+                    card = %self.card_name,
+                    "V4l2Capture: neither V4L2_CID_ANALOGUE_GAIN nor V4L2_CID_GAIN readable; using SensorGain::UNITY",
+                );
+            }
+            SensorGain::UNITY
+        }
+    }
+}
+
+fn integer_value(v: &ControlValue) -> Option<i32> {
+    match v {
+        ControlValue::Integer(i) => i32::try_from(*i).ok(),
+        _ => None,
+    }
 }
 
 /// Convert one V4L2 buffer to a `bris_vision::Frame`.

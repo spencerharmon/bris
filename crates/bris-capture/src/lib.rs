@@ -73,12 +73,16 @@
 
 mod error;
 pub mod format;
+pub mod sensor_gain;
 pub mod time;
 #[cfg(feature = "v4l2")]
 mod v4l2;
 
 pub use error::CaptureError;
 pub use format::{widen_u8_to_u16, yuyv_to_grayscale_u16, FormatError};
+pub use sensor_gain::{
+    map_for_card, Imx219LinearMap, OvGenericMap, SensorGainMap, SensorMapKind, UnknownMap,
+};
 pub use time::{buffer_to_mid_exposure_tt, MonotonicAnchor, TimestampError};
 #[cfg(feature = "v4l2")]
 pub use v4l2::{

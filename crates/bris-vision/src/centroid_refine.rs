@@ -17,10 +17,14 @@
 //! Levenberg-Marquardt with photon-plus-read-noise inverse-
 //! variance weights `w_i = 1 / (I_i / gain + read_noise_adu²)`
 //! (variance in ADU²). Pass [`DEFAULT_GAIN_E_PER_ADU`] when the
-//! caller does not have a measured sensor gain — the Pi Zero
-//! 2W / Android camera plumbing has yet to surface it. TODO:
-//! wire from `bris-android` camera characteristics +
-//! `bris-capture` V4L2 controls.
+//! caller does not have a measured sensor gain; otherwise pass
+//! the per-frame `gain.e_per_adu()` from
+//! [`crate::frame::Frame::gain`], which is populated by the
+//! capture shell from V4L2 `V4L2_CID_ANALOGUE_GAIN` (Linux) or
+//! `CaptureResult.SENSOR_SENSITIVITY` (Android). "Measured"
+//! here means **analog** gain only — digital gain is
+//! post-quantization and does not contribute to the per-pixel
+//! shot-noise variance.
 
 #![allow(
     clippy::cast_possible_truncation,
@@ -89,10 +93,10 @@ pub struct RefinedCentroid {
 const READ_NOISE_ADU: f64 = 5.0;
 
 /// Default sensor gain (electrons per ADU) used when no
-/// measured value is available from camera characteristics.
-/// TODO: plumb a measured gain from `bris-capture` V4L2
-/// controls / `bris-android` `CameraCharacteristics` instead
-/// of falling back to this constant.
+/// measured value is available. Kept as a fallback for
+/// callers without a real measurement (synthetic test
+/// frames, regression fixtures); the streaming pipeline now
+/// uses `Frame::gain` from the capture shell when available.
 pub const DEFAULT_GAIN_E_PER_ADU: f64 = 1.0;
 
 /// Minimum halo size for a 5-parameter fit to be meaningful.
@@ -799,6 +803,40 @@ mod tests {
         );
         assert!((r.x - primary.x).abs() < 1e-12);
         assert!((r.y - primary.y).abs() < 1e-12);
+    }
+
+    #[test]
+    fn gain_change_scales_sigma() {
+        // Per-pixel shot-noise variance in ADU is `I/gain`
+        // (electrons divided by g² maps to ADU² / g). Raising
+        // `gain` *lowers* the per-ADU variance — each ADU
+        // represents more electrons — which raises the
+        // inverse-variance weights and tightens the fit
+        // covariance. A 4× gain change should shrink σ by
+        // roughly √4 = 2× in the photon-noise-dominated
+        // limit; allow [1.5, 2.5] for read-noise contamination.
+        let frame = synth_gaussian(120, 100, 60.4, 50.6, 4.0, 80_000.0, 500.0);
+        let cfg = SaturatedBodyConfig {
+            saturation_threshold: 60_000,
+            min_area_px: 5,
+        };
+        let primary = extract_multi_saturated_centroids(&frame, cfg, None)
+            .unwrap()
+            .into_iter()
+            .next()
+            .unwrap();
+        let halo = extract_halo_pixels(&frame, primary, 60_000, 15);
+        let r1 = refine_centroid_subpixel(&frame, primary, &halo, 1.0);
+        let r4 = refine_centroid_subpixel(&frame, primary, &halo, 4.0);
+        assert!(r1.refined && r4.refined);
+        let s1 = r1.sigma_x_px.min(r1.sigma_y_px);
+        let s4 = r4.sigma_x_px.min(r4.sigma_y_px);
+        assert!(s4 < s1, "σ(g=4)={s4} must be below σ(g=1)={s1}");
+        let ratio = s1 / s4;
+        assert!(
+            (1.5..=2.5).contains(&ratio),
+            "σ-ratio {ratio} (g=1 / g=4) out of [1.5, 2.5]"
+        );
     }
 
     #[test]

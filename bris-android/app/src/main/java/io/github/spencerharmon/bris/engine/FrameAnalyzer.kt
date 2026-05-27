@@ -39,13 +39,44 @@ class FrameAnalyzer(
     private val intrinsicsProvider: () -> FfiIntrinsics,
     private val debugCaptureProvider: () -> Boolean = { false },
     private val debugBuffer: DebugCaptureBuffer? = null,
+    /**
+     * Returns the **current** sensor analog conversion gain
+     * in electrons per ADU for the active camera, scaled to
+     * the current ISO. The wiring is:
+     *
+     *   gain_e_per_adu = profile.gainEPerAduAtMinIso *
+     *                    (currentIso / minIso)
+     *
+     * Where `currentIso` comes from the most recent
+     * `CaptureResult.SENSOR_SENSITIVITY` and `minIso` from
+     * `CameraCharacteristics.SENSOR_INFO_SENSITIVITY_RANGE`
+     * lower bound. The relationship is approximately
+     * linear inside the analog-gain range; once the camera
+     * runs out of analog gain it falls back to digital,
+     * which **should not** be folded in (the engine assumes
+     * the value here reflects analog gain only). For the
+     * placeholder profile in [`FactoryCalibration`] the
+     * caller treats the entire ISO range as analog — OK
+     * for the spike, refine when a per-unit measurement
+     * lands.
+     *
+     * Returns `0.0` when no profile / ISO is yet available;
+     * the FFI substitutes [`SensorGain::UNITY`].
+     *
+     * TODO: add a Robolectric test for the gain-scaling
+     * behaviour when the Android test infrastructure grows.
+     */
+    private val sensorGainProvider: () -> Double = { 0.0 },
 ) : ImageAnalysis.Analyzer {
 
     private val frameCount = AtomicLong(0)
 
     override fun analyze(image: ImageProxy) {
         try {
-            val ffiFrame = image.image?.toFfiFrame(intrinsicsProvider()) ?: return
+            val ffiFrame = image.image?.toFfiFrame(
+                intrinsicsProvider(),
+                sensorGainProvider(),
+            ) ?: return
             engine.pushFrame(ffiFrame)
             frameCount.incrementAndGet()
             if (debugCaptureProvider() && debugBuffer != null) {
@@ -100,7 +131,10 @@ class FrameAnalyzer(
  * for time integrity, but at the FFI boundary the caller-side
  * monotonic-vs-wall conversion is a small approximation.
  */
-private fun Image.toFfiFrame(intrinsics: FfiIntrinsics): FfiFrame {
+private fun Image.toFfiFrame(
+    intrinsics: FfiIntrinsics,
+    gainEPerAdu: Double,
+): FfiFrame {
     val yPlane = planes[0]
     val rowStride = yPlane.rowStride
     val pixelStride = yPlane.pixelStride
@@ -151,5 +185,6 @@ private fun Image.toFfiFrame(intrinsics: FfiIntrinsics): FfiFrame {
         capturedUnixMs = System.currentTimeMillis(),
         exposureUs = 0u,
         intrinsics = intrinsics,
+        gainEPerAdu = gainEPerAdu,
     )
 }

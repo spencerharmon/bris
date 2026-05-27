@@ -28,6 +28,7 @@
 //! 8-bit input is widened on the way in.
 
 use bris_core::time::Tt;
+use bris_core::SensorGain;
 use core::num::NonZeroU32;
 
 /// Rotation applied to source pixels at load time, in degrees
@@ -424,6 +425,17 @@ pub struct Frame {
     // the struct name `Frame`).
     #[allow(clippy::struct_field_names)]
     pub gravity_camera_frame: Option<(f64, f64, f64)>,
+    /// Sensor conversion gain (electrons per ADU) under
+    /// which this frame's pixel intensities are
+    /// quantized. Used by
+    /// [`crate::refine_centroid_subpixel`] to compute
+    /// correct photon-shot-noise inverse-variance weights.
+    /// Defaults to [`SensorGain::UNITY`] for back-compat;
+    /// capture shells with access to a measured analog
+    /// gain (V4L2 `V4L2_CID_ANALOGUE_GAIN`, Android
+    /// `CaptureResult.SENSOR_SENSITIVITY`) populate it via
+    /// [`Frame::with_sensor_gain`].
+    pub gain: SensorGain,
 }
 
 impl Frame {
@@ -465,7 +477,16 @@ impl Frame {
             source_path: None,
             source_rotation: Rotation::Deg0,
             gravity_camera_frame: None,
+            gain: SensorGain::UNITY,
         })
+    }
+
+    /// Attach a measured sensor conversion gain to this
+    /// frame. See [`Frame::gain`].
+    #[must_use]
+    pub fn with_sensor_gain(mut self, gain: SensorGain) -> Self {
+        self.gain = gain;
+        self
     }
 
     /// Attach a source-file path to a frame. Consumed by the

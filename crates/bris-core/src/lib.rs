@@ -8,9 +8,11 @@
 //! See `plan.org` Phase 0 / Phase 1 for the design rationale.
 
 pub mod angle;
+pub mod sensor_gain;
 pub mod time;
 pub mod uncertainty;
 
 pub use angle::{Angle, AngleError, Hemisphere, Latitude, Longitude};
+pub use sensor_gain::SensorGain;
 pub use time::{Tai, TimeError, Tt, Ut1, JD_J2000, LEAP_TABLE_EXPIRES};
 pub use uncertainty::{Sigma, Uncertain, UncertaintyError};
