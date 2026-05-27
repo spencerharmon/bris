@@ -222,8 +222,16 @@ references to the regression tests that pin the behavior. See
    ~apply_annual_aberration~ in ~crates/bris-almanac/src/apparent.rs~.
    Earth heliocentric velocity from numerical derivative of VSOP87D over
    ±30 s, classical v/c formulation, applied between nutation and
-   topocentric parallax. ~20″ maximum shift; residual σ 0.1″ (down from
-   the 20″ placeholder).
+   topocentric parallax. ~20″ maximum shift.
+** DONE Diurnal aberration (Meeus Ch. 23)
+   ~apply_diurnal_aberration~ in ~crates/bris-almanac/src/apparent.rs~.
+   Observer's rotational velocity ~v = ω × r~ applied via the same
+   classical aberration formula, inserted after topocentric parallax and
+   before refraction in the apparent-place chain. Peak ~0.32″ at the
+   equator on the meridian, vanishing at the poles. Only the topocentric
+   ~body_apparent_place~/~star_apparent_place~ paths apply it;
+   ~body_geocentric_apparent~ deliberately does not. Combined annual +
+   diurnal aberration residual σ dropped from 0.5″ to 0.15″.
 ** TODO Benchmark on Pi Zero 2W
    Confirm <1 ms per body. Decide whether Chebyshev caching is needed.
    Likely answer: no.

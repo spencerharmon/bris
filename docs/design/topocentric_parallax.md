@@ -194,13 +194,25 @@ plan.org line. Items marked DONE in subsequent commits are noted.
    (classical formulation, Meeus Ch. 23). Earth's heliocentric
    velocity comes from a centered numerical derivative of VSOP87D
    over ±30 s, converted to equatorial-of-date cartesian via the
-   obliquity of date. Residual σ after application is 0.1″
-   (down from the 20″ placeholder).
-3. **Light-time correction for planets**. Currently TODO at
+   obliquity of date.
+3. **Diurnal aberration**. DONE — see
+   `crates/bris-almanac/src/apparent.rs::apply_diurnal_aberration`
+   (Meeus Ch. 23). The observer's rotational velocity
+   `v = ω × r` (peak ~465 cos φ m/s) is applied via the same
+   classical aberration formula. Observer-dependent, so it lives
+   on the topocentric `body_apparent_place` / `star_apparent_place`
+   path only — NOT on `body_geocentric_apparent`. Inserted AFTER
+   topocentric parallax and BEFORE refraction in the apparent-place
+   chain. Peak shift ~0.32″ at the equator on the meridian,
+   vanishing at the poles. Combined with annual aberration the
+   residual σ attached to altitude drops to ~0.15″ (from 0.5″
+   prior to this commit, which had carried diurnal as an
+   unmodelled budget item).
+4. **Light-time correction for planets**. Currently TODO at
    `apparent.rs:155`. ~1–2″ for Mars at opposition; larger
    for Jupiter and beyond. Required only when planets
    become navigational targets.
-4. **Full ELP-2000 lunar theory**. Replaces the truncated
+5. **Full ELP-2000 lunar theory**. Replaces the truncated
    Meeus 47.A series. Sub-arcsecond residual reduction.
    Only matters once everything above is fixed.
 
