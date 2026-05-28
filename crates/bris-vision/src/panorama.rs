@@ -51,7 +51,7 @@
     clippy::similar_names
 )]
 
-use crate::centroid::{centroid_brightest_body, CentroidConfig};
+use crate::centroid::{centroid_brightest_body, Centroid, CentroidConfig};
 use crate::frame::{Frame, Intrinsics};
 use crate::horizon::{HorizonConfig, HorizonLine};
 use crate::measure::{measure_altitude, MeasurementError};
@@ -59,6 +59,108 @@ use crate::ray::{altitude_from_rays, AltitudeMeasurement, BodyRay, CameraRay, Ho
 use crate::track::{track, track_rotation, RigidTransform, TrackConfig};
 use bris_core::{Sigma, Uncertain};
 use bris_math::kabsch;
+
+/// Stage E entry point: compose stitching + ray-space altitude
+/// for an already-detected body centroid and horizon line in
+/// two distinct frames.
+///
+/// Unlike [`panorama_altitude`] / [`panorama_altitude_via_rotation`],
+/// this helper does **not** run any detector. The caller (the
+/// streaming engine's Stage E) has already produced a
+/// [`Centroid`] for the body and a [`HorizonLine`] for the
+/// horizon — typically in separate frames — and just needs the
+/// cross-frame rotation chain and the ray-space altitude
+/// composition.
+///
+/// Mirrors phases 3+4 of [`panorama_altitude_via_rotation`]:
+///
+/// 1. Run [`track_rotation`] over the (`body_frame`, `horizon_frame`)
+///    pair to recover the camera-space rotation between them.
+/// 2. Lift the body centroid (in `body_frame`'s intrinsics) to a
+///    [`BodyRay`], rotate it into `horizon_frame`'s coordinates.
+/// 3. Lift the horizon line (in `horizon_frame`'s intrinsics) to
+///    a [`HorizonRay`] and compute the altitude via
+///    [`altitude_from_rays`].
+///
+/// # Honest σ
+///
+/// The returned σ combines (in quadrature):
+///
+/// - the body centroid's positional σ (from `body_centroid`,
+///   carried through `BodyRay::from_pixel`'s pixel→radian
+///   conversion),
+/// - the horizon line's altitude σ (from `horizon_line`,
+///   carried through `HorizonRay::from_line`), and
+/// - the **executed stitch σ**: `track_rotation`'s
+///   per-correspondence RMS angular residual in radians.
+///
+/// The stitch σ is added in quadrature to the body ray's
+/// direction σ before the altitude composition, because the
+/// rotation directly perturbs where the body ray lands in the
+/// horizon frame's coordinates. This supersedes the cheap
+/// time-gap-based estimate used by Stage E during pair
+/// selection.
+///
+/// # Errors
+///
+/// See [`PanoramaError`]: `TrackingFailed` if `track_rotation`
+/// refuses, `DegenerateHorizonRay` if the horizon line in
+/// `horizon_frame` won't lift to a camera plane,
+/// `Measurement` if the ray-space altitude composition
+/// produces a non-finite or sub-horizon result.
+pub fn panorama_altitude_for_pair(
+    body_frame: &Frame,
+    body_centroid: Centroid,
+    horizon_frame: &Frame,
+    horizon_line: HorizonLine,
+    track_cfg: TrackConfig,
+) -> Result<Uncertain<f64>, PanoramaError> {
+    let rot = track_rotation(body_frame, horizon_frame, track_cfg).map_err(|e| {
+        tracing::debug!(error = %e, "panorama_altitude_for_pair: track_rotation failed");
+        PanoramaError::TrackingFailed { from: 0, to: 1 }
+    })?;
+
+    // Lift the body centroid in its own frame's intrinsics.
+    let body_ray = BodyRay::from_pixel(
+        &body_frame.intrinsics,
+        body_centroid.x,
+        body_centroid.y,
+        body_centroid.position_sigma_px,
+    );
+
+    // Inflate the body ray's direction σ by the executed
+    // stitch σ (RMS angular residual from the Kabsch fit).
+    // Honest combination: stitch perturbs where the rotated
+    // ray lands in the horizon frame's coordinates.
+    let stitch_sigma_rad = rot.rms_residual_rad;
+    let combined_body_sigma =
+        (body_ray.direction_sigma.value().powi(2) + stitch_sigma_rad.powi(2)).sqrt();
+    let inflated_body_sigma = Sigma::new(combined_body_sigma).unwrap_or(body_ray.direction_sigma);
+
+    // Rotate the body ray into horizon_frame's coordinates.
+    let rotated = kabsch::rotate_vec(&rot.matrix, body_ray.ray.as_array());
+    let body_in_horizon = BodyRay {
+        ray: CameraRay::from_unit_components(rotated[0], rotated[1], rotated[2]),
+        direction_sigma: inflated_body_sigma,
+    };
+
+    // Lift the horizon line.
+    let horizon_ray = HorizonRay::from_line(
+        &horizon_line,
+        &horizon_frame.intrinsics,
+        horizon_frame.width(),
+    )
+    .ok_or(PanoramaError::DegenerateHorizonRay { frame: 1 })?;
+
+    let m: AltitudeMeasurement = altitude_from_rays(&body_in_horizon, &horizon_ray);
+    if !m.altitude_rad.is_finite() {
+        return Err(PanoramaError::Measurement(MeasurementError::NonFinite));
+    }
+    Ok(Uncertain {
+        value: m.altitude_rad,
+        sigma: m.altitude_sigma,
+    })
+}
 
 /// One frame's role in the panorama: did it produce a horizon? a body
 /// centroid? both? neither?
@@ -904,6 +1006,94 @@ mod tests {
         assert!(
             alt_deg > 1.0 && alt_deg < 10.0,
             "ray-space altitude {alt_deg}° out of expected range"
+        );
+    }
+
+    #[test]
+    fn for_pair_uses_supplied_horizon_without_redetecting() {
+        // body_frame has a bright body but no horizon detectable
+        // because it's a uniform-bright field around the body.
+        // horizon_frame has the horizon. We pass the horizon line
+        // in directly; the helper must not invoke any horizon
+        // detector and must succeed.
+        let body_frame = synth_body_only(320, 240, 160.0, 50.0, 10.0);
+        let horizon_frame = synth_horizon_only(320, 240, 120);
+
+        // Detect the horizon line in horizon_frame explicitly
+        // (mirroring what Stage E has cached as a HorizonRecord).
+        let horizon_line =
+            crate::horizon::detect_horizon(&horizon_frame, HorizonConfig::default()).unwrap();
+
+        // Centroid the body in body_frame explicitly (mirroring
+        // what Stage E has cached as a BodyRecord).
+        let body_centroid = centroid_brightest_body(&body_frame, CentroidConfig::default())
+            .expect("body centroid in body frame");
+
+        let alt = panorama_altitude_for_pair(
+            &body_frame,
+            body_centroid,
+            &horizon_frame,
+            horizon_line,
+            TrackConfig {
+                min_inliers: 4,
+                ..TrackConfig::default()
+            },
+        )
+        .expect("cross-frame helper should succeed on the synthetic pair");
+
+        let alt_deg = alt.value.to_degrees();
+        // Same fixture as `via_rotation_two_frame_chain_recovers_known_altitude`
+        // (body 70 px above the horizon at fy=1000 → ~4°).
+        assert!(
+            alt_deg > 1.0 && alt_deg < 10.0,
+            "for_pair altitude {alt_deg}° out of expected range"
+        );
+        // σ must be finite, positive, and strictly greater than
+        // just the centroid or horizon σ alone (it includes the
+        // executed stitch σ).
+        let sigma = alt.sigma.value();
+        assert!(sigma.is_finite() && sigma > 0.0);
+        assert!(
+            sigma >= horizon_line.altitude_sigma.value(),
+            "combined σ ({sigma}) should be ≥ horizon σ ({})",
+            horizon_line.altitude_sigma.value()
+        );
+    }
+
+    #[test]
+    fn for_pair_propagates_tracking_failed_for_unrelated_frames() {
+        // Two frames with no shared content: blank vs solid.
+        // The tracker should fail to find correspondences.
+        let pa = vec![1_000u16; 320 * 240];
+        let pb = vec![60_000u16; 320 * 240];
+        let intr = Intrinsics::placeholder(320, 240);
+        let fa = Frame::new(320, 240, pa, Tt::from_julian_date(JD_J2000), 1000, intr).unwrap();
+        let fb = Frame::new(320, 240, pb, Tt::from_julian_date(JD_J2000), 1000, intr).unwrap();
+        let horizon_line = crate::horizon::HorizonLine {
+            slope: 0.0,
+            intercept: 120.0,
+            inlier_count: 50,
+            candidate_count: 50,
+            residual_rms_px: 0.5,
+            altitude_sigma: Sigma::new(1e-4).unwrap(),
+        };
+        let body_centroid = crate::centroid::Centroid {
+            x: 160.0,
+            y: 60.0,
+            area_px: 100,
+            mean_intensity: 30_000.0,
+            position_sigma_px: Sigma::new(0.5).unwrap(),
+        };
+        let result = panorama_altitude_for_pair(
+            &fa,
+            body_centroid,
+            &fb,
+            horizon_line,
+            TrackConfig::default(),
+        );
+        assert!(
+            matches!(result, Err(PanoramaError::TrackingFailed { .. })),
+            "expected TrackingFailed, got {result:?}"
         );
     }
 }

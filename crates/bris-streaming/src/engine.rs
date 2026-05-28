@@ -238,6 +238,8 @@ struct EngineState {
     publication_gate_rejections: u64,
     /// See [`crate::EngineDiagnostics::ap_rederive_suppressed_count`].
     ap_rederive_suppressed_count: u64,
+    /// See [`crate::EngineDiagnostics::cross_frame_sights_emitted`].
+    cross_frame_sights_emitted: u64,
 }
 
 /// Nautical mile in metres; for converting Fix sigma (nm) to
@@ -555,6 +557,7 @@ impl StreamingEngine {
                 singular_geometry_rejections: 0,
                 publication_gate_rejections: 0,
                 ap_rederive_suppressed_count: 0,
+                cross_frame_sights_emitted: 0,
             }),
             config,
             fix_tx,
@@ -759,6 +762,7 @@ impl StreamingEngine {
         if stage_e_outcome.ap_rederive_suppressed {
             state.ap_rederive_suppressed_count += 1;
         }
+        state.cross_frame_sights_emitted += stage_e_outcome.cross_frame_sights_emitted;
         // Cumulative counters from this Stage E pass.
         state.sights_inserted_total += stage_e_outcome.sights_inserted as u64;
         state.sights_evicted_total += stage_e_outcome.sights_evicted as u64;
@@ -905,6 +909,7 @@ impl StreamingEngine {
             singular_geometry_rejections: state.singular_geometry_rejections,
             publication_gate_rejections: state.publication_gate_rejections,
             ap_rederive_suppressed_count: state.ap_rederive_suppressed_count,
+            cross_frame_sights_emitted: state.cross_frame_sights_emitted,
         }
     }
 

@@ -39,14 +39,24 @@
 //!
 //! # Same-frame vs cross-frame pairs
 //!
-//! Commit 5 emits **only same-frame sights**. Cross-frame pairs
-//! are *selected* (the `stitch_σ` math is in place) but the
-//! actual cross-frame altitude measurement via
-//! [`bris_vision::panorama_altitude`] is deferred to a follow-up
-//! commit. A cross-frame "best pair" with no same-frame
-//! alternative therefore yields no sight; the body record waits
-//! for a same-frame horizon partner or for the eventual
-//! cross-frame execution. Documented as a known limitation.
+//! Both same-frame and cross-frame pairs are reduced into
+//! sights. Same-frame pairs go directly through
+//! [`bris_vision::measure_altitude`]; cross-frame pairs run
+//! [`bris_vision::panorama_altitude_for_pair`], which composes
+//! the (already-detected) body centroid and horizon line via
+//! [`bris_vision::track_rotation`] (Kabsch over camera-space
+//! ray pairs) and the ray-space altitude composition. The
+//! helper returns an `Uncertain<f64>` whose σ honestly
+//! combines body-centroid σ, horizon σ, and the executed
+//! stitch σ (Kabsch per-correspondence RMS angular residual) —
+//! superseding the cheap time-gap-based estimate used during
+//! pair selection. Stage E only further combines this with the
+//! apparent-place altitude σ to get the per-sight altitude σ,
+//! so the stitch contribution is counted exactly once. The
+//! resulting [`Sight`] has `source_frame_id` (body) different
+//! from `horizon_frame_id`; the engine surfaces a count of
+//! such sights via
+//! [`crate::EngineDiagnostics::cross_frame_sights_emitted`].
 //!
 //! # Body identification
 //!
@@ -113,7 +123,9 @@ use bris_nav::{
     cold_start_fix, line_of_position, multi_sight_fix, CircleOfPosition, ColdStartConfig,
     ColdStartError, ColdStartResult, FixError, LineOfPosition,
 };
-use bris_vision::{measure_altitude, Centroid, HorizonLine};
+use bris_vision::{
+    measure_altitude, panorama_altitude_for_pair, Centroid, HorizonLine, PanoramaError, TrackConfig,
+};
 use std::time::{Duration, Instant};
 use tracing::{debug, info, trace};
 
@@ -124,10 +136,12 @@ use tracing::{debug, info, trace};
 /// this is a placeholder until a frame-to-frame motion-aware
 /// estimate lands.
 ///
-/// Used only for *pair-selection* prioritization. The actual
-/// stitch (when commit 5+follow-up wires in `panorama_altitude`)
-/// reports its own σ from cross-correlation residuals, which
-/// supersedes this estimate.
+/// Used only for *pair-selection* prioritization. At
+/// sight-emission time the cross-frame path executes
+/// [`bris_vision::panorama_altitude_for_pair`] which derives
+/// the actual stitch σ from the Kabsch per-correspondence RMS
+/// residual; that executed σ supersedes this estimate for the
+/// reported sight σ.
 const STITCH_SIGMA_PER_SECOND_RAD: f64 = 0.5 * std::f64::consts::PI / (60.0 * 180.0);
 
 /// Outcome of one Stage E run.
@@ -190,6 +204,11 @@ pub(crate) struct StageEOutcome {
     /// AP re-derivation was suppressed by `lock_ap_for_replay`
     /// during this Stage E pass. Diagnostic-only.
     pub ap_rederive_suppressed: bool,
+    /// Number of cross-frame sights inserted into the window
+    /// during this run (subset of `sights_inserted`). Mirrors
+    /// the engine-level counter
+    /// [`crate::EngineDiagnostics::cross_frame_sights_emitted`].
+    pub cross_frame_sights_emitted: u64,
 }
 
 /// Identifier for the body that produced a sight.
@@ -430,19 +449,15 @@ pub(crate) fn run(
             // window; don't re-emit.
             continue;
         }
-        if !is_same_frame(&cand) {
-            trace!(
-                body_frame = %cand.body_frame_id_repr,
-                horizon_frame = %cand.horizon_frame_id_repr,
-                "Stage E: skipping cross-frame pair (panorama_altitude wiring deferred)",
-            );
-            continue;
-        }
         match reduce_to_sight(&cand, storage, cfg) {
             Ok(sights) => {
+                let is_cross = !is_same_frame(&cand);
                 for sight in sights {
                     if window.try_insert(sight, cfg.sight_window_capacity) {
                         inserted += 1;
+                        if is_cross {
+                            out.cross_frame_sights_emitted += 1;
+                        }
                         out.inserted_sights.push(sight);
                     }
                 }
@@ -619,23 +634,43 @@ fn reduce_to_sight(
             let apparent: ApparentPlace =
                 body_apparent_place(body, c.body.frame_tt, jd_ut1, observer)
                     .map_err(ReduceError::Apparent)?;
-            // Prefer the horizon record's direct sight when
-            // one is present (Phase 1: reflection-pair
-            // provider emits `Ho = θ/2` directly). The sight-
-            // combination stage in `bris-nav` de-duplicates
-            // per-body sights in a window so the same body's
-            // direct sight and a separately-derived horizon-
-            // based sight cannot both contribute. Today only
-            // one provider wins per frame so the
-            // double-counting risk is hypothetical; documented
-            // here so it stays visible as more providers land.
-            let observed = if let Some(direct) =
-                pick_direct_sight_for(&c.horizon.direct_sights, (centroid.x, centroid.y))
-            {
-                direct.observed_altitude
+            let observed = if c.body.frame_id == c.horizon.frame_id {
+                // Same-frame: prefer the horizon record's
+                // direct sight when one is present (Phase 1:
+                // reflection-pair provider emits Ho = θ/2
+                // directly). See module docs for the
+                // double-counting discussion.
+                if let Some(direct) =
+                    pick_direct_sight_for(&c.horizon.direct_sights, (centroid.x, centroid.y))
+                {
+                    direct.observed_altitude
+                } else {
+                    measure_altitude(intrinsics, c.horizon.line, *centroid)
+                        .map_err(ReduceError::Measure)?
+                }
             } else {
-                measure_altitude(intrinsics, c.horizon.line, *centroid)
-                    .map_err(ReduceError::Measure)?
+                // Cross-frame: execute the panorama stitch +
+                // ray-space altitude composition. The helper's
+                // returned σ already combines body centroid σ,
+                // horizon altitude σ, and the executed stitch
+                // σ (Kabsch RMS residual). Do not also combine
+                // with `c.combined_sigma_rad` (that's the
+                // pair-selection estimate, superseded here).
+                let horizon_frame = storage
+                    .frame(c.horizon.frame_id)
+                    .ok_or(ReduceError::FrameEvicted)?;
+                // TODO: expose TrackConfig on EngineConfig
+                // once we have empirical guidance for the
+                // streaming engine's frame regime.
+                let track_cfg = TrackConfig::default();
+                panorama_altitude_for_pair(
+                    ring_frame.frame(),
+                    *centroid,
+                    horizon_frame.frame(),
+                    c.horizon.line,
+                    track_cfg,
+                )
+                .map_err(ReduceError::Stitch)?
             };
             let computed = Uncertain::new(apparent.direction.altitude, apparent.altitude_sigma);
             let lop = line_of_position(
@@ -761,6 +796,11 @@ enum ReduceError {
     Apparent(bris_almanac::ApparentPlaceError),
     Measure(bris_vision::MeasurementError),
     Lop(bris_nav::LopError),
+    /// Cross-frame panorama stitching failed. Wraps the
+    /// underlying [`PanoramaError`]; the Stage E call site
+    /// logs and continues so the body record can be retried
+    /// when a better-paired horizon arrives.
+    Stitch(PanoramaError),
 }
 
 /// Run `multi_sight_fix` over the current window; build a

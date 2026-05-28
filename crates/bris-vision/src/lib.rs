@@ -63,7 +63,7 @@ pub use night_horizon::{
     detect_horizon_night_with_column_mask, NightHorizonConfig, TexturedHorizonConfig,
 };
 pub use panorama::{
-    panorama_altitude, panorama_altitude_via_rotation,
+    panorama_altitude, panorama_altitude_for_pair, panorama_altitude_via_rotation,
     panorama_altitude_via_rotation_with_detector, panorama_altitude_with_detector, FrameRoles,
     PanoramaError,
 };

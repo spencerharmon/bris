@@ -233,6 +233,15 @@ pub struct EngineDiagnostics {
     /// set. Diagnostic-only; production engines leave the lock
     /// flag off and this counter stays at 0.
     pub ap_rederive_suppressed_count: u64,
+
+    /// Cumulative number of cross-frame sights (body and
+    /// horizon detected in different frames) emitted into the
+    /// sight window. Produced by
+    /// [`bris_vision::panorama_altitude_for_pair`] at sight-
+    /// emission time; the stitch σ reported by that helper is
+    /// the executed Kabsch RMS residual, not the cheap
+    /// time-gap estimate used during pair selection.
+    pub cross_frame_sights_emitted: u64,
 }
 
 /// Per-stage processing statistics.

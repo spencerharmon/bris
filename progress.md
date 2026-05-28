@@ -9,6 +9,30 @@ For the end-to-end pipeline architecture and data flow, see
 
 ---
 
+## Stage E cross-frame execution wired (2026-05-28)
+
+`bris-vision` gained `panorama_altitude_for_pair`: composes
+`track_rotation` (Kabsch over ray pairs) + ray-space altitude
+for an already-detected body centroid + horizon line in two
+distinct frames. Stage E's Day arm now branches on
+same-frame vs cross-frame and calls the helper for the
+cross-frame case. The reported σ honestly combines body
+centroid σ, horizon σ, and the executed Kabsch RMS residual
+(the cheap selection-time stitch σ is now only used for
+pair *ranking* and is documented as superseded at sight-
+emission time). New diagnostic counter
+`EngineDiagnostics::cross_frame_sights_emitted`.
+
+Replay against the 2026-05-17 Austin Sun corpus
+(`docs/operator/replay_bris_exports_2026_05_17.md`) now
+shows AP-seeded modes populate the sight window (26 sights,
+14 publication attempts) where the prior run left the window
+empty. All attempts still gate on insufficient azimuth
+spread (a single Sun over ~12 s gives ~0.02°); the failure
+mode has moved one stage downstream.
+
+---
+
 ## Debug-bundle schema + replay refactor
 
 `crates/bris-bundle` landed as the shared schema between the

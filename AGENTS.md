@@ -168,6 +168,13 @@ stack). A naive `target/` reaches 20+ GiB. Standing policy:
   flag for `bris-cli replay --ap-lock-truth`. Production
   callers must leave it `false`. See
   `docs/design/replay_modes.md`.
+- `EngineDiagnostics::cross_frame_sights_emitted` counts
+  Stage E sights whose body and horizon came from different
+  frames (the `panorama_altitude_for_pair` path). The
+  executed Kabsch RMS residual is the authoritative stitch
+  σ at sight-emission time; the cheap time-gap estimate in
+  `stage_e::STITCH_SIGMA_PER_SECOND_RAD` is only used for
+  pair ranking.
 
 ### `crates/bris-ffi` — UniFFI bindings (spike)
 

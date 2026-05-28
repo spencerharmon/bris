@@ -1379,7 +1379,8 @@ references to the regression tests that pin the behavior. See
    that pairs with it (same frame is free; different frames
    need a stitch which adds its alignment-residual σ to the
    pair's combined σ). Use [[file:crates/bris-vision/src/measure.rs][measure_altitude]] for same-frame
-   pairs and [[file:crates/bris-vision/src/panorama.rs][panorama_altitude]] for cross-frame pairs.
+   pairs and [[file:crates/bris-vision/src/panorama.rs][panorama_altitude_for_pair]] for cross-frame
+   pairs.
 
    The sight window has cap N=10 with replace-worst-on-
    insertion; age-weighting with a 10-minute time constant.
@@ -1393,6 +1394,16 @@ references to the regression tests that pin the behavior. See
    See "Stitching is part of pair selection, not an early
    stage" and "Sight window: cap, age-weighting, and operator
    surface" in the design doc.
+
+   *Cross-frame sight execution landed* (2026-05-28):
+   [[file:crates/bris-vision/src/panorama.rs][bris_vision::panorama_altitude_for_pair]] composes the
+   stitch + ray-space altitude given already-detected body
+   centroid and horizon line; Stage E's Day arm branches on
+   `body.frame_id == horizon.frame_id` and calls it for the
+   cross-frame case. The executed Kabsch RMS residual
+   supersedes the cheap selection-time stitch σ (σ inflation
+   counted exactly once). Visible via
+   [[file:crates/bris-streaming/src/diagnostics.rs][EngineDiagnostics::cross_frame_sights_emitted]].
 
 ** DONE Stage D: plate solving + per-star altitude (night fixes)
    Adds night-fix support. Plate solving runs only when Stage
