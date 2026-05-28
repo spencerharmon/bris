@@ -19,7 +19,11 @@ mod config;
 mod nmea_transport;
 
 use anyhow::{bail, Context};
-use bris_almanac::{body_apparent_place, ApparentPlace, Atmosphere, Observer, SolarSystemBody};
+use bris_almanac::{refraction::Atmosphere, Observer};
+use bris_bundle::{
+    enumerate_frames, verify_first_frame_checksum, ApInput, ApProvenance, BundleManifest,
+    CaptureInfo, DeviceInfo, Distortion, FramePathPair, GpsTruth, IntrinsicsRecord,
+};
 use bris_calibrate::{
     calibrate, coverage, default_intrinsics_path, detect_corners_in_directory_with_progress,
     diagnose, write_intrinsics, CheckerboardTarget, CoverageConfig, DiagnosisLevel, FrameDetection,
@@ -29,21 +33,12 @@ use bris_capture::{
     max_yuyv_resolution, run_capture_loop, run_capture_loop_with, CaptureLoopAction, V4l2Capture,
     V4l2Config,
 };
-use bris_core::time::{utc_to_tt, Tt};
-use bris_core::{Latitude, Longitude, Sigma, Uncertain};
-use bris_nav::{line_of_position, multi_sight_fix, screen_sights, Fix, ScreeningConfig};
-use bris_nmea::{
-    gpgga, gpgll, gpgst, gprmc, pbris_full, ErrorCounters, QualityThresholds, TimeDiagnostic,
-    UncertaintyBudget,
-};
-use bris_streaming::{EngineConfig, StreamingEngine};
-use bris_vision::{
-    centroid_brightest_body, detect_horizon, detect_horizon_via_segmentation,
-    detect_horizon_via_sky_region, load_frame_from_path, load_model, measure_altitude,
-    panorama_altitude_with_detector, save_frame_as_png, CentroidConfig, Frame, HorizonConfig,
-    HorizonLine, Intrinsics, TrackConfig,
-};
-use chrono::{DateTime, Utc};
+use bris_core::time::utc_to_tt;
+use bris_core::{Latitude, Longitude, SensorGain};
+use bris_nmea::QualityThresholds;
+use bris_streaming::{format_fix_as_nmea, EngineConfig, PublishedFix, StreamingEngine};
+use bris_vision::{load_frame_from_path_with_rotation, save_frame_as_png, Intrinsics, Rotation};
+use chrono::{TimeZone, Utc};
 use clap::{Parser, Subcommand};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -253,74 +248,112 @@ struct CalibrateArgs {
 }
 
 #[derive(Debug, clap::Args)]
+#[allow(clippy::struct_excessive_bools)]
 struct ReplayArgs {
-    /// Directory containing captured frames (PNG/JPEG/PPM).
+    /// Path to a debug bundle directory. Loads `bundle.json`
+    /// plus the frames + sidecars from the directory. Preferred
+    /// over `--frames`; CLI overrides may still be applied on
+    /// top.
     #[arg(long)]
-    frames: PathBuf,
-    /// Assumed observer latitude in degrees (north positive).
+    bundle: Option<PathBuf>,
+    /// Directory of raw frames (legacy orphan-corpus path). Only
+    /// honored when `--bundle` is absent; requires the manifest
+    /// values to be supplied via CLI flags below.
+    #[arg(long, conflicts_with = "bundle")]
+    frames: Option<PathBuf>,
+
+    /// Assumed-position latitude override (degrees, N positive).
     #[arg(long, allow_hyphen_values = true)]
-    assumed_lat: f64,
-    /// Assumed observer longitude in degrees (east positive).
+    ap_lat: Option<f64>,
+    /// Assumed-position longitude override (degrees, E positive).
     #[arg(long, allow_hyphen_values = true)]
-    assumed_lon: f64,
-    /// Eye height above sea level, meters. Default 2.0.
-    #[arg(long, default_value_t = 2.0)]
-    eye_height_m: f64,
-    /// Body the camera was pointed at.
-    #[arg(long, value_enum, default_value_t = BodyArg::Sun)]
-    body: BodyArg,
-    /// Override capture time as ISO-8601 UTC (e.g. 2024-06-21T18:00:00Z).
-    /// Defaults to the file modification time of the first frame.
+    ap_lon: Option<f64>,
+    /// Eye-height override (metres).
+    #[arg(long)]
+    eye_height_m: Option<f64>,
+    /// GPS-truth latitude override (degrees, N positive). Used
+    /// only by scoring; never silently substituted for `ap_lat`.
+    #[arg(long, allow_hyphen_values = true)]
+    gps_truth_lat: Option<f64>,
+    /// GPS-truth longitude override (degrees, E positive).
+    #[arg(long, allow_hyphen_values = true)]
+    gps_truth_lon: Option<f64>,
+    /// JSON file matching the `IntrinsicsRecord` schema.
+    #[arg(long)]
+    intrinsics: Option<PathBuf>,
+    /// Source-rotation override.
+    #[arg(long, value_enum)]
+    source_rotation: Option<RotationArg>,
+    /// Fallback capture-UTC for `--frames` use (ISO-8601). Per-
+    /// frame sidecars always win when present.
     #[arg(long)]
     capture_utc: Option<String>,
-    /// Horizon detection method.
-    ///
-    /// `gradient` is the original RANSAC-on-column-gradients detector;
-    /// best for open-ocean scenes. `sky-region` finds the bright sky's
-    /// lower boundary; better for cluttered shipboard scenes where the
-    /// deck or sail dominates the lower half of the frame.
-    /// `segmentation` runs a pretrained semantic-segmentation model to
-    /// classify sky/boat/other and uses the per-column sky→sea
-    /// transitions (skipping vessel-occluded columns) as horizon
-    /// candidates. Most robust on cluttered scenes; ~180ms per frame
-    /// on `x86_64` (slower on Pi-class hardware). Requires the
-    /// `segmentation` feature flag (on by default).
-    #[arg(long, value_enum, default_value_t = HorizonMethod::SkyRegion)]
-    horizon_method: HorizonMethod,
-    /// Path to the segmentation ONNX model (only used with
-    /// `--horizon-method segmentation`). Defaults to the vendored
-    /// `crates/bris-vision/data/segmentation.onnx`.
+
+    /// Default mode: AP comes from the bundle's `ap_input` (may
+    /// be null → cold-start).
+    #[arg(long, group = "ap_mode")]
+    ap_seed_truth: bool,
+    /// Seed AP from `gps_truth`; engine may still re-derive.
+    #[arg(long, group = "ap_mode")]
+    ap_lock_truth: bool,
+    /// Seed AP from `gps_truth` AND lock it (engine cannot
+    /// re-derive). Diagnostic-only.
+    #[arg(long, group = "ap_mode")]
+    no_ap: bool,
+    /// Run every mode the bundle's data supports and print a
+    /// side-by-side summary at the end.
+    #[arg(long, group = "ap_mode")]
+    all_modes: bool,
+
+    /// Override the engine's segmentation-model path.
     #[arg(long)]
     segmentation_model: Option<PathBuf>,
+    /// Engine sight/fix store root. Defaults to a temp dir per
+    /// run so replays don't pollute the operator's `.bris/`.
+    #[arg(long)]
+    data_root: Option<PathBuf>,
+    /// Disable the on-disk sight/fix store entirely.
+    #[arg(long)]
+    disable_store: bool,
+    /// Emit NMEA sentences for every published fix to stdout.
+    #[arg(long)]
+    nmea_stdout: bool,
 }
 
+/// CLI-facing rotation enum.
 #[derive(Debug, Clone, Copy, clap::ValueEnum)]
-enum HorizonMethod {
-    Gradient,
-    SkyRegion,
-    Segmentation,
+enum RotationArg {
+    /// 0°.
+    Deg0,
+    /// 90° clockwise.
+    Deg90,
+    /// 180°.
+    Deg180,
+    /// 270° clockwise.
+    Deg270,
 }
 
-impl HorizonMethod {
-    fn detect(
-        self,
-        frame: &Frame,
-        cfg: HorizonConfig,
-        seg_model_path: Option<&Path>,
-    ) -> Result<HorizonLine, anyhow::Error> {
+impl RotationArg {
+    fn to_rotation(self) -> Rotation {
         match self {
-            Self::Gradient => detect_horizon(frame, cfg).map_err(anyhow::Error::from),
-            Self::SkyRegion => {
-                detect_horizon_via_sky_region(frame, cfg).map_err(anyhow::Error::from)
-            }
-            Self::Segmentation => {
-                let path = seg_model_path
-                    .map_or_else(default_segmentation_model_path, std::path::PathBuf::from);
-                load_model(&path).map_err(|e| anyhow::anyhow!("load segmentation model: {e}"))?;
-                detect_horizon_via_segmentation(frame, cfg)
-                    .map_err(|e| anyhow::anyhow!("segmentation horizon detection: {e}"))
-            }
+            Self::Deg0 => Rotation::Deg0,
+            Self::Deg90 => Rotation::Deg90,
+            Self::Deg180 => Rotation::Deg180,
+            Self::Deg270 => Rotation::Deg270,
         }
+    }
+    fn degrees(self) -> u16 {
+        self.to_rotation().degrees()
+    }
+}
+
+fn rotation_from_degrees(deg: u16) -> anyhow::Result<Rotation> {
+    match deg {
+        0 => Ok(Rotation::Deg0),
+        90 => Ok(Rotation::Deg90),
+        180 => Ok(Rotation::Deg180),
+        270 => Ok(Rotation::Deg270),
+        other => bail!("unsupported source_rotation_deg={other} (expected 0|90|180|270)"),
     }
 }
 
@@ -345,43 +378,6 @@ fn default_segmentation_model_path() -> std::path::PathBuf {
         .join("segmentation.onnx")
 }
 
-#[derive(Debug, Clone, Copy, clap::ValueEnum)]
-enum BodyArg {
-    Sun,
-    Moon,
-    Mercury,
-    Venus,
-    Mars,
-    Jupiter,
-    Saturn,
-}
-
-impl BodyArg {
-    fn to_solar_system_body(self) -> SolarSystemBody {
-        match self {
-            Self::Sun => SolarSystemBody::Sun,
-            Self::Moon => SolarSystemBody::Moon,
-            Self::Mercury => SolarSystemBody::Planet(bris_almanac::Body::Mercury),
-            Self::Venus => SolarSystemBody::Planet(bris_almanac::Body::Venus),
-            Self::Mars => SolarSystemBody::Planet(bris_almanac::Body::Mars),
-            Self::Jupiter => SolarSystemBody::Planet(bris_almanac::Body::Jupiter),
-            Self::Saturn => SolarSystemBody::Planet(bris_almanac::Body::Saturn),
-        }
-    }
-
-    fn name(self) -> &'static str {
-        match self {
-            Self::Sun => "Sun",
-            Self::Moon => "Moon",
-            Self::Mercury => "Mercury",
-            Self::Venus => "Venus",
-            Self::Mars => "Mars",
-            Self::Jupiter => "Jupiter",
-            Self::Saturn => "Saturn",
-        }
-    }
-}
-
 fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
@@ -404,277 +400,605 @@ fn main() -> anyhow::Result<()> {
     }
 }
 
-fn run_replay(args: &ReplayArgs) -> anyhow::Result<()> {
-    let observer = Observer {
-        latitude: Latitude::from_degrees(args.assumed_lat)
-            .context("assumed_lat out of [-90, 90]")?,
-        longitude: Longitude::from_degrees(args.assumed_lon).context("assumed_lon")?,
-        eye_height_m: args.eye_height_m,
-        eye_height_sigma_m: 0.5,
-        atmosphere: Atmosphere::STANDARD,
-    };
+// ---------------------------------------------------------
+// Replay: debug-bundle / raw-frames → streaming engine.
+// ---------------------------------------------------------
 
-    let frame_paths = list_frames(&args.frames)?;
-    if frame_paths.is_empty() {
-        bail!("no frames found in {}", args.frames.display());
+/// Which AP source to feed the engine for one replay run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReplayMode {
+    /// AP comes from `manifest.ap_input` (may be absent → cold-start).
+    Default,
+    /// AP seeded from `gps_truth`; engine may still re-derive.
+    ApSeedTruth,
+    /// AP seeded from `gps_truth` AND locked (engine cannot re-derive).
+    ApLockTruth,
+    /// No AP fed in at all; rely on cold-start.
+    NoAp,
+}
+
+impl ReplayMode {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Default => "default",
+            Self::ApSeedTruth => "ap_seed_truth",
+            Self::ApLockTruth => "ap_lock_truth",
+            Self::NoAp => "no_ap",
+        }
+    }
+}
+
+/// Resolved per-mode AP, with provenance label.
+#[derive(Debug, Clone, Copy)]
+struct ResolvedAp {
+    lat: f64,
+    lon: f64,
+    eye_height_m: f64,
+    source: &'static str,
+}
+
+#[derive(Debug)]
+struct ModeResult {
+    mode: ReplayMode,
+    ap_used: Option<ResolvedAp>,
+    fixes: Vec<PublishedFix>,
+    suppressed: u64,
+    frames_pushed: u64,
+}
+
+fn run_replay(args: &ReplayArgs) -> anyhow::Result<()> {
+    // 1. Resolve the manifest (from --bundle or synthesized from --frames + flags).
+    let (mut manifest, bundle_dir) = resolve_manifest(args)?;
+    apply_cli_overrides(&mut manifest, args)?;
+
+    // 2. Checksum verification (only if recorded).
+    if manifest.capture.first_frame_blake3.is_some() {
+        verify_first_frame_checksum(&manifest, &bundle_dir)
+            .context("first-frame checksum verification")?;
+        info!("replay: first-frame BLAKE3 checksum verified");
+    }
+
+    // 3. Enumerate frames once; sorted by sidecar captured_unix_ms.
+    let frames = enumerate_frames(&bundle_dir).context("enumerate bundle frames")?;
+    if frames.is_empty() {
+        bail!("no frames found in bundle {}", bundle_dir.display());
     }
     info!(
-        frame_count = frame_paths.len(),
-        body = args.body.name(),
-        observer_lat = args.assumed_lat,
-        observer_lon = args.assumed_lon,
-        "replay: loaded frames"
+        bundle = %bundle_dir.display(),
+        frame_count = frames.len(),
+        rotation_deg = manifest.capture.source_rotation_deg,
+        "replay: bundle resolved"
     );
 
-    let utc = parse_or_infer_utc(args)?;
-    let tt = utc_to_tt(utc).context("convert capture time to TT")?;
-    info!(utc = %utc, "replay: capture time");
+    // 4. Determine modes.
+    let modes = select_modes(args, &manifest);
+    if modes.is_empty() {
+        bail!("no replay modes selected; pass one of --ap-seed-truth / --ap-lock-truth / --no-ap / --all-modes (or omit for Default)");
+    }
 
-    let frames = load_all_frames(&frame_paths, tt)?;
+    // 5. Run each mode.
+    let mut results = Vec::new();
+    for mode in modes {
+        info!(mode = mode.label(), "replay: running mode");
+        let result = run_one_mode(mode, args, &manifest, &frames)?;
+        log_mode_result(&result, &manifest);
+        results.push(result);
+    }
 
-    // Run the panorama-stitching path. The vision pipeline reports
-    // per-frame failures inside; if every frame fails this returns
-    // an error and we surface it cleanly.
-    let horizon_method = args.horizon_method;
-    let seg_model_path = args.segmentation_model.as_deref();
-    let observed_altitude = match panorama_altitude_with_detector(
-        &frames,
-        HorizonConfig::default(),
-        CentroidConfig::default(),
-        TrackConfig::default(),
-        |frame, cfg| horizon_method.detect(frame, cfg, seg_model_path),
-    ) {
-        Ok(alt) => {
-            info!(
-                altitude_deg = alt.value.to_degrees(),
-                sigma_arcmin = alt.sigma.value().to_degrees() * 60.0,
-                "replay: panorama-stitching produced an observed altitude"
-            );
-            alt
-        }
-        Err(e) => {
-            warn!(error = %e, "replay: panorama failed; trying single-frame measurement");
-            single_frame_fallback(&frames, horizon_method, seg_model_path)?
-        }
-    };
-
-    // Compute the body's apparent place and reduce the sight.
-    let jd_ut1 = utc_to_jd_utc(utc); // ΔUT1 ≈ 0 approximation
-    let body = args.body.to_solar_system_body();
-    let apparent: ApparentPlace = body_apparent_place(body, tt, jd_ut1, observer)
-        .context("apparent-place computation failed")?;
-    info!(
-        body = args.body.name(),
-        computed_altitude_deg = apparent.direction.altitude.to_degrees(),
-        computed_azimuth_deg = apparent.direction.azimuth.to_degrees(),
-        computed_sigma_arcsec = apparent.altitude_sigma.value().to_degrees() * 3600.0,
-        "replay: body apparent place at assumed observer"
-    );
-
-    let computed = Uncertain::new(apparent.direction.altitude, apparent.altitude_sigma);
-    let lop = line_of_position(
-        observer.latitude,
-        observer.longitude,
-        observed_altitude,
-        computed,
-        apparent.direction.azimuth,
-    )
-    .context("line_of_position failed")?;
-    info!(
-        intercept_nm = lop.intercept_nm,
-        intercept_sigma_nm = lop.intercept_sigma_nm.value(),
-        "replay: line of position"
-    );
-
-    // Single-LOP "fix" is along the line; we report it as a 1-LOP
-    // result with the observer's assumed position adjusted toward the
-    // body by the intercept. A true fix needs ≥ 2 bodies.
-    warn!(
-        "replay: single-LOP result is a line, not a 2D fix. \
-         The 'fix' below is the assumed position shifted by the intercept \
-         along the body azimuth — useful as a sanity check, not as a \
-         navigational fix. A true fix requires ≥ 2 bodies (plate solving \
-         in Phase 3 will handle that automatically at night)."
-    );
-
-    // Fake a second LOP perpendicular to the first with zero intercept,
-    // so multi_sight_fix has the geometry it needs. Mark the resulting
-    // fix as advisory in the log.
-    let fake_perp = bris_nav::LineOfPosition {
-        assumed_lat: observer.latitude,
-        assumed_lon: observer.longitude,
-        azimuth_rad: (apparent.direction.azimuth + std::f64::consts::FRAC_PI_2)
-            .rem_euclid(std::f64::consts::TAU),
-        intercept_nm: 0.0,
-        intercept_sigma_nm: Sigma::new(lop.intercept_sigma_nm.value().max(0.5))
-            .unwrap_or(Sigma::ZERO),
-    };
-    let screened = screen_sights(&[lop, fake_perp], ScreeningConfig::default());
-    let fix = multi_sight_fix(&screened.kept).context("multi_sight_fix failed")?;
-    info!(
-        lat_deg = fix.lat.degrees(),
-        lon_deg = fix.lon.degrees(),
-        sigma_major_nm = fix.sigma_major_nm,
-        sigma_minor_nm = fix.sigma_minor_nm,
-        sigma_nm = fix.sigma_nm().value(),
-        "replay: advisory fix (single-body LOP + perpendicular zero-intercept anchor)"
-    );
-
-    emit_nmea(&fix, utc, args, &lop, &apparent);
+    // 6. Summary table for --all-modes.
+    if args.all_modes {
+        print_summary(&results, &manifest);
+    }
 
     Ok(())
 }
 
-fn list_frames(dir: &Path) -> anyhow::Result<Vec<PathBuf>> {
-    let mut paths: Vec<PathBuf> = fs::read_dir(dir)
-        .with_context(|| format!("read {}", dir.display()))?
-        .filter_map(Result::ok)
-        .map(|e| e.path())
-        .filter(|p| {
-            p.extension().and_then(|s| s.to_str()).is_some_and(|ext| {
-                matches!(
-                    ext.to_ascii_lowercase().as_str(),
-                    "png" | "jpg" | "jpeg" | "ppm" | "pgm"
-                )
-            })
-        })
-        .collect();
-    paths.sort();
-    Ok(paths)
-}
-
-fn load_all_frames(paths: &[PathBuf], tt: Tt) -> anyhow::Result<Vec<Frame>> {
-    let mut frames = Vec::with_capacity(paths.len());
-    for path in paths {
-        // Use placeholder intrinsics until calibration workflow lands.
-        // The first frame determines the dimensions.
-        let dims = image::image_dimensions(path)
-            .with_context(|| format!("read dimensions of {}", path.display()))?;
-        let intrinsics = Intrinsics::placeholder(dims.0, dims.1);
-        let frame = load_frame_from_path(path, tt, 1000, intrinsics)
-            .with_context(|| format!("load {}", path.display()))?
-            .with_source_path(path.clone());
-        frames.push(frame);
+/// Resolve a `BundleManifest` for the run, returning it plus the
+/// directory it lives in. For `--frames` the manifest is
+/// synthesized from CLI flags only.
+fn resolve_manifest(args: &ReplayArgs) -> anyhow::Result<(BundleManifest, PathBuf)> {
+    if let Some(bundle) = &args.bundle {
+        let manifest = BundleManifest::load_from_dir(bundle)
+            .with_context(|| format!("load bundle.json from {}", bundle.display()))?;
+        return Ok((manifest, bundle.clone()));
     }
-    Ok(frames)
+    let frames = args
+        .frames
+        .as_ref()
+        .context("either --bundle or --frames must be supplied")?;
+    let rotation = args.source_rotation.map_or(0, RotationArg::degrees);
+    let intrinsics = args
+        .intrinsics
+        .as_ref()
+        .map(|p| load_intrinsics_record(p.as_path()))
+        .transpose()?
+        .context(
+            "--frames mode requires --intrinsics PATH (JSON matching the IntrinsicsRecord schema)",
+        )?;
+    // Synthesize a minimal manifest. `enumerate_frames` will read
+    // the frame timestamps; we leave started/ended at 0 and let
+    // the engine drive off the per-frame TT.
+    let manifest = BundleManifest {
+        schema_version: bris_bundle::SCHEMA_VERSION,
+        bundle_id: frames
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("orphan-frames")
+            .to_string(),
+        device: DeviceInfo {
+            model: "synthetic".into(),
+            os: None,
+            app_version: None,
+        },
+        capture: CaptureInfo {
+            source_rotation_deg: rotation,
+            pre_rotation_was_deg: None,
+            frame_count: 0,
+            started_unix_ms: 0,
+            ended_unix_ms: 0,
+            first_frame_blake3: None,
+        },
+        intrinsics,
+        ap_input: args.ap_lat.zip(args.ap_lon).map(|(lat, lon)| ApInput {
+            lat,
+            lon,
+            eye_height_m: args.eye_height_m.unwrap_or(2.0),
+            provenance: ApProvenance::OperatorEntered,
+        }),
+        ap_derivation_trace: None,
+        gps_truth: args
+            .gps_truth_lat
+            .zip(args.gps_truth_lon)
+            .map(|(lat, lon)| GpsTruth {
+                lat,
+                lon,
+                lat_sigma_m: 5.0,
+                lon_sigma_m: 5.0,
+                altitude_m: None,
+                altitude_sigma_m: None,
+                captured_unix_ms: 0,
+                source: "cli_override".into(),
+                satellites_used: None,
+            }),
+        atmosphere_hint: None,
+        notes: String::new(),
+    };
+    Ok((manifest, frames.clone()))
 }
 
-fn parse_or_infer_utc(args: &ReplayArgs) -> anyhow::Result<DateTime<Utc>> {
-    if let Some(s) = &args.capture_utc {
-        return DateTime::parse_from_rfc3339(s)
-            .with_context(|| format!("parse capture_utc {s:?}"))
-            .map(|dt| dt.with_timezone(&Utc));
-    }
-    // Infer from the first frame's mtime.
-    let first = list_frames(&args.frames)?
-        .into_iter()
-        .next()
-        .context("no frames to infer time from")?;
-    let meta = fs::metadata(&first).with_context(|| format!("stat {}", first.display()))?;
-    let mtime = meta
-        .modified()
-        .with_context(|| format!("modified time of {}", first.display()))?;
-    let secs = mtime
-        .duration_since(std::time::UNIX_EPOCH)
-        .context("system time before unix epoch")?
-        .as_secs();
-    let dt = DateTime::<Utc>::from_timestamp(
-        i64::try_from(secs).context("first-frame mtime exceeds i64 range")?,
-        0,
-    )
-    .context("first-frame mtime out of representable range")?;
-    warn!(
-        utc = %dt,
-        "replay: --capture-utc not given; using first frame's mtime"
-    );
-    Ok(dt)
-}
-
-fn single_frame_fallback(
-    frames: &[Frame],
-    horizon_method: HorizonMethod,
-    seg_model_path: Option<&Path>,
-) -> anyhow::Result<Uncertain<f64>> {
-    // Try each frame individually. The first one that yields both a
-    // horizon and a centroid wins.
-    for (i, frame) in frames.iter().enumerate() {
-        let Ok(horizon) = horizon_method.detect(frame, HorizonConfig::default(), seg_model_path)
-        else {
-            continue;
-        };
-        let Ok(centroid) = centroid_brightest_body(frame, CentroidConfig::default()) else {
-            continue;
-        };
-        let Ok(altitude) = measure_altitude(frame.intrinsics, horizon, centroid) else {
-            continue;
-        };
-        info!(
-            frame_index = i,
-            altitude_deg = altitude.value.to_degrees(),
-            "replay: single-frame fallback succeeded"
+/// Apply CLI overrides on top of the loaded manifest, warning
+/// loudly so operators know the bundle wasn't reproduced
+/// verbatim.
+fn apply_cli_overrides(manifest: &mut BundleManifest, args: &ReplayArgs) -> anyhow::Result<()> {
+    if let (Some(lat), Some(lon)) = (args.ap_lat, args.ap_lon) {
+        warn!(
+            lat,
+            lon, "replay: --ap-lat/--ap-lon overriding manifest ap_input"
         );
-        return Ok(altitude);
+        let eye = args
+            .eye_height_m
+            .or_else(|| manifest.ap_input.as_ref().map(|a| a.eye_height_m))
+            .unwrap_or(2.0);
+        manifest.ap_input = Some(ApInput {
+            lat,
+            lon,
+            eye_height_m: eye,
+            provenance: ApProvenance::Other {
+                detail: "cli_override".into(),
+            },
+        });
     }
-    bail!("no frame contained both a horizon and a body centroid; cannot measure altitude");
+    if let Some(eye) = args.eye_height_m {
+        if let Some(ap) = manifest.ap_input.as_mut() {
+            if (ap.eye_height_m - eye).abs() > f64::EPSILON {
+                warn!(eye, "replay: --eye-height-m overriding manifest eye height");
+                ap.eye_height_m = eye;
+            }
+        }
+    }
+    if let (Some(lat), Some(lon)) = (args.gps_truth_lat, args.gps_truth_lon) {
+        warn!(
+            lat,
+            lon, "replay: --gps-truth-* overriding manifest gps_truth"
+        );
+        manifest.gps_truth = Some(GpsTruth {
+            lat,
+            lon,
+            lat_sigma_m: 5.0,
+            lon_sigma_m: 5.0,
+            altitude_m: None,
+            altitude_sigma_m: None,
+            captured_unix_ms: 0,
+            source: "cli_override".into(),
+            satellites_used: None,
+        });
+    }
+    if let Some(rot) = args.source_rotation {
+        let deg = rot.degrees();
+        if manifest.capture.source_rotation_deg != deg {
+            warn!(
+                from = manifest.capture.source_rotation_deg,
+                to = deg,
+                "replay: --source-rotation overriding manifest"
+            );
+            manifest.capture.source_rotation_deg = deg;
+        }
+    }
+    if let Some(path) = &args.intrinsics {
+        warn!(path = %path.display(), "replay: --intrinsics overriding manifest intrinsics");
+        manifest.intrinsics = load_intrinsics_record(path)?;
+    }
+    Ok(())
 }
 
-fn emit_nmea(
-    fix: &Fix,
-    utc: DateTime<Utc>,
+fn load_intrinsics_record(path: &Path) -> anyhow::Result<IntrinsicsRecord> {
+    let bytes = fs::read(path).with_context(|| format!("read {}", path.display()))?;
+    let rec: IntrinsicsRecord = serde_json::from_slice(&bytes)
+        .with_context(|| format!("parse IntrinsicsRecord JSON at {}", path.display()))?;
+    Ok(rec)
+}
+
+fn intrinsics_from_record(rec: &IntrinsicsRecord) -> Intrinsics {
+    let (k1, k2, k3, p1, p2) = match &rec.distortion {
+        Distortion::BrownConrady { k1, k2, k3, p1, p2 } => (*k1, *k2, *k3, *p1, *p2),
+        Distortion::FisheyeEquidistant { .. } => {
+            warn!(
+                "replay: bundle declares FisheyeEquidistant distortion; \
+                 bris_vision::Intrinsics is pinhole+Brown-Conrady only, \
+                 dropping fisheye coefficients (TODO: extend Intrinsics)."
+            );
+            (0.0, 0.0, 0.0, 0.0, 0.0)
+        }
+        Distortion::None => (0.0, 0.0, 0.0, 0.0, 0.0),
+    };
+    Intrinsics {
+        fx: rec.fx,
+        fy: rec.fy,
+        cx: rec.cx,
+        cy: rec.cy,
+        k1,
+        k2,
+        k3,
+        p1,
+        p2,
+    }
+}
+
+fn select_modes(args: &ReplayArgs, manifest: &BundleManifest) -> Vec<ReplayMode> {
+    if args.all_modes {
+        let mut modes = vec![ReplayMode::Default];
+        if manifest.gps_truth.is_some() {
+            modes.push(ReplayMode::ApSeedTruth);
+            modes.push(ReplayMode::ApLockTruth);
+        } else {
+            warn!(
+                "replay --all-modes: skipping ApSeedTruth / ApLockTruth (no gps_truth in bundle)"
+            );
+        }
+        modes.push(ReplayMode::NoAp);
+        return modes;
+    }
+    let mode = if args.ap_seed_truth {
+        ReplayMode::ApSeedTruth
+    } else if args.ap_lock_truth {
+        ReplayMode::ApLockTruth
+    } else if args.no_ap {
+        ReplayMode::NoAp
+    } else {
+        ReplayMode::Default
+    };
+    if matches!(mode, ReplayMode::ApSeedTruth | ReplayMode::ApLockTruth)
+        && manifest.gps_truth.is_none()
+    {
+        warn!(
+            "replay: mode {} requires gps_truth in the bundle; falling back to Default",
+            mode.label()
+        );
+        return vec![ReplayMode::Default];
+    }
+    vec![mode]
+}
+
+fn resolve_ap(mode: ReplayMode, manifest: &BundleManifest) -> Option<ResolvedAp> {
+    let eye_height = manifest.ap_input.as_ref().map_or(2.0, |a| a.eye_height_m);
+    match mode {
+        ReplayMode::Default => manifest.ap_input.as_ref().map(|a| ResolvedAp {
+            lat: a.lat,
+            lon: a.lon,
+            eye_height_m: a.eye_height_m,
+            source: "manifest.ap_input",
+        }),
+        ReplayMode::ApSeedTruth | ReplayMode::ApLockTruth => {
+            manifest.gps_truth.as_ref().map(|g| ResolvedAp {
+                lat: g.lat,
+                lon: g.lon,
+                eye_height_m: eye_height,
+                source: "manifest.gps_truth",
+            })
+        }
+        ReplayMode::NoAp => None,
+    }
+}
+
+fn build_engine_config(
+    mode: ReplayMode,
+    ap: Option<ResolvedAp>,
+    manifest: &BundleManifest,
     args: &ReplayArgs,
-    lop: &bris_nav::LineOfPosition,
-    apparent: &ApparentPlace,
-) {
-    let quality = QualityThresholds::default().classify(fix.sigma_nm().value());
-    let _ = gpgll(fix, utc, quality);
-    let _ = gprmc(fix, utc, quality);
-    let _ = gpgga(fix, utc, quality);
-    let _ = gpgst(fix, utc);
-
-    let budget = UncertaintyBudget {
-        centroid_nm: 0.0,
-        horizon_nm: 0.0,
-        calibration_nm: 0.0,
-        stitching_nm: 0.0,
-        refraction_nm: 0.0,
-        dip_nm: 0.0,
-        timing_nm: 0.0,
+) -> anyhow::Result<EngineConfig> {
+    let atmosphere = manifest
+        .atmosphere_hint
+        .as_ref()
+        .map_or(Atmosphere::STANDARD, |h| {
+            // The bundle records temperature/pressure/humidity;
+            // bris-almanac's Atmosphere is pressure_mbar +
+            // temperature_k (no humidity term yet). Convert
+            // Pa→mbar, drop humidity for now (TODO: humidity in
+            // refraction model).
+            Atmosphere {
+                pressure_mbar: h.pressure_pa / 100.0,
+                temperature_k: h.temperature_k,
+            }
+        });
+    // When no AP is available (NoAp mode, or Default with no
+    // ap_input), seed the observer at (0, 0); the engine treats
+    // the seeded observer as the cold-start anchor — Saint-
+    // Hilaire intercepts won't converge but cold-start CoP may.
+    let (lat, lon, eye) = ap.map_or((0.0, 0.0, 2.0), |a| (a.lat, a.lon, a.eye_height_m));
+    let observer = Observer {
+        latitude: Latitude::from_degrees(lat).context("AP lat out of range")?,
+        longitude: Longitude::from_degrees(lon).context("AP lon")?,
+        eye_height_m: eye,
+        eye_height_sigma_m: 0.5,
+        atmosphere,
     };
-    let time_diag = TimeDiagnostic {
-        seconds_since_sync: None,
-        drift_ppm: None,
-        step_detected: false,
-    };
-    let counters = ErrorCounters::default();
-    let sights = vec![(
-        args.body.name().to_string(),
-        apparent.direction.altitude,
-        apparent.direction.azimuth,
-        *lop,
-    )];
-    let _ = pbris_full(utc, fix, &time_diag, &budget, &sights, &counters, true);
+    let mut cfg = EngineConfig::new(observer);
+    cfg.lock_ap_for_replay = matches!(mode, ReplayMode::ApLockTruth);
+    cfg.store.enabled = !args.disable_store;
+    cfg.store.data_root = args
+        .data_root
+        .clone()
+        .unwrap_or_else(|| std::env::temp_dir().join(format!("bris-replay-{}", mode.label())));
+    cfg.segmentation_model_path = args.segmentation_model.clone().or_else(|| {
+        let p = default_segmentation_model_path();
+        p.exists().then_some(p)
+    });
+    Ok(cfg)
 }
 
-fn utc_to_jd_utc(utc: DateTime<Utc>) -> f64 {
-    use chrono::Datelike;
-    use chrono::Timelike;
-    let mut y = utc.year();
-    let mut m = i32::try_from(utc.month()).unwrap();
-    if m <= 2 {
-        y -= 1;
-        m += 12;
+fn run_one_mode(
+    mode: ReplayMode,
+    args: &ReplayArgs,
+    manifest: &BundleManifest,
+    frames: &[FramePathPair],
+) -> anyhow::Result<ModeResult> {
+    let ap = resolve_ap(mode, manifest);
+    let cfg = build_engine_config(mode, ap, manifest, args)?;
+    let engine = Arc::new(StreamingEngine::new(cfg));
+    let fix_rx = engine
+        .fix_stream()
+        .map_err(|e| anyhow::anyhow!("fix_stream: {e}"))?;
+
+    let intrinsics = intrinsics_from_record(&manifest.intrinsics);
+    let rotation = rotation_from_degrees(manifest.capture.source_rotation_deg)?;
+    let frames_owned: Vec<FramePathPair> = frames.to_vec();
+    let engine_feed = engine.clone();
+    let mode_label = mode.label().to_string();
+    let feeder = std::thread::Builder::new()
+        .name(format!("bris-replay-feed-{mode_label}"))
+        .spawn(move || -> anyhow::Result<u64> {
+            let mut pushed = 0u64;
+            for pair in &frames_owned {
+                let s = &pair.sidecar_data;
+                let utc = Utc
+                    .timestamp_millis_opt(s.captured_unix_ms)
+                    .single()
+                    .with_context(|| {
+                        format!("captured_unix_ms {} out of range", s.captured_unix_ms)
+                    })?;
+                let tt = utc_to_tt(utc).context("utc_to_tt")?;
+                let exposure_us = s.exposure_us_or(1000);
+                let gain = SensorGain::new(s.sensor_gain_or(1.0));
+                let frame = load_frame_from_path_with_rotation(
+                    &pair.pgm,
+                    tt,
+                    exposure_us,
+                    intrinsics,
+                    rotation,
+                )
+                .with_context(|| format!("load {}", pair.pgm.display()))?
+                .with_sensor_gain(gain)
+                .with_source_path(pair.pgm.clone());
+                if let Err(e) = engine_feed.push_frame(frame) {
+                    warn!(error = ?e, frame = %pair.pgm.display(), "replay: push_frame failed");
+                } else {
+                    pushed += 1;
+                }
+            }
+            Ok(pushed)
+        })
+        .context("spawn replay feeder thread")?;
+
+    // Main thread drains the fix stream with a short timeout
+    // until the feeder joins.
+    let mut collected: Vec<PublishedFix> = Vec::new();
+    loop {
+        match fix_rx.try_recv() {
+            Ok(Some(fix)) => {
+                if args.nmea_stdout {
+                    let s = format_fix_as_nmea(&fix, Utc::now(), QualityThresholds::default());
+                    print!("[mode={mode_label}] {s}");
+                }
+                collected.push(fix);
+            }
+            Ok(None) => {
+                if feeder.is_finished() {
+                    // Drain remaining, then exit.
+                    while let Ok(Some(f)) = fix_rx.try_recv() {
+                        if args.nmea_stdout {
+                            let s =
+                                format_fix_as_nmea(&f, Utc::now(), QualityThresholds::default());
+                            print!("[mode={mode_label}] {s}");
+                        }
+                        collected.push(f);
+                    }
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            Err(()) => break,
+        }
     }
-    let a = y.div_euclid(100);
-    let b = 2 - a + a.div_euclid(4);
-    let day_fraction =
-        (f64::from(utc.hour()) * 3600.0 + f64::from(utc.minute()) * 60.0 + f64::from(utc.second()))
-            / 86_400.0;
-    let jd_int = (365.25 * f64::from(y + 4716)).floor()
-        + (30.6001 * f64::from(m + 1)).floor()
-        + f64::from(utc.day())
-        + f64::from(b)
-        - 1524.5;
-    jd_int + day_fraction
+    let pushed = feeder
+        .join()
+        .map_err(|_| anyhow::anyhow!("feeder thread panicked"))??;
+    let diag = engine.diagnostics();
+    info!(
+        mode = mode_label,
+        frames_pushed = diag.frames_pushed,
+        frames_dropped = diag.frames_dropped,
+        body_queue_depth = diag.body_queue_depth,
+        horizon_queue_depth = diag.horizon_queue_depth,
+        sight_window_depth = diag.sight_window_depth,
+        last_classification = ?diag.last_classification,
+        fixes_published_total = diag.fixes_published_total,
+        fix_publish_attempts = diag.fix_publish_attempts,
+        singular_geometry_rejections = diag.singular_geometry_rejections,
+        publication_gate_rejections = diag.publication_gate_rejections,
+        cold_start_attempts = diag.cold_start_attempts,
+        cold_start_published = diag.cold_start_published,
+        ap_rederive_suppressed_count = diag.ap_rederive_suppressed_count,
+        "replay: engine diagnostics"
+    );
+    Ok(ModeResult {
+        mode,
+        ap_used: ap,
+        fixes: collected,
+        suppressed: diag.ap_rederive_suppressed_count,
+        frames_pushed: pushed,
+    })
+}
+
+fn log_mode_result(result: &ModeResult, manifest: &BundleManifest) {
+    info!(
+        mode = result.mode.label(),
+        frames_pushed = result.frames_pushed,
+        fixes = result.fixes.len(),
+        suppressed = result.suppressed,
+        "replay: mode complete"
+    );
+    if result.fixes.is_empty() {
+        info!(
+            mode = result.mode.label(),
+            "replay: no fix published (honest silence; see diagnostics above)"
+        );
+        return;
+    }
+    for fix in &result.fixes {
+        let lat = fix.fix.lat.degrees();
+        let lon = fix.fix.lon.degrees();
+        info!(
+            mode = result.mode.label(),
+            lat_deg = lat,
+            lon_deg = lon,
+            sigma_major_nm = fix.fix.sigma_major_nm,
+            sigma_minor_nm = fix.fix.sigma_minor_nm,
+            "replay: published_fix"
+        );
+        if let Some(ap) = result.ap_used {
+            info!(
+                mode = result.mode.label(),
+                ap_lat = ap.lat,
+                ap_lon = ap.lon,
+                ap_source = ap.source,
+                "replay: ap_used"
+            );
+        } else {
+            info!(
+                mode = result.mode.label(),
+                "replay: ap_used = none (cold-start)"
+            );
+        }
+        if let Some(gt) = manifest.gps_truth.as_ref() {
+            let (nm, brg) = great_circle_nm_and_bearing(lat, lon, gt.lat, gt.lon);
+            let within = nm <= 2.0 * fix.fix.sigma_major_nm;
+            info!(
+                mode = result.mode.label(),
+                error_nm = nm,
+                bearing_deg = brg,
+                within_2sigma = within,
+                "replay: vs gps_truth"
+            );
+        } else {
+            info!(mode = result.mode.label(), "replay: no gps_truth in bundle");
+        }
+    }
+}
+
+fn print_summary(results: &[ModeResult], manifest: &BundleManifest) {
+    println!();
+    println!("================= replay --all-modes summary =================");
+    println!(
+        "{:<14}  {:>6}  {:>6}  {:>10}  {:>10}  {:>11}  {:>11}",
+        "mode", "frames", "fixes", "ap_lat", "ap_lon", "err_nm", "sig_maj_nm"
+    );
+    for r in results {
+        let ap_str = r.ap_used.map_or_else(
+            || ("-".to_string(), "-".to_string()),
+            |a| (format!("{:.6}", a.lat), format!("{:.6}", a.lon)),
+        );
+        if r.fixes.is_empty() {
+            println!(
+                "{:<14}  {:>6}  {:>6}  {:>10}  {:>10}  {:>11}  {:>11}",
+                r.mode.label(),
+                r.frames_pushed,
+                0,
+                ap_str.0,
+                ap_str.1,
+                "-",
+                "-"
+            );
+        } else {
+            for fix in &r.fixes {
+                let err = manifest.gps_truth.as_ref().map(|g| {
+                    great_circle_nm_and_bearing(
+                        fix.fix.lat.degrees(),
+                        fix.fix.lon.degrees(),
+                        g.lat,
+                        g.lon,
+                    )
+                    .0
+                });
+                println!(
+                    "{:<14}  {:>6}  {:>6}  {:>10}  {:>10}  {:>11}  {:>11.3}",
+                    r.mode.label(),
+                    r.frames_pushed,
+                    r.fixes.len(),
+                    ap_str.0,
+                    ap_str.1,
+                    err.map_or_else(|| "-".to_string(), |n| format!("{n:.3}")),
+                    fix.fix.sigma_major_nm,
+                );
+            }
+        }
+    }
+    println!("==============================================================");
+}
+
+/// Great-circle distance (nm) and forward bearing (deg, true)
+/// from (lat1, lon1) to (lat2, lon2).
+fn great_circle_nm_and_bearing(lat1: f64, lon1: f64, lat2: f64, lon2: f64) -> (f64, f64) {
+    let phi1 = lat1.to_radians();
+    let phi2 = lat2.to_radians();
+    let dphi = (lat2 - lat1).to_radians();
+    let dlam = (lon2 - lon1).to_radians();
+    let a = (dphi / 2.0).sin().powi(2) + phi1.cos() * phi2.cos() * (dlam / 2.0).sin().powi(2);
+    let c = 2.0 * a.sqrt().asin();
+    let nm = c.to_degrees() * 60.0;
+    let y = dlam.sin() * phi2.cos();
+    let x = phi1.cos() * phi2.sin() - phi1.sin() * phi2.cos() * dlam.cos();
+    let bearing = y.atan2(x).to_degrees().rem_euclid(360.0);
+    (nm, bearing)
 }
 
 // ---------------------------------------------------------

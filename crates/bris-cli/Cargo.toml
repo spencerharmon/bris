@@ -24,6 +24,7 @@ bris-platesolve.workspace = true
 bris-nav.workspace = true
 bris-nmea.workspace = true
 bris-streaming = { workspace = true, features = ["segmentation"] }
+bris-bundle.workspace = true
 bris-capture.workspace = true
 bris-calibrate.workspace = true
 anyhow.workspace = true
@@ -33,6 +34,7 @@ serde.workspace = true
 toml.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+serde_json = "1"
 clap = { version = "4", features = ["derive"] }
 ctrlc.workspace = true
 indicatif.workspace = true

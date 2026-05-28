@@ -1,59 +1,75 @@
-//! Quick end-to-end test: write synthetic frames to a temp dir,
-//! invoke the bris replay subcommand, and verify it produces a fix.
+//! `bris replay` end-to-end smoke test.
+//!
+//! The old subcommand was a one-shot panorama solver; the new
+//! one drives the full streaming engine off a debug bundle (or a
+//! `--frames`-only fallback for orphan corpora). The test here
+//! synthesizes a tiny bundle and asserts the CLI exits 0 and the
+//! engine pushes every frame. We deliberately don't assert on a
+//! published fix \u2014 synthetic horizon-vs-sun geometry is wrong
+//! and honest silence is the correct outcome.
+//!
+//! See `crates/bris-bundle` for the schema and
+//! `docs/design/replay_modes.md` for the AP-mode contract.
 
+use std::fs;
 use std::process::Command;
 
-#[allow(clippy::similar_names)] // body_cx, body_cy are domain-standard
-fn write_synthetic_frame(path: &std::path::Path, horizon_y: u32, body_cx: f64, body_cy: f64) {
+#[allow(clippy::similar_names)]
+fn write_synthetic_pgm(path: &std::path::Path, horizon_y: u32) {
     let width = 320u32;
     let height = 240u32;
     let mut pixels = vec![0u16; (width as usize) * (height as usize)];
     for y in 0..height {
         for x in 0..width {
-            let v = if y < horizon_y { 50_000 } else { 5_000 };
+            let v: u16 = if y < horizon_y { 50_000 } else { 5_000 };
             pixels[(y as usize) * (width as usize) + (x as usize)] = v;
         }
     }
-    // Bright disk for the body.
-    let radius = 12.0_f64;
-    for y in 0..height {
-        for x in 0..width {
-            let dx = f64::from(x) - body_cx;
-            let dy = f64::from(y) - body_cy;
-            if dx * dx + dy * dy <= radius * radius {
-                pixels[(y as usize) * (width as usize) + (x as usize)] = 65_000;
-            }
-        }
-    }
     let buf = image::ImageBuffer::<image::Luma<u16>, _>::from_raw(width, height, pixels).unwrap();
-    buf.save_with_format(path, image::ImageFormat::Png).unwrap();
+    buf.save_with_format(path, image::ImageFormat::Pnm).unwrap();
 }
 
 #[test]
-fn replay_runs_end_to_end_on_synthetic_frames() {
+fn replay_bundle_runs_end_to_end_on_synthetic_frames() {
     let tmp = tempfile::tempdir().unwrap();
-    let frame_dir = tmp.path();
-    for i in 0..3 {
-        let frame_path = frame_dir.join(format!("{i:04}.png"));
-        // Body just above the horizon; same content in every frame.
-        write_synthetic_frame(&frame_path, 180, 160.0, 100.0);
+    let bundle_dir = tmp.path();
+    let media = bundle_dir.join("media");
+    fs::create_dir_all(&media).unwrap();
+    for i in 0..3u32 {
+        let pgm = media.join(format!("{i:012}.pgm"));
+        write_synthetic_pgm(&pgm, 120);
+        let sidecar = pgm.with_extension("json");
+        let ts = 1_700_000_000_000i64 + i64::from(i) * 100;
+        let s = format!(r#"{{"seq":{i},"captured_unix_ms":{ts},"width":320,"height":240}}"#);
+        fs::write(&sidecar, s).unwrap();
     }
+    // Minimal bundle.json (schema_version 1, placeholder intrinsics).
+    let bundle = r#"{
+        "schema_version": 1,
+        "bundle_id": "synthetic-test",
+        "device": { "model": "synthetic" },
+        "capture": {
+            "source_rotation_deg": 0,
+            "frame_count": 3,
+            "started_unix_ms": 1700000000000,
+            "ended_unix_ms": 1700000000200
+        },
+        "intrinsics": {
+            "source": { "kind": "placeholder" },
+            "width": 320, "height": 240,
+            "fx": 1000.0, "fy": 1000.0, "cx": 160.0, "cy": 120.0,
+            "distortion": { "model": "none" }
+        }
+    }"#;
+    fs::write(bundle_dir.join("bundle.json"), bundle).unwrap();
 
-    // Use a known UTC so results are deterministic.
     let exe = env!("CARGO_BIN_EXE_bris");
     let out = Command::new(exe)
         .args([
             "replay",
-            "--frames",
-            frame_dir.to_str().unwrap(),
-            "--assumed-lat",
-            "47.6",
-            "--assumed-lon",
-            "-122.3",
-            "--body",
-            "sun",
-            "--capture-utc",
-            "2024-06-21T18:00:00Z",
+            "--bundle",
+            bundle_dir.to_str().unwrap(),
+            "--disable-store",
         ])
         .output()
         .expect("invoke bris");
@@ -61,28 +77,40 @@ fn replay_runs_end_to_end_on_synthetic_frames() {
     let stdout = String::from_utf8_lossy(&out.stdout);
     let combined = format!("STDOUT:\n{stdout}\nSTDERR:\n{stderr}");
 
-    // The pipeline must run end-to-end through panorama stitching and
-    // produce an observed altitude. This is the load-bearing assertion:
-    // it proves the wiring works on real PNG-on-disk inputs.
-    //
-    // The downstream LSQ fix may fail because our synthetic Sun
-    // position (~4.5° altitude) is wildly inconsistent with the real
-    // Sun's apparent place at the chosen UTC (~54° altitude at
-    // Seattle in solstice afternoon). The blunder screen correctly
-    // rejects such a fix rather than producing a wrong answer; we
-    // tolerate the bail in this test because what we're testing is
-    // the pipeline plumbing, not the celestial-mechanics correctness
-    // of synthetic inputs.
+    // Strip ANSI escape sequences so substring checks work
+    // regardless of whether tracing colourized output.
+    let combined: String = combined
+        .chars()
+        .scan(false, |in_esc, c| {
+            if *in_esc {
+                if c.is_ascii_alphabetic() {
+                    *in_esc = false;
+                }
+                Some(None)
+            } else if c == '\x1b' {
+                *in_esc = true;
+                Some(None)
+            } else {
+                Some(Some(c))
+            }
+        })
+        .flatten()
+        .collect();
+
     assert!(
-        combined.contains("replay: panorama-stitching produced an observed altitude"),
-        "panorama did not run end-to-end.\n{combined}"
+        out.status.success(),
+        "bris replay exited non-zero.\n{combined}"
     );
     assert!(
-        combined.contains("replay: body apparent place"),
-        "apparent-place computation did not run.\n{combined}"
+        combined.contains("replay: bundle resolved"),
+        "bundle did not resolve.\n{combined}"
     );
     assert!(
-        combined.contains("replay: line of position"),
-        "LOP computation did not run.\n{combined}"
+        combined.contains("frames_pushed=3"),
+        "engine did not push all 3 frames.\n{combined}"
+    );
+    assert!(
+        combined.contains("mode complete"),
+        "mode did not complete.\n{combined}"
     );
 }
