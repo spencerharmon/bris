@@ -1,0 +1,22 @@
+[package]
+name = "bris-bundle"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Shared schema and on-disk layout for Bris debug bundles. Consumed by bris-cli replay, bris-collector ingest, and (eventually) the Android capture path. Pure serde; never executes engine logic."
+publish = false
+
+[dependencies]
+serde = { workspace = true }
+serde_json = "1"
+thiserror = { workspace = true }
+blake3 = "1"
+
+[dev-dependencies]
+tempfile = { workspace = true }
+
+[lints]
+workspace = true
