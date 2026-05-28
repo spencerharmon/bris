@@ -187,6 +187,9 @@ pub(crate) struct StageEOutcome {
     /// max |intercept| exceeded the stale-prior threshold and
     /// was published in its stead.
     pub cold_start_preferred_over_stale_sh: bool,
+    /// AP re-derivation was suppressed by `lock_ap_for_replay`
+    /// during this Stage E pass. Diagnostic-only.
+    pub ap_rederive_suppressed: bool,
 }
 
 /// Identifier for the body that produced a sight.
@@ -791,9 +794,16 @@ fn try_publish(
                 .iter()
                 .map(|s| s.lop.intercept_nm.abs())
                 .fold(0.0_f64, f64::max);
-            if cfg.cold_start.enabled
-                && max_intercept_nm > cfg.cold_start.stale_prior_intercept_threshold_nm
-            {
+            // Track the stale-prior trigger condition
+            // independently of whether the lock suppresses
+            // cold-start, so the diagnostic counter reflects
+            // every site we *would* have re-derived AP from.
+            let stale_trigger_fired =
+                max_intercept_nm > cfg.cold_start.stale_prior_intercept_threshold_nm;
+            if cfg.lock_ap_for_replay && stale_trigger_fired {
+                out.ap_rederive_suppressed = true;
+            }
+            if cfg.cold_start.enabled && !cfg.lock_ap_for_replay && stale_trigger_fired {
                 let circles = circles_from_sights(window, cfg.observer);
                 if circles.len() >= 2 {
                     if let Some((cs_fix, cs_provenance)) = solve_cold_start(&circles, cfg, out) {
@@ -824,7 +834,14 @@ fn try_publish(
         out.singular_geometry_rejection = true;
     }
 
-    if !cfg.cold_start.enabled {
+    if !cfg.cold_start.enabled || cfg.lock_ap_for_replay {
+        // AP lock: cold-start is itself a form of AP re-derivation
+        // (it produces a fresh fix without referencing the prior
+        // AP). Suppressed under the replay lock so the engine's
+        // behaviour stays referenced to the seeded AP only.
+        if cfg.lock_ap_for_replay {
+            out.ap_rederive_suppressed = true;
+        }
         return;
     }
     // Cold-start triggers when either (a) LSQ is singular OR
@@ -1744,6 +1761,46 @@ mod tests {
         let a = (dlat / 2.0).sin().powi(2) + lat1r.cos() * lat2r.cos() * (dlon / 2.0).sin().powi(2);
         let c = 2.0 * a.sqrt().asin();
         c.to_degrees() * 60.0
+    }
+
+    #[test]
+    fn ap_lock_for_replay_suppresses_cold_start() {
+        // Same stale-prior scenario as
+        // `cold_start_preferred_when_sh_intercept_exceeds_threshold`,
+        // but with `lock_ap_for_replay = true`. Cold-start must
+        // NOT run; the SH fix (offset from truth) publishes
+        // instead and the suppression counter increments.
+        let true_lat = -23.0;
+        let true_lon = 0.0;
+        let ap_lat = -10.0;
+        let ap_lon = 10.0;
+        let s1 = sun_sight_with_offset_ap(true_lat, true_lon, ap_lat, ap_lon, 0.0, 1);
+        let s2 = sun_sight_with_offset_ap(true_lat, true_lon, ap_lat, ap_lon, 1.5 * 3600.0, 2);
+        let s3 = sun_sight_with_offset_ap(true_lat, true_lon, ap_lat, ap_lon, 3.0 * 3600.0, 3);
+        let mut w = SightWindow::default();
+        w.try_insert(s1, 5);
+        w.try_insert(s2, 5);
+        w.try_insert(s3, 5);
+        let mut observer = Observer::default_dev();
+        observer.latitude = bris_core::Latitude::from_degrees(ap_lat).unwrap();
+        observer.longitude = bris_core::Longitude::from_degrees(ap_lon).unwrap();
+        let mut cfg = EngineConfig::new(observer);
+        cfg.cold_start.enabled = true;
+        cfg.cold_start.coarse_hemisphere = Some(bris_core::Hemisphere::South);
+        cfg.cold_start.stale_prior_intercept_threshold_nm = 60.0;
+        cfg.publication_gate.min_azimuth_spread_rad = 0.0;
+        cfg.publication_gate.max_ellipse_axis_ratio = f64::INFINITY;
+        cfg.publication_gate.max_position_sigma_nm = f64::INFINITY;
+        cfg.lock_ap_for_replay = true;
+        let mut out = StageEOutcome::default();
+        try_publish(&w, Some(s3.anchor_tt), &cfg, true, &mut out);
+        assert!(
+            !out.cold_start_attempted,
+            "cold-start must NOT run under lock_ap_for_replay"
+        );
+        assert!(out.ap_rederive_suppressed, "suppression flag must be set");
+        let p = out.published.expect("SH fix must still publish");
+        assert!(matches!(p.provenance, FixProvenance::SaintHilaire));
     }
 
     #[test]

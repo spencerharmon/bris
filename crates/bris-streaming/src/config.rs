@@ -348,6 +348,29 @@ pub struct EngineConfig {
     /// [`PublicationGateConfig`] and
     /// `docs/design/observer_motion_staleness.md`.
     pub publication_gate: PublicationGateConfig,
+
+    /// **Diagnostic-only.** When `true`, the engine accepts the
+    /// `ApInput` baked into its initial [`Observer`] and refuses
+    /// to re-derive the assumed position from any other source for
+    /// the rest of its life:
+    ///
+    /// - prior-published fixes do **not** flow back into horizon
+    ///   detection as a [`bris_vision::PositionPrior`];
+    /// - the cold-start circle-of-position solver is **not** run
+    ///   (neither on `multi_sight_fix` failure nor on the
+    ///   stale-prior trigger);
+    /// - the stale-prior trigger inside `try_publish` is a no-op.
+    ///
+    /// Every suppressed re-derivation increments
+    /// [`crate::EngineDiagnostics::ap_rederive_suppressed_count`]
+    /// so an operator can see how often the lock fired.
+    ///
+    /// The flag exists **solely** to let `bris-cli replay
+    /// --ap-lock-truth` bisect the celestial error budget by
+    /// holding the AP fixed at a known-good (e.g. GPS-truth)
+    /// position across a whole replay. Production code paths
+    /// must leave this `false`.
+    pub lock_ap_for_replay: bool,
 }
 
 /// Cold-start fix fallback knobs.
@@ -508,6 +531,9 @@ impl EngineConfig {
                 stale_prior_intercept_threshold_nm: 60.0,
             },
             publication_gate: PublicationGateConfig::default(),
+            // Production default: never lock. See the field docs;
+            // only `bris-cli replay --ap-lock-truth` flips this on.
+            lock_ap_for_replay: false,
         }
     }
 

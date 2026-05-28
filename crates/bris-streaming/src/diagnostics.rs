@@ -227,6 +227,12 @@ pub struct EngineDiagnostics {
     /// (azimuth spread / axis ratio / absolute σ / motion
     /// staleness) rejected after `multi_sight_fix` accepted.
     pub publication_gate_rejections: u64,
+
+    /// Number of times the engine suppressed an AP re-derivation
+    /// because [`crate::EngineConfig::lock_ap_for_replay`] was
+    /// set. Diagnostic-only; production engines leave the lock
+    /// flag off and this counter stays at 0.
+    pub ap_rederive_suppressed_count: u64,
 }
 
 /// Per-stage processing statistics.

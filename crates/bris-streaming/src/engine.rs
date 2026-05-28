@@ -236,6 +236,8 @@ struct EngineState {
     sights_evicted_total: u64,
     singular_geometry_rejections: u64,
     publication_gate_rejections: u64,
+    /// See [`crate::EngineDiagnostics::ap_rederive_suppressed_count`].
+    ap_rederive_suppressed_count: u64,
 }
 
 /// Nautical mile in metres; for converting Fix sigma (nm) to
@@ -552,6 +554,7 @@ impl StreamingEngine {
                 sights_evicted_total: 0,
                 singular_geometry_rejections: 0,
                 publication_gate_rejections: 0,
+                ap_rederive_suppressed_count: 0,
             }),
             config,
             fix_tx,
@@ -627,7 +630,21 @@ impl StreamingEngine {
         // uses this for its catalog-consistency test; without
         // it the provider runs in cold-start mode (Test 3
         // dropped, Test 4 threshold raised).
-        let position_prior = position_prior_from_state(&state, &self.config);
+        // When the operator (via `bris-cli replay --ap-lock-truth`)
+        // has locked the AP, suppress the position-prior
+        // feedback loop: the engine must not let a published fix
+        // implicitly steer subsequent horizon detection. Counts as
+        // one suppression each time we would have produced a
+        // non-None prior.
+        let position_prior = if self.config.lock_ap_for_replay {
+            let p = position_prior_from_state(&state, &self.config);
+            if p.is_some() {
+                state.ap_rederive_suppressed_count += 1;
+            }
+            None
+        } else {
+            position_prior_from_state(&state, &self.config)
+        };
         let mut outcome = process_frame(
             &pyramid,
             &self.config,
@@ -738,6 +755,9 @@ impl StreamingEngine {
         }
         if stage_e_outcome.cold_start_preferred_over_stale_sh {
             state.cold_start_preferred_over_stale_sh += 1;
+        }
+        if stage_e_outcome.ap_rederive_suppressed {
+            state.ap_rederive_suppressed_count += 1;
         }
         // Cumulative counters from this Stage E pass.
         state.sights_inserted_total += stage_e_outcome.sights_inserted as u64;
@@ -884,6 +904,7 @@ impl StreamingEngine {
             sights_evicted_total: state.sights_evicted_total,
             singular_geometry_rejections: state.singular_geometry_rejections,
             publication_gate_rejections: state.publication_gate_rejections,
+            ap_rederive_suppressed_count: state.ap_rederive_suppressed_count,
         }
     }
 
