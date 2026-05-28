@@ -9,6 +9,36 @@ For the end-to-end pipeline architecture and data flow, see
 
 ---
 
+## Debug-bundle schema + replay refactor
+
+`crates/bris-bundle` landed as the shared schema between the
+Android capture path, `bris-cli replay`, and `bris-collector`
+ingest. The crate is pure serde: `BundleManifest`,
+`IntrinsicsRecord`, `Distortion`, `ApInput` / `ApProvenance` /
+`ApDerivationTrace`, `GpsTruth`, `AtmosphereHint`, plus a
+`FrameSidecar` that round-trips both on-device layouts seen in
+the wild (`media/` and `frames/`).
+
+`bris-cli replay` was rewritten to drive the full streaming
+engine off a debug bundle (or a synthesized one for legacy
+frame-only directories). It supports four AP modes — Default,
+ApSeedTruth, ApLockTruth, NoAp — plus `--all-modes` for
+side-by-side error-budget bisection. The engine gained a
+diagnostic-only `EngineConfig::lock_ap_for_replay` hook that
+suppresses prior-fix feedback and cold-start re-derivation;
+suppression counts surface on `EngineDiagnostics::
+ap_rederive_suppressed_count`. See `docs/design/debug_bundle_
+schema.md` and `docs/design/replay_modes.md`.
+
+Deferred Android follow-up: the on-device capture path must
+learn to write `bundle.json` and the extended `FrameSidecar`
+(see TODO in `docs/design/debug_bundle_schema.md`). Until that
+lands the operator hand-writes `bundle.json` for the surviving
+`bris-exports/` capture; one such bundle is now committed-by-
+proxy via `docs/operator/replay_bris_exports_2026_05_17.md`.
+
+---
+
 ## Almanac: explicit diurnal aberration
 
 `bris-almanac` now models diurnal aberration explicitly

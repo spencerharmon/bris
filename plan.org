@@ -1977,6 +1977,18 @@ references to the regression tests that pin the behavior. See
   layout, security posture, CameraX backpressure decision,
   retention model, and the corpus-promotion next step.
 
+  Update 2026-05-28: ~crates/bris-bundle~ landed as the
+  shared schema between Android capture, ~bris-cli replay~,
+  and the collector. ~bris-cli replay~ was rewritten to drive
+  the streaming engine from a debug bundle (with AP / GPS-truth
+  / derivation kept as three independent axes) and supports
+  four AP modes (Default, ApSeedTruth, ApLockTruth, NoAp) plus
+  ~--all-modes~ for error-budget bisection. Engine gained a
+  diagnostic-only ~lock_ap_for_replay~ hook. See
+  [[file:docs/design/debug_bundle_schema.md][docs/design/debug_bundle_schema.md]] and
+  [[file:docs/design/replay_modes.md][docs/design/replay_modes.md]]. Android-side bundle writer
+  is the deferred follow-up.
+
 ** PARTIAL bris-ffi crate: UniFFI proc-macro bindings
    *Done in the diagnostic-collection spike:* ~crates/bris-ffi~
    added to the workspace (the previous "intentionally not in

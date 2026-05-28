@@ -164,6 +164,10 @@ stack). A naive `target/` reaches 20+ GiB. Standing policy:
   coordinated update in `bris-ffi` and `bris-android/`.
 - Worker-thread model is single-threaded today. Do not introduce
   parallelism without empirical justification on the Pi Zero 2W.
+- `EngineConfig::lock_ap_for_replay` is a **diagnostic-only**
+  flag for `bris-cli replay --ap-lock-truth`. Production
+  callers must leave it `false`. See
+  `docs/design/replay_modes.md`.
 
 ### `crates/bris-ffi` — UniFFI bindings (spike)
 
@@ -184,6 +188,22 @@ stack). A naive `target/` reaches 20+ GiB. Standing policy:
   `x86_64-linux-android` (emulator). Targets are installed via
   `rustup target add`. The Gradle build in `bris-android/`
   invokes `cargo build --target ...` per ABI.
+
+### `crates/bris-bundle` — debug-bundle schema
+
+- **Shared schema** between Android capture, `bris-cli replay`,
+  and `bris-collector` ingest. Pure serde + a couple of
+  filesystem helpers; **never** executes engine logic.
+- Public types: `BundleManifest`, `DeviceInfo`, `CaptureInfo`,
+  `IntrinsicsRecord`, `IntrinsicsSource`, `Distortion`,
+  `ApInput` / `ApProvenance` / `ApDerivationTrace`, `GpsTruth`,
+  `AtmosphereHint`, `FrameSidecar`.
+- Three-axis design (AP / GPS-truth / derivation) is
+  load-bearing; see `docs/design/debug_bundle_schema.md` for
+  the rationale.
+- Within `schema_version: 1` only additive changes are allowed.
+  Breaking changes bump the version and the loader rejects
+  mismatches with `BundleError::UnsupportedSchema`.
 
 ### `crates/bris-collector` — diagnostic submission service
 
