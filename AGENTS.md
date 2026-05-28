@@ -344,6 +344,39 @@ artifacts), not making the operator's workstation bigger.
   are operator-readable status documents. Edits should be
   precise and reflect actual work done.
 
+## Cave worktree hygiene
+
+Subagents launched with `isolation: worktree` (the default for
+`implementer`) create a fresh git worktree under
+`.cave/worktrees/implementer-*` on a `cave/agent/implementer-*`
+branch. Each worktree gets its own `target/` directory; a single
+full build is 5–10 GiB. Twenty-odd parallel agent sessions will
+silently consume 40–100 GiB.
+
+Periodically — and always after a batch of merged agent PRs —
+prune them:
+
+```sh
+# 1. remove all cave worktrees (forces; they are disposable)
+git worktree list | awk '/\.cave\/worktrees/ {print $1}' \
+  | xargs -r -n1 git worktree remove --force
+git worktree prune
+
+# 2. delete merged agent branches
+git branch --merged main | grep '^  cave/agent/implementer-' \
+  | xargs -r -n1 git branch -d
+
+# 3. (optional) audit unmerged branches
+git branch --no-merged main
+
+# 4. reclaim packfile space if a lot was deleted
+git gc --prune=now
+```
+
+Never bulk-delete unmerged branches — inspect first; an agent
+branch with unique commits is the only record of that session's
+work.
+
 ## When in doubt
 
 Ask the operator. The repository is small enough and the
