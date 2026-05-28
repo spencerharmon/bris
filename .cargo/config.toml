@@ -1,0 +1,10 @@
+# Local-only build settings for this checkout.
+#
+# `rustc-wrapper` is intentionally NOT set here: CI and the Pi build don't
+# have sccache and we don't want to force-install it. Developers opt in by
+# exporting `RUSTC_WRAPPER=sccache` in their shell (see AGENTS.md).
+#
+# Per-worktree `target/` is the default and is correct for the multi-agent
+# setup (cave `implementer` runs in isolated git worktrees). Do NOT set
+# `build.target-dir` to a shared path -- cargo's per-target-dir build lock
+# would serialize concurrent agent builds.

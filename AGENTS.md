@@ -117,6 +117,42 @@ captured in `docs/design/diagnostic_collection.md`.
   cargo deny check
   ```
 
+### Build-cache / disk hygiene
+
+The workspace is large (~12 crates, axum + tokio + image
+stack). A naive `target/` reaches 20+ GiB. Standing policy:
+
+- **Dev profile uses `debug = "line-tables-only"`** (set in
+  the root `Cargo.toml`). Panic backtraces still resolve to
+  file:line. If you need full DWARF for a gdb/lldb session,
+  override per-invocation: `CARGO_PROFILE_DEV_DEBUG=2 cargo
+  build`. Do not change the workspace default.
+- **Per-worktree `target/`, not a shared `CARGO_TARGET_DIR`.**
+  Cave's `implementer` agent runs in isolated git worktrees and
+  parallel agents may build concurrently. Cargo takes a build
+  lock per target dir, so a shared target serializes all
+  builds and thrashes the incremental cache when branches
+  differ. `.cargo/config.toml` documents this; do not add
+  `build.target-dir` there.
+- **`sccache` is the cross-worktree cache.** Install once
+  (`pacman -S sccache`) and export `RUSTC_WRAPPER=sccache` in
+  your shell. It's content-addressed and safe under concurrent
+  builds across worktrees / branches. Not wired into the
+  repo config because CI and the Pi build don't have it and
+  shouldn't be forced to.
+- **`cargo-sweep` for periodic GC.** `cargo install
+  cargo-sweep`, then `cargo sweep --time 30` from the repo
+  root drops artifacts untouched for 30 days. Safe; rebuilds
+  on next use (sccache absorbs most of the cost).
+- **Prefer `cargo check` / `-p <crate>` in tight loops.**
+  `--workspace --all-features` rebuilds everything and is the
+  right thing only before commit. During iteration, scope to
+  the crate you're editing.
+- **Delete cross-compile dirs when not in use.**
+  `target/aarch64-*/` and `target/*-android/` survive
+  `cargo clean -p` and add up fast. `rm -rf` them when you're
+  not actively testing the Pi or Android paths.
+
 ### `crates/bris-streaming` — the streaming engine
 
 - `EngineConfig` / `push_frame` / `fix_stream` / `diagnostics` is

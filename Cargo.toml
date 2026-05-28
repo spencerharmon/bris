@@ -109,6 +109,13 @@ bris-calibrate = { path = "crates/bris-calibrate" }
 bris-ffi = { path = "crates/bris-ffi" }
 bris-collector = { path = "crates/bris-collector" }
 
+[profile.dev]
+# Full DWARF (`debug = 2`, the default) bloats `target/debug` by 2-5x for no
+# benefit in the normal edit/test loop. Line tables are enough for
+# file:line in panic backtraces. Override per-session with
+# `CARGO_PROFILE_DEV_DEBUG=2 cargo build` if you need step-debugging.
+debug = "line-tables-only"
+
 [profile.release]
 lto = "thin"
 codegen-units = 1
