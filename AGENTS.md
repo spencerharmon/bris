@@ -371,6 +371,31 @@ artifacts), not making the operator's workstation bigger.
   are operator-readable status documents. Edits should be
   precise and reflect actual work done.
 
+## Project boundaries (directory discipline)
+
+The operator keeps **multiple checkouts of the same repo** under
+distinct directory names so Emacs' project name (and therefore the
+buffer title) reflects the *task* in progress, not the repo. Two
+or more directories on disk may share the same `origin` remote.
+
+Rules for agents:
+
+- **Stay inside the cwd checkout.** Do all reads, edits, builds,
+  and `cargo` invocations within the working directory you were
+  launched in, even if another checkout of the same repo exists
+  elsewhere on disk and would also satisfy the request.
+- **Do not `cd` into a sibling checkout** to run commands.
+  Crossing checkouts pollutes the wrong project's `target/`,
+  can race with the operator's open buffers in that project,
+  and defeats the point of the per-task directory naming.
+- If a tool, crate, or file seems to be missing from the cwd
+  checkout, check again (it almost certainly isn't) before
+  reaching elsewhere. If you really do need something outside
+  the cwd, **ask first.**
+- This applies to subagents too. An `explore`/`implementer` run
+  inherits the cwd; don't override it to point at a sibling
+  checkout without operator approval.
+
 ## Cave worktree hygiene
 
 Subagents launched with `isolation: worktree` (the default for
