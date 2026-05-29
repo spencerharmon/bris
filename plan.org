@@ -1998,7 +1998,13 @@ references to the regression tests that pin the behavior. See
   diagnostic-only ~lock_ap_for_replay~ hook. See
   [[file:docs/design/debug_bundle_schema.md][docs/design/debug_bundle_schema.md]] and
   [[file:docs/design/replay_modes.md][docs/design/replay_modes.md]]. Android-side bundle writer
-  is the deferred follow-up.
+  landed 2026-05-29: `bris-ffi` exposes
+  ~write_bundle_manifest~ + ~blake3_hex~; the on-device
+  capture path's "Save buffer" flow now emits
+  ~bundle.json~ alongside ~frames/~ in the export zip.
+  Observer is still the placeholder ~(0,0,2m)~ pending the
+  operator-entered AP UI — the manifest stays honest with
+  whatever the engine ran against.
 
 ** PARTIAL bris-ffi crate: UniFFI proc-macro bindings
    *Done in the diagnostic-collection spike:* ~crates/bris-ffi~

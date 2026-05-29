@@ -63,6 +63,60 @@ proxy via `docs/operator/replay_bris_exports_2026_05_17.md`.
 
 ---
 
+## Android debug-bundle writer (2026-05-29)
+
+The Android on-device capture path now writes a
+`schema_version: 1` `bundle.json` whenever the operator
+exports the debug buffer through the canonical "Save buffer"
+flow (`DebugBufferActions.saveAll`). New surfaces:
+
+- `bris-ffi`: `write_bundle_manifest(dir, manifest_json)`
+  and `blake3_hex(bytes)`. Both `#[uniffi::export]`. The
+  manifest goes through `serde_json` against the canonical
+  `bris_bundle::BundleManifest` so Kotlin schema drift fails
+  loudly at save time. `bris-ffi` picked up `bris-bundle`,
+  `blake3`, and `serde_json` as direct dependencies.
+- `DebugCaptureBuffer` now records the first-frame BLAKE3
+  checksum, session start/end Unix-ms, and capture
+  resolution to `.bundle-meta.json` so a process restart
+  mid-session still has the data when `bundle.json` is
+  eventually written. Sidecar JSON gained optional
+  `exposure_us` and `sensor_gain` fields matching
+  `bris_bundle::FrameSidecar`. `clear()` resets the
+  bundle-meta as well as the frame counters.
+- New `DebugBundleWriter` composes the manifest JSON from
+  `(DeviceInfo, CaptureInfo, IntrinsicsRecord, ApInput,
+  ApDerivationTrace, GpsTruth)`. AP / GPS-truth / derivation
+  are kept as three independent axes per the schema doc:
+  `gps_truth` is never substituted for `ap_input`.
+  Intrinsics provenance mirrors the live
+  `CalibrationSource` (operator / factory / placeholder).
+- `DebugBufferActions.saveAll` takes an optional
+  `prepareManifest(bundleDir, bundleId)` hook invoked on
+  the IO dispatcher before the zip is enumerated, so the
+  saved `.zip` carries `bundle.json` at its root next to
+  `frames/`, `index.jsonl`, and `pbris.log`.
+- `LiveScreen` is the canonical call site; the
+  `Save buffer` action threads observer + intrinsics +
+  optional `CoarseLocation` GPS-truth into the manifest.
+  Observer is still the placeholder `(0,0,2m)` consumed by
+  `defaultEngineConfig` — the manifest stays honest with
+  the engine until the operator-entered observer UI lands.
+
+Four Rust round-trip tests cover the FFI entry point
+(schema validation, malformed-JSON rejection, BLAKE3 parity
+with `bris_bundle::verify_first_frame_checksum`). Nine
+Kotlin unit tests cover `DebugBundleWriter.buildManifestJson`
+for each `CalibrationSource` / `ApProvenance` permutation.
+
+Follow-ups still open: replace the placeholder observer with
+the operator-entered AP once the UI lands; teach the
+calibration path to thread the underlying session ULID into
+`IntrinsicsSource::UserCalibration::session_id` instead of
+the synthesised `operator-WxH` placeholder.
+
+---
+
 ## Almanac: explicit diurnal aberration
 
 `bris-almanac` now models diurnal aberration explicitly

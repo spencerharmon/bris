@@ -16,6 +16,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.platform.LocalContext
 import io.github.spencerharmon.bris.Prefs
 import io.github.spencerharmon.bris.engine.DebugBufferActions
+import io.github.spencerharmon.bris.engine.DebugBundleWriter
 import io.github.spencerharmon.bris.engine.DebugCaptureBuffer
 import io.github.spencerharmon.bris.engine.SaveResult
 import kotlinx.coroutines.launch
@@ -44,6 +45,7 @@ fun rememberDebugSaveAction(
     buffer: DebugCaptureBuffer,
     prefs: Prefs,
     snackbarHost: SnackbarHostState,
+    bundleInputsProvider: (() -> DebugBundleWriter.Inputs?)? = null,
 ): () -> Unit {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -80,7 +82,7 @@ fun rememberDebugSaveAction(
                 )
             }
             if (wasPending) {
-                runDebugSave(context, buffer, uri, snackbarHost)
+                runDebugSave(context, buffer, uri, snackbarHost, bundleInputsProvider)
             }
         }
     }
@@ -91,7 +93,7 @@ fun rememberDebugSaveAction(
             pendingSave = true
             picker.launch(null)
         } else {
-            scope.launch { runDebugSave(context, buffer, saved, snackbarHost) }
+            scope.launch { runDebugSave(context, buffer, saved, snackbarHost, bundleInputsProvider) }
         }
     }
 }
@@ -105,8 +107,24 @@ suspend fun runDebugSave(
     buffer: DebugCaptureBuffer,
     uri: Uri,
     snackbarHost: SnackbarHostState,
+    bundleInputsProvider: (() -> DebugBundleWriter.Inputs?)? = null,
 ) {
-    val msg = when (val r = DebugBufferActions.saveAll(context, buffer, uri)) {
+    val prepare: ((java.io.File, String) -> Unit)? = bundleInputsProvider?.let { provider ->
+        { dir, id ->
+            val inputs = provider()
+            val snapshot = buffer.bundleSnapshot()
+            // A missing snapshot or missing inputs (no
+            // calibration resolved yet, etc.) is not fatal:
+            // we save the legacy frame layout without a
+            // `bundle.json` so the operator still gets their
+            // bytes off the device. `bris-cli replay` falls
+            // back to its `--frames`-only path in that case.
+            if (inputs != null && snapshot != null) {
+                DebugBundleWriter.write(dir, id, snapshot, inputs)
+            }
+        }
+    }
+    val msg = when (val r = DebugBufferActions.saveAll(context, buffer, uri, prepare)) {
         is SaveResult.Ok ->
             "Saved ${r.frameCount} frames " +
                 "(${Formatter.formatShortFileSize(context, r.bytes)}) " +

@@ -1684,3 +1684,146 @@ pub fn calibration_coverage(
         aspect_ratio_stddev: cov.aspect_ratio_stddev,
     })
 }
+
+/// BLAKE3 hex digest of `bytes`.
+///
+/// Exposed across the FFI so the Android debug-bundle writer
+/// can compute the first-frame checksum recorded in
+/// `BundleManifest::capture::first_frame_blake3` without
+/// pulling a Kotlin BLAKE3 dependency. The checksum is over
+/// the raw bytes the caller supplies; matches what
+/// [`bris_bundle::verify_first_frame_checksum`] computes for
+/// the on-disk PGM.
+#[uniffi::export]
+#[must_use]
+pub fn blake3_hex(bytes: Vec<u8>) -> String {
+    blake3::hash(&bytes).to_hex().to_string()
+}
+
+/// Write a `bundle.json` manifest at `bundle_dir`.
+///
+/// The Kotlin / Swift caller serialises a
+/// [`bris_bundle::BundleManifest`] as JSON and passes the
+/// string here; this function round-trips it through
+/// `serde_json` against the canonical Rust types so a Kotlin
+/// typo or a schema drift surfaces at write time rather than
+/// at replay time. On success the manifest is written
+/// pretty-printed to `<bundle_dir>/bundle.json` (creating the
+/// directory if necessary).
+///
+/// # Errors
+///
+/// - [`FfiError::InvalidArgument`] if `manifest_json` does not
+///   deserialise into a [`bris_bundle::BundleManifest`] or
+///   declares an unsupported `schema_version`.
+/// - [`FfiError::Engine`] for filesystem failures while
+///   writing the manifest.
+#[uniffi::export]
+pub fn write_bundle_manifest(bundle_dir: String, manifest_json: String) -> Result<(), FfiError> {
+    let manifest: bris_bundle::BundleManifest =
+        serde_json::from_str(&manifest_json).map_err(|e| FfiError::InvalidArgument {
+            detail: format!("bundle manifest parse: {e}"),
+        })?;
+    if manifest.schema_version != bris_bundle::SCHEMA_VERSION {
+        return Err(FfiError::InvalidArgument {
+            detail: format!(
+                "bundle manifest schema_version={} but this build supports {}",
+                manifest.schema_version,
+                bris_bundle::SCHEMA_VERSION
+            ),
+        });
+    }
+    manifest
+        .save_to_dir(std::path::Path::new(&bundle_dir))
+        .map_err(|e| FfiError::Engine {
+            detail: format!("bundle manifest write: {e}"),
+        })
+}
+
+#[cfg(test)]
+mod bundle_writer_tests {
+    use super::*;
+
+    #[test]
+    fn blake3_hex_matches_bundle_verifier() {
+        // The Android writer computes the manifest's
+        // `first_frame_blake3` by calling `blake3_hex` on the
+        // on-disk PGM bytes; `bris_bundle::verify_first_frame_
+        // checksum` computes the same. Round-trip via the FFI
+        // entry point to lock that contract.
+        let bytes = b"P5\n2 2\n255\nabcd".to_vec();
+        let from_ffi = blake3_hex(bytes.clone());
+        let expected = blake3::hash(&bytes).to_hex().to_string();
+        assert_eq!(from_ffi, expected);
+    }
+
+    #[test]
+    fn write_bundle_manifest_round_trips_minimum_schema() {
+        let dir = tempfile::tempdir().unwrap();
+        // Minimum required fields per `BundleManifest` /
+        // `CaptureInfo` / `IntrinsicsRecord`. Mirrors what the
+        // Android writer composes when no calibration matches.
+        let json = serde_json::json!({
+            "schema_version": 1,
+            "bundle_id": "test",
+            "device": { "model": "TestPhone" },
+            "capture": {
+                "source_rotation_deg": 0,
+                "frame_count": 1,
+                "started_unix_ms": 1_700_000_000_000_i64,
+                "ended_unix_ms": 1_700_000_000_000_i64
+            },
+            "intrinsics": {
+                "source": { "kind": "placeholder" },
+                "width": 1280, "height": 720,
+                "fx": 1000.0, "fy": 1000.0, "cx": 640.0, "cy": 360.0,
+                "distortion": { "model": "none" }
+            }
+        });
+        write_bundle_manifest(
+            dir.path().to_string_lossy().into_owned(),
+            json.to_string(),
+        )
+        .unwrap();
+        let loaded = bris_bundle::BundleManifest::load_from_dir(dir.path()).unwrap();
+        assert_eq!(loaded.bundle_id, "test");
+        assert_eq!(loaded.capture.frame_count, 1);
+    }
+
+    #[test]
+    fn write_bundle_manifest_rejects_unknown_schema() {
+        let dir = tempfile::tempdir().unwrap();
+        let json = serde_json::json!({
+            "schema_version": 999,
+            "bundle_id": "x",
+            "device": { "model": "x" },
+            "capture": {
+                "source_rotation_deg": 0, "frame_count": 0,
+                "started_unix_ms": 0, "ended_unix_ms": 0
+            },
+            "intrinsics": {
+                "source": { "kind": "placeholder" },
+                "width": 1, "height": 1,
+                "fx": 1.0, "fy": 1.0, "cx": 0.0, "cy": 0.0,
+                "distortion": { "model": "none" }
+            }
+        });
+        let err = write_bundle_manifest(
+            dir.path().to_string_lossy().into_owned(),
+            json.to_string(),
+        )
+        .unwrap_err();
+        assert!(matches!(err, FfiError::InvalidArgument { .. }));
+    }
+
+    #[test]
+    fn write_bundle_manifest_rejects_malformed_json() {
+        let dir = tempfile::tempdir().unwrap();
+        let err = write_bundle_manifest(
+            dir.path().to_string_lossy().into_owned(),
+            "{ not json".to_string(),
+        )
+        .unwrap_err();
+        assert!(matches!(err, FfiError::InvalidArgument { .. }));
+    }
+}

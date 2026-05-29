@@ -46,6 +46,7 @@ object DebugBufferActions {
         context: Context,
         buffer: DebugCaptureBuffer,
         savedTreeUri: Uri?,
+        prepareManifest: ((bundleDir: File, bundleId: String) -> Unit)? = null,
     ): SaveResult {
         if (savedTreeUri == null) return SaveResult.NeedLocation
         val tree = DocumentFile.fromTreeUri(context, savedTreeUri)
@@ -64,6 +65,12 @@ object DebugBufferActions {
                     ?: return@withContext SaveResult.Failed("Could not create $zipName.")
 
                 val root = buffer.rootDir()
+                // Give the caller a chance to write `bundle.json`
+                // (and any other top-level metadata) before we
+                // enumerate the sources for the archive. Done
+                // inside the IO dispatcher so manifest writing
+                // does not block the UI thread.
+                prepareManifest?.invoke(root, bundleName)
                 val sources = enumerateSources(root)
                 val resolver = context.contentResolver
                 val out = resolver.openOutputStream(zipFile.uri, "w")
@@ -153,7 +160,7 @@ object DebugBufferActions {
             .filter { it.isFile }
             .sortedBy { it.name }
         val pgmCount = frameFiles.count { it.extension.equals("pgm", ignoreCase = true) }
-        val topFiles = listOf("index.jsonl", "pbris.log")
+        val topFiles = listOf("bundle.json", "index.jsonl", "pbris.log")
             .map { File(bufferRoot, it) }
             .filter { it.isFile }
         return SourceList(

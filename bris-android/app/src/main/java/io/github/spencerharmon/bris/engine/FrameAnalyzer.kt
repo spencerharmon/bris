@@ -81,7 +81,12 @@ class FrameAnalyzer(
             frameCount.incrementAndGet()
             if (debugCaptureProvider() && debugBuffer != null) {
                 val snap = engine.snapshot.value
-                debugBuffer.appendFrame(ffiFrame, snap)
+                debugBuffer.appendFrame(
+                    ffiFrame,
+                    snap,
+                    exposureUs = ffiFrame.exposureUs,
+                    sensorGainEPerAdu = ffiFrame.gainEPerAdu,
+                )
             }
         } catch (t: Throwable) {
             // CameraX runs the analyzer on a background thread.

@@ -635,13 +635,17 @@ dependencies = [
 name = "bris-ffi"
 version = "0.0.1"
 dependencies = [
+ "blake3",
  "bris-almanac",
+ "bris-bundle",
  "bris-calibrate",
  "bris-core",
  "bris-nmea",
  "bris-streaming",
  "bris-vision",
  "chrono",
+ "serde_json",
+ "tempfile",
  "thiserror 1.0.69",
  "tracing",
  "uniffi",
