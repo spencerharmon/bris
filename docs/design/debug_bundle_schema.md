@@ -105,26 +105,40 @@ Both fall back to manifest defaults (exposure 1000 µs, gain 1.0)
 via `FrameSidecar::exposure_us_or` /
 `FrameSidecar::sensor_gain_or` so old bundles still load.
 
-## TODO: Android-side writer
+## Android-side writer
 
-The Android `bris-android/` app does **not** yet write
-`bundle.json` (or this crate's `FrameSidecar` extensions). The
-on-device debug-capture path still writes the legacy `media/` /
-`frames/` layout with a minimal sidecar. The deferred work is:
+The Android `bris-android/` app writes `bundle.json` and the
+extended `FrameSidecar` (with `exposure_us` and `sensor_gain`)
+as part of the canonical "Save buffer" flow. Implemented via:
 
-1. Add a `bris_bundle::BundleManifest` writer to the Kotlin
-   side via UniFFI bindings (or compute the manifest in Rust
-   and expose a `write_bundle_manifest` FFI call).
-2. Populate `ap_input` with whatever the on-device session
-   actually used (operator-entered, prior-fix, cold-start).
-3. Populate `intrinsics` from `FactoryCalibration` or the
-   user-calibration session.
-4. Optionally populate `gps_truth` from Android's `LocationManager`
-   when debug mode is on and GPS permission has been granted.
-5. Compute and record `first_frame_blake3` as the first frame is
-   written.
+1. `bris-ffi` exposes `write_bundle_manifest(dir,
+   manifest_json)` and `blake3_hex(bytes)`. Manifest JSON is
+   round-tripped through `serde_json` against
+   `bris_bundle::BundleManifest` so Kotlin schema drift fails
+   at save time.
+2. `DebugCaptureBuffer` records the first-frame BLAKE3, session
+   start/end Unix-ms, and capture resolution to
+   `.bundle-meta.json`. Sidecar JSON carries optional
+   `exposure_us` / `sensor_gain`.
+3. `DebugBundleWriter` composes the manifest from the live
+   `CalibrationSource` (operator / factory / placeholder),
+   the operator-entered observer (currently a placeholder —
+   the operator-entered AP UI is the outstanding follow-up),
+   and an optional `CoarseLocation` ground-truth GPS fix that
+   is **never** substituted for `ap_input`.
+4. `DebugBufferActions.saveAll` takes a
+   `prepareManifest(bundleDir, bundleId)` hook invoked before
+   the export zip is enumerated, so the saved archive carries
+   `bundle.json` at its root.
 
-Once that lands, the manifest synthesis path in
-`bris-cli replay --bundle` becomes the only consumer; the
-`--frames`-only fallback can stay as a legacy escape hatch for
-hand-curated corpora.
+Outstanding deferred work:
+
+- Replace the placeholder observer in `LiveScreen` with the
+  operator-entered AP once that UI lands; thread the same
+  value into both the `EngineConfig` and the manifest so
+  `ap_input` stays honest about what the engine ran against.
+- Teach `CalibrationSource::Operator` to carry the
+  underlying session ULID so `IntrinsicsSource::
+  UserCalibration::session_id` reflects the real session
+  identifier rather than the synthesised `operator-WxH`
+  placeholder.

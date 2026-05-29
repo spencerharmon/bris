@@ -256,6 +256,31 @@ fun LiveScreen(
         buffer = debugBuffer,
         prefs = prefs,
         snackbarHost = snackbarHost,
+        bundleInputsProvider = {
+            // Mirror the engine's runtime inputs into the
+            // bundle manifest. Observer here is the placeholder
+            // (0,0,2m) consumed by `defaultEngineConfig`; once
+            // the operator-entered observer UI lands the same
+            // value should be threaded through both this and
+            // the `EngineConfig` builder so the manifest's
+            // `ap_input` is honest about what the engine ran
+            // against.
+            io.github.spencerharmon.bris.engine.DebugBundleWriter.Inputs(
+                observer = io.github.spencerharmon.bris.engine.DebugBundleWriter.ObserverFix(
+                    latitudeDeg = 0.0,
+                    longitudeDeg = 0.0,
+                    eyeHeightM = 2.0,
+                ),
+                apProvenance = "operator_entered",
+                lensId = effectiveLensId,
+                captureWidth = captureSize.width,
+                captureHeight = captureSize.height,
+                calibration = calibration,
+                gpsTruth = if (debugMode) {
+                    io.github.spencerharmon.bris.engine.DebugBundleWriter.maybeGpsTruth(context)
+                } else null,
+            )
+        },
     )
 
     Box(modifier = Modifier.fillMaxSize()) {

@@ -12,6 +12,7 @@ import java.time.Instant
 import java.util.concurrent.atomic.AtomicLong
 import uniffi.bris_ffi.DiagnosticSnapshot
 import uniffi.bris_ffi.FfiFrame
+import uniffi.bris_ffi.blake3Hex
 
 /**
  * On-device debug-capture rolling buffer.
@@ -68,6 +69,7 @@ class DebugCaptureBuffer(
     private val framesDir = File(rootDir, "frames").apply { mkdirs() }
     private val indexFile = File(rootDir, "index.jsonl")
     private val seqFile = File(rootDir, ".seq")
+    private val metaFile = File(rootDir, ".bundle-meta.json")
     private val seq = AtomicLong(loadSeq())
     private val totalBytes = AtomicLong(walkTotalBytes())
     private val frameCount = AtomicLong(countFramesFromIndex())
@@ -75,6 +77,17 @@ class DebugCaptureBuffer(
     private val oldestFrameUnixMs = AtomicLong(0L)
     private val newestFrameUnixMs = AtomicLong(0L)
     private val evictedSinceClear = AtomicLong(0L)
+    // Bundle-level metadata accumulated as frames are appended.
+    // Persisted to `.bundle-meta.json` so a process restart
+    // mid-session still has the first-frame checksum and
+    // session start time when the operator eventually writes
+    // `bundle.json`. None of these fields are part of the
+    // hot-path frame sidecar; they exist solely to populate
+    // `CaptureInfo`.
+    private var firstFrameBlake3: String? = null
+    private var firstFrameUnixMs: Long = 0L
+    private var firstFrameWidth: Int = 0
+    private var firstFrameHeight: Int = 0
 
     private val _stateFlow: MutableStateFlow<BufferState>
 
@@ -89,6 +102,7 @@ class DebugCaptureBuffer(
     init {
         rootDir.mkdirs()
         seedTimestampsFromIndex()
+        loadMeta()
         _stateFlow = MutableStateFlow(snapshotState())
         stateFlow = _stateFlow.asStateFlow()
     }
@@ -102,14 +116,20 @@ class DebugCaptureBuffer(
      * write failed (logged; the buffer continues operating).
      */
     @Synchronized
-    fun appendFrame(frame: FfiFrame, snapshot: DiagnosticSnapshot?): Long {
+    @JvmOverloads
+    fun appendFrame(
+        frame: FfiFrame,
+        snapshot: DiagnosticSnapshot?,
+        exposureUs: UInt = 0u,
+        sensorGainEPerAdu: Double = 0.0,
+    ): Long {
         val n = seq.getAndIncrement()
         val tag = "%012d".format(n)
         val pgm = File(framesDir, "$tag.pgm")
         val json = File(framesDir, "$tag.json")
         try {
             writePgm(pgm, frame)
-            writeSnapshot(json, n, frame, snapshot)
+            writeSnapshot(json, n, frame, snapshot, exposureUs, sensorGainEPerAdu)
             appendIndex(n, frame, pgm.length(), json.length())
             persistSeq(n + 1)
             totalBytes.addAndGet(pgm.length() + json.length())
@@ -118,6 +138,24 @@ class DebugCaptureBuffer(
             lastAppendUnixMs.set(System.currentTimeMillis())
             if (oldestFrameUnixMs.get() == 0L) oldestFrameUnixMs.set(capturedMs)
             newestFrameUnixMs.set(capturedMs)
+            // First-frame bundle metadata: compute the BLAKE3
+            // checksum (over the on-disk PGM bytes, matching
+            // `bris_bundle::verify_first_frame_checksum`) and
+            // record the session start. The buffer can outlive
+            // a single "start capture" press; we set this once
+            // per `clear()` cycle, not once per session.
+            if (firstFrameBlake3 == null) {
+                firstFrameBlake3 = try {
+                    blake3Hex(pgm.readBytes())
+                } catch (e: Exception) {
+                    android.util.Log.w(TAG, "first-frame blake3 failed: $e")
+                    null
+                }
+                firstFrameUnixMs = capturedMs
+                firstFrameWidth = frame.width.toInt()
+                firstFrameHeight = frame.height.toInt()
+                persistMeta()
+            }
             evictIfOverCap()
             emitState()
             return n
@@ -185,7 +223,9 @@ class DebugCaptureBuffer(
         framesDir.listFiles()?.forEach { it.delete() }
         indexFile.delete()
         File(rootDir, "pbris.log").delete()
+        File(rootDir, "bundle.json").delete()
         seqFile.delete()
+        metaFile.delete()
         seq.set(0)
         totalBytes.set(0)
         frameCount.set(0)
@@ -193,7 +233,31 @@ class DebugCaptureBuffer(
         oldestFrameUnixMs.set(0)
         newestFrameUnixMs.set(0)
         evictedSinceClear.set(0)
+        firstFrameBlake3 = null
+        firstFrameUnixMs = 0
+        firstFrameWidth = 0
+        firstFrameHeight = 0
         emitState()
+    }
+
+    /**
+     * Snapshot of the bundle-level capture metadata accumulated
+     * since the last [`clear`]. Returns `null` when no frames
+     * have been appended yet. Callers feed this into
+     * [`DebugBundleWriter`] to produce a `bundle.json`.
+     */
+    @Synchronized
+    fun bundleSnapshot(): CaptureSnapshot? {
+        val first = firstFrameBlake3 ?: return null
+        if (frameCount.get() <= 0L) return null
+        return CaptureSnapshot(
+            frameCount = frameCount.get(),
+            startedUnixMs = if (firstFrameUnixMs > 0L) firstFrameUnixMs else oldestFrameUnixMs.get(),
+            endedUnixMs = newestFrameUnixMs.get(),
+            firstFrameBlake3 = first,
+            firstFrameWidth = firstFrameWidth,
+            firstFrameHeight = firstFrameHeight,
+        )
     }
 
     /** Root directory on disk; exposed for export tooling. */
@@ -235,6 +299,32 @@ class DebugCaptureBuffer(
         0L
     }
 
+    private fun loadMeta() {
+        if (!metaFile.exists()) return
+        try {
+            val obj = JSONObject(metaFile.readText())
+            firstFrameBlake3 = obj.optString("first_frame_blake3").takeIf { it.isNotEmpty() }
+            firstFrameUnixMs = obj.optLong("first_frame_unix_ms", 0L)
+            firstFrameWidth = obj.optInt("first_frame_width", 0)
+            firstFrameHeight = obj.optInt("first_frame_height", 0)
+        } catch (_: Exception) {
+            // Corrupt meta — start fresh on the next first frame.
+        }
+    }
+
+    private fun persistMeta() {
+        try {
+            val obj = JSONObject()
+                .put("first_frame_unix_ms", firstFrameUnixMs)
+                .put("first_frame_width", firstFrameWidth.toLong())
+                .put("first_frame_height", firstFrameHeight.toLong())
+            firstFrameBlake3?.let { obj.put("first_frame_blake3", it) }
+            metaFile.writeText(obj.toString())
+        } catch (e: Exception) {
+            android.util.Log.w(TAG, "persistMeta failed: $e")
+        }
+    }
+
     private fun persistSeq(next: Long) {
         try {
             seqFile.writeText(next.toString())
@@ -273,12 +363,23 @@ class DebugCaptureBuffer(
         n: Long,
         frame: FfiFrame,
         snapshot: DiagnosticSnapshot?,
+        exposureUs: UInt,
+        sensorGainEPerAdu: Double,
     ) {
         val obj = JSONObject()
             .put("seq", n)
             .put("captured_unix_ms", frame.capturedUnixMs)
             .put("width", frame.width.toLong())
             .put("height", frame.height.toLong())
+        // Optional per-frame fields consumed by `bris-cli replay`
+        // via `bris_bundle::FrameSidecar`. Zero / NaN are
+        // treated as "not reported" (matching the
+        // `Option::is_none` skip in the Rust schema) and the
+        // sidecar omits the field entirely.
+        if (exposureUs > 0u) obj.put("exposure_us", exposureUs.toLong())
+        if (sensorGainEPerAdu > 0.0 && sensorGainEPerAdu.isFinite()) {
+            obj.put("sensor_gain", sensorGainEPerAdu)
+        }
         if (snapshot != null) {
             val stages = JSONArray()
             for (s in snapshot.stages) {
@@ -387,6 +488,20 @@ class DebugCaptureBuffer(
         val oldestFrameUnixMs: Long?,
         val newestFrameUnixMs: Long?,
         val evictedSinceClear: Long,
+    )
+
+    /**
+     * Bundle-level capture metadata snapshot suitable for
+     * populating `bris_bundle::CaptureInfo`. Returned by
+     * [`bundleSnapshot`].
+     */
+    data class CaptureSnapshot(
+        val frameCount: Long,
+        val startedUnixMs: Long,
+        val endedUnixMs: Long,
+        val firstFrameBlake3: String,
+        val firstFrameWidth: Int,
+        val firstFrameHeight: Int,
     )
 
     /** One persisted frame's location and metadata. */

@@ -47,9 +47,15 @@ bris-almanac = { workspace = true }
 bris-streaming = { path = "../bris-streaming", default-features = false }
 bris-calibrate = { workspace = true }
 bris-nmea = { workspace = true }
+bris-bundle = { workspace = true }
+blake3 = "1"
+serde_json = "1"
 
 [build-dependencies]
 uniffi = { version = "0.28", features = ["build"] }
+
+[dev-dependencies]
+tempfile = "3"
 
 [[bin]]
 name = "uniffi-bindgen"
