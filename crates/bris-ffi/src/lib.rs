@@ -1780,11 +1780,7 @@ mod bundle_writer_tests {
                 "distortion": { "model": "none" }
             }
         });
-        write_bundle_manifest(
-            dir.path().to_string_lossy().into_owned(),
-            json.to_string(),
-        )
-        .unwrap();
+        write_bundle_manifest(dir.path().to_string_lossy().into_owned(), json.to_string()).unwrap();
         let loaded = bris_bundle::BundleManifest::load_from_dir(dir.path()).unwrap();
         assert_eq!(loaded.bundle_id, "test");
         assert_eq!(loaded.capture.frame_count, 1);
@@ -1808,11 +1804,9 @@ mod bundle_writer_tests {
                 "distortion": { "model": "none" }
             }
         });
-        let err = write_bundle_manifest(
-            dir.path().to_string_lossy().into_owned(),
-            json.to_string(),
-        )
-        .unwrap_err();
+        let err =
+            write_bundle_manifest(dir.path().to_string_lossy().into_owned(), json.to_string())
+                .unwrap_err();
         assert!(matches!(err, FfiError::InvalidArgument { .. }));
     }
 
