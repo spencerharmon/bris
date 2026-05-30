@@ -766,6 +766,7 @@ fn build_engine_config(
     Ok(cfg)
 }
 
+#[allow(clippy::too_many_lines)]
 fn run_one_mode(
     mode: ReplayMode,
     args: &ReplayArgs,
@@ -860,7 +861,8 @@ fn run_one_mode(
         body_queue_depth = diag.body_queue_depth,
         horizon_queue_depth = diag.horizon_queue_depth,
         sight_window_depth = diag.sight_window_depth,
-        last_classification = ?diag.last_classification,
+        last_raw_classification = ?diag.last_raw_classification,
+        last_dispatched_condition = ?diag.last_dispatched_condition,
         fixes_published_total = diag.fixes_published_total,
         fix_publish_attempts = diag.fix_publish_attempts,
         singular_geometry_rejections = diag.singular_geometry_rejections,

@@ -314,7 +314,8 @@ fun LiveScreen(
         ) {
             DiagnosticOverlay(
                 sessionStatus = sessionStatus,
-                lastClassification = snapshot?.lastClassification,
+                lastRawClassification = snapshot?.lastRawClassification,
+                lastDispatchedCondition = snapshot?.lastDispatchedCondition,
                 framesPushed = snapshot?.framesPushed ?: 0u,
                 framesDropped = snapshot?.framesDropped ?: 0u,
                 bodyQueueDepth = snapshot?.bodyQueueDepth ?: 0u,
@@ -535,7 +536,8 @@ private fun DebugBufferChip(
 @Composable
 private fun DiagnosticOverlay(
     sessionStatus: SessionStatus,
-    lastClassification: String?,
+    lastRawClassification: String?,
+    lastDispatchedCondition: String?,
     framesPushed: ULong,
     framesDropped: ULong,
     bodyQueueDepth: UInt,
@@ -620,7 +622,11 @@ private fun DiagnosticOverlay(
             }
             is SessionStatus.Failed -> Text("Failed: ${s.reason}", color = Color(0xFFE57373))
         }
-        Text("classifier: ${lastClassification ?: "—"}", color = Color.White)
+        Text(
+            "classifier: dispatched=${lastDispatchedCondition ?: "—"}  " +
+                "raw=${lastRawClassification ?: "—"}",
+            color = Color.White,
+        )
         Text(
             "frames pushed: $framesPushed  dropped: $framesDropped",
             color = Color.White,

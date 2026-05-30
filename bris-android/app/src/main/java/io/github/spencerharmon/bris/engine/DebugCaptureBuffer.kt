@@ -399,7 +399,8 @@ class DebugCaptureBuffer(
                 .put("horizon_queue_depth", snapshot.horizonQueueDepth.toLong())
                 .put("ring_buffer_depth", snapshot.ringBufferDepth.toLong())
                 .put("sight_window_depth", snapshot.sightWindowDepth.toLong())
-                .put("last_classification", snapshot.lastClassification ?: JSONObject.NULL)
+                .put("last_raw_classification", snapshot.lastRawClassification ?: JSONObject.NULL)
+                .put("last_dispatched_condition", snapshot.lastDispatchedCondition ?: JSONObject.NULL)
                 .put("stages", stages)
             obj.put("diagnostic_snapshot", snap)
         }

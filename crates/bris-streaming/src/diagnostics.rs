@@ -52,9 +52,31 @@ pub struct EngineDiagnostics {
     /// Number of sights currently in the active sight window.
     pub sight_window_depth: usize,
 
-    /// Most recent classifier verdict. `None` until the first
+    /// Most recent **raw** classifier verdict — what the
+    /// classifier said about the most recently processed
+    /// frame, *before* hysteresis. `None` until the first
     /// frame has been processed.
-    pub last_classification: Option<Condition>,
+    ///
+    /// This is the per-frame opinion of the classifier, not
+    /// the condition the engine actually dispatched its
+    /// detectors on. The two can disagree for an extended
+    /// window: with `classifier_hysteresis_frames = 90` and a
+    /// short corpus, the engine may dispatch `Night` for the
+    /// entire run while this field flickers to `Twilight`
+    /// on individual brighter frames. Use
+    /// [`Self::last_dispatched_condition`] for "what is the
+    /// engine actually doing."
+    pub last_raw_classification: Option<Condition>,
+
+    /// Most recent **dispatched** condition — the
+    /// hysteresis-smoothed verdict the engine actually used
+    /// to pick its detector families on the most recently
+    /// processed frame. `None` until the first frame.
+    ///
+    /// This is the field operators usually want: "is the
+    /// engine currently running the Day path, the Night
+    /// path, or both?"
+    pub last_dispatched_condition: Option<Condition>,
 
     /// Capture timestamp (TT) of the most recent processed
     /// frame. `None` until the first frame has completed Stage
