@@ -2302,6 +2302,32 @@ references to the regression tests that pin the behavior. See
    treats the seed as advisory (subject to re-derivation per
    `docs/design/replay_modes.md`). Same value threaded into
    the `EngineConfig` so live fixes and replay agree.
+** TODO Per-frame gravity vector from Android `SensorManager`
+   `FrameSidecar::gravity_camera_frame` is plumbed end-to-end
+   in the bundle schema and consumed by `bris replay`; the
+   on-device Android writer leaves it `None` until the
+   sensor source is wired. Subscribe to
+   `Sensor.TYPE_GRAVITY`, compose with the camera-mount
+   rotation, and stamp the resulting unit vector on each
+   `FfiFrame` (also requires adding `gravity_camera_frame:
+   Option<[f64;3]>` to `FfiFrame`). Closes the live-vs-replay
+   divergence on the artificial-horizon reflection-pair path
+   (see `docs/design/capture.md`, "Per-frame metadata").
+** TODO Per-frame `gps_truth` capture on Android
+   `FrameSidecar::gps_truth` is schema-supported but the
+   Android writer currently stamps it only at bundle level
+   (when at all). Subscribe to `LocationManager` updates
+   during a capture; record the most-recent fix per frame.
+   Per-frame matters for captures that run for hours at
+   speed.
+   Tap a point on a map to seed the AP for the next/current
+   session. Until this lands, all sessions start cold-start
+   with no operator AP (see `docs/design/testing_strategy.md`).
+   When it lands, `SessionManifest::ap_seed` becomes the on-
+   disk record of what the operator picked; the engine still
+   treats the seed as advisory (subject to re-derivation per
+   `docs/design/replay_modes.md`). Same value threaded into
+   the `EngineConfig` so live fixes and replay agree.
 ** TODO Session management UI: list, edit, delete; capture buffer mgmt
    List sessions (sorted by most-recent capture, displayed by
    title). Edit any field except `session_id` (title, notes,

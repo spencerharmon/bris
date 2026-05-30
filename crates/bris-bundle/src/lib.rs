@@ -624,6 +624,24 @@ pub struct FrameSidecar {
     /// `serde_json::Value`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub diagnostic_snapshot: Option<serde_json::Value>,
+    /// Unit gravity vector in the camera frame at capture time
+    /// (image-right = +x, image-down = +y, lens-forward = +z),
+    /// as reported by the platform's gravity sensor. Replay
+    /// reconstructs the live `Frame::gravity_camera_frame` from
+    /// this; absent means the bundle predates per-frame gravity
+    /// recording and replay falls back to image-down (the
+    /// historical behavior, which silently miscomputes
+    /// artificial-horizon reflection pairs).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gravity_camera_frame: Option<[f64; 3]>,
+    /// Per-frame ground-truth GPS stamp (debug feature). A
+    /// capture running hours at speed has truth that varies
+    /// per frame; the bundle-level `gps_truth` field is
+    /// implicitly wrong for any moving capture, so truth
+    /// lives here. **Never** substituted for `ap_input` at
+    /// engine time; replay scoring is the only consumer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gps_truth: Option<GpsTruth>,
 }
 
 impl FrameSidecar {
@@ -1071,6 +1089,46 @@ mod tests {
         assert!(!raw.contains("session_id"));
     }
 
+    #[test]
+    fn sidecar_round_trips_gravity_and_gps_truth() {
+        let s = FrameSidecar {
+            seq: 0,
+            captured_unix_ms: 1_700_000_000_000,
+            width: 4032,
+            height: 3024,
+            exposure_us: Some(8333),
+            sensor_gain: Some(2.5),
+            diagnostic_snapshot: None,
+            gravity_camera_frame: Some([0.0, 1.0, 0.0]),
+            gps_truth: Some(GpsTruth {
+                lat: 30.1488,
+                lon: -97.8432,
+                lat_sigma_m: 4.0,
+                lon_sigma_m: 4.0,
+                altitude_m: None,
+                altitude_sigma_m: None,
+                captured_unix_ms: 1_700_000_000_000,
+                source: "android_gps".into(),
+                satellites_used: Some(11),
+            }),
+        };
+        let raw = serde_json::to_vec(&s).unwrap();
+        let back: FrameSidecar = serde_json::from_slice(&raw).unwrap();
+        assert_eq!(back.gravity_camera_frame, Some([0.0, 1.0, 0.0]));
+        let g = back.gps_truth.expect("gps_truth round-trip");
+        assert!((g.lat - 30.1488).abs() < 1e-9);
+        assert_eq!(g.satellites_used, Some(11));
+    }
+
+    #[test]
+    fn sidecar_old_schema_loads_without_new_fields() {
+        // Pre-Phase-8.5 bundles wrote no gravity / gps_truth.
+        let raw = r#"{"seq":0,"captured_unix_ms":1700000000000,"width":4032,"height":3024}"#;
+        let s: FrameSidecar = serde_json::from_str(raw).unwrap();
+        assert!(s.gravity_camera_frame.is_none());
+        assert!(s.gps_truth.is_none());
+    }
+
     fn write_sidecar(path: &Path, seq: u32, captured_unix_ms: i64) {
         let s = FrameSidecar {
             seq,
@@ -1080,6 +1138,8 @@ mod tests {
             exposure_us: None,
             sensor_gain: None,
             diagnostic_snapshot: None,
+            gravity_camera_frame: None,
+            gps_truth: None,
         };
         std::fs::write(path, serde_json::to_vec(&s).unwrap()).unwrap();
     }
