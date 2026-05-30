@@ -41,8 +41,19 @@ android {
         applicationId = "io.github.spencerharmon.bris"
         minSdk = 26
         targetSdk = 34
-        versionCode = 1
-        versionName = "0.1.0"
+        // versionCode is derived from `git rev-list --count
+        // HEAD` so it is monotone across nightly builds and
+        // Android accepts in-place upgrades. Falls back to 1
+        // outside a git worktree. versionName uses
+        // `git describe` for human-readable provenance.
+        val gitCommitCount = providers.exec {
+            commandLine("git", "rev-list", "--count", "HEAD")
+        }.standardOutput.asText.map { it.trim() }.orNull?.toIntOrNull() ?: 1
+        val gitDescribe = providers.exec {
+            commandLine("git", "describe", "--always", "--tags", "--dirty")
+        }.standardOutput.asText.map { it.trim() }.orNull ?: "unknown"
+        versionCode = gitCommitCount
+        versionName = gitDescribe
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         // Restrict packaged ABIs to the two we actually cross-
         // compile bris-ffi for: arm64-v8a (real devices) and
@@ -61,7 +72,13 @@ android {
         val token = (project.findProperty("brisCollectorToken") as String?)
             ?: "spike-shared-token-replace-me"
         buildConfigField("String", "BRIS_COLLECTOR_BEARER_TOKEN", "\"$token\"")
-        buildConfigField("String", "BRIS_APP_VERSION", "\"0.1.0\"")
+        // BRIS_APP_VERSION retained as the human-readable APK
+        // version string (mirrors versionName). The canonical
+        // engine build provenance is supplied by
+        // bris_ffi::version() at runtime and written into
+        // bundle.json's `build` block; see plan.org Phase 8.5.
+        buildConfigField("String", "BRIS_APP_VERSION", "\"$gitDescribe\"")
+        buildConfigField("int", "BRIS_VERSION_CODE", "$gitCommitCount")
         // Diagnostic-collection upload is a spike, not a
         // production surface. Hard-coded false so a developer
         // building locally can't silently enable remote submit
