@@ -563,6 +563,7 @@ fn resolve_manifest(args: &ReplayArgs) -> anyhow::Result<(BundleManifest, PathBu
             }),
         atmosphere_hint: None,
         notes: String::new(),
+        session_id: None,
     };
     Ok((manifest, frames.clone()))
 }
