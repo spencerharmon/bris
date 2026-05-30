@@ -16,3 +16,10 @@ documents go in this directory as design questions are settled.
   session UX: Start/Stop on top of the continuous engine,
   contributing-frame retrieval, on-device sight log under
   `<external-files>/sights/`.
+- [pre_classification_masking.md](pre_classification_masking.md) —
+  draft: reorder per-frame pipeline so day/night classification
+  consumes the seg sky-mask and a cheap bright-blob mask,
+  rather than averaging the raw middle-band.
+- [testing_strategy.md](testing_strategy.md) — session / corpus
+  layout proposal + cold-start variant matrix. Companion to
+  Phase 8.5 (build provenance) in `plan.org`.
