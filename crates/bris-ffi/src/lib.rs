@@ -487,9 +487,18 @@ pub struct DiagnosticSnapshot {
     pub ring_buffer_depth: u32,
     /// Number of sights in the active sight window.
     pub sight_window_depth: u32,
-    /// Most recent classifier verdict as a stable label, or
-    /// `None` until the first frame is processed.
-    pub last_classification: Option<String>,
+    /// Most recent **raw** classifier verdict as a stable
+    /// label, or `None` until the first frame is processed.
+    /// This is the per-frame opinion *before* hysteresis;
+    /// see [`Self::last_dispatched_condition`] for what the
+    /// engine actually ran detectors on.
+    pub last_raw_classification: Option<String>,
+    /// Most recent **dispatched** condition the engine used
+    /// to pick detector families. `None` until the first
+    /// frame. This is the operator-facing "what is the engine
+    /// doing right now" field; prefer it over
+    /// [`Self::last_raw_classification`] in UI surfaces.
+    pub last_dispatched_condition: Option<String>,
     /// TT Julian Date of the most recent processed frame, or
     /// `None`.
     pub last_processed_frame_tt_jd: Option<f64>,
@@ -552,8 +561,11 @@ impl From<&EngineDiagnostics> for DiagnosticSnapshot {
                 skipped: s.skipped,
             })
             .collect();
-        let last_classification = d
-            .last_classification
+        let last_raw_classification = d
+            .last_raw_classification
+            .map(|c| format!("{c:?}").to_lowercase());
+        let last_dispatched_condition = d
+            .last_dispatched_condition
             .map(|c| format!("{c:?}").to_lowercase());
         Self {
             frames_pushed: d.frames_pushed,
@@ -563,7 +575,8 @@ impl From<&EngineDiagnostics> for DiagnosticSnapshot {
             horizon_queue_depth: u32::try_from(d.horizon_queue_depth).unwrap_or(u32::MAX),
             ring_buffer_depth: u32::try_from(d.ring_buffer_depth).unwrap_or(u32::MAX),
             sight_window_depth: u32::try_from(d.sight_window_depth).unwrap_or(u32::MAX),
-            last_classification,
+            last_raw_classification,
+            last_dispatched_condition,
             last_processed_frame_tt_jd: d
                 .last_processed_frame_tt
                 .map(bris_core::time::Tt::julian_date),

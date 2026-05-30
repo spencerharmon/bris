@@ -196,10 +196,10 @@ fn moonlight_pond_produces_moon_lop() {
     engine.push_frame(frame.clone()).expect("push_frame");
     let diag = engine.diagnostics();
     eprintln!(
-        "moonlight_pond: engine diag — last_classification={:?}, \
+        "moonlight_pond: engine diag — last_raw_classification={:?}, \
          refl_pair attempts={}, hypothesized={}, used={}, \
          rej geom={}, photo={}, cat={}, nocluster={}",
-        diag.last_classification,
+        diag.last_raw_classification,
         diag.reflection_pair_attempts,
         diag.reflection_pair_hypothesized,
         diag.reflection_pair_used,
@@ -238,7 +238,7 @@ fn moonlight_pond_produces_moon_lop() {
         diag.reflection_pair_attempts >= 1,
         "engine did not invoke reflection-pair on frame 10. \
          classification={:?}",
-        diag.last_classification,
+        diag.last_raw_classification,
     );
     if diag.reflection_pair_used == 0 {
         eprintln!(

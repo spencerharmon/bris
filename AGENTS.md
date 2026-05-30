@@ -396,6 +396,76 @@ Rules for agents:
   inherits the cwd; don't override it to point at a sibling
   checkout without operator approval.
 
+## Pulling debug captures from the phone
+
+The operator consistently saves debug-buffer zips on the
+phone at `/sdcard/Documents/bris-debug-<ulid>.zip` (the
+`DebugBufferActions.saveAll` "Save buffer" path in the
+Android app). When asked to pull captures off the phone,
+use this workflow:
+
+1. **List zips on the phone.**
+
+   ```sh
+   adb shell 'ls /sdcard/Documents/bris-debug-*.zip 2>/dev/null'
+   ```
+
+2. **For each zip: dedupe by filename before pulling.** If
+   `bris-exports/<zip-stem>/` (the extracted directory) or
+   `bris-exports/incoming/<zip-name>` already exists, skip
+   that zip — it has already been ingested. Do not
+   re-extract; do not re-pull; do not delete on-device just
+   because the local dir is present (the operator may have
+   deleted the extracted dir intentionally).
+
+3. **Pull new zips into `bris-exports/incoming/`.**
+
+   ```sh
+   mkdir -p bris-exports/incoming
+   adb pull /sdcard/Documents/bris-debug-<ulid>.zip bris-exports/incoming/
+   ```
+
+4. **Extract into `bris-exports/<zip-stem>/`.** The zip's
+   internal layout already nests under `bris-debug-<ulid>/`
+   (frames/ + index.jsonl + pbris.log), so unzip into the
+   `<zip-stem>` parent and the natural nesting falls out.
+
+   ```sh
+   unzip -q -o bris-exports/incoming/bris-debug-<ulid>.zip \
+     -d bris-exports/bris-debug-<ulid>/
+   ```
+
+5. **Delete the on-device zip *only after* the extracted
+   directory is verified non-empty.** Storage on the phone
+   is precious; leaving stale zips around accumulates
+   gigabytes.
+
+   ```sh
+   # sanity-check before delete
+   test -s bris-exports/bris-debug-<ulid>/bris-debug-<ulid>/index.jsonl \
+     && adb shell rm /sdcard/Documents/bris-debug-<ulid>.zip
+   ```
+
+6. **The local `bris-exports/incoming/<zip>` may be kept**
+   (it's a backup of what was on the phone) or deleted at
+   the operator's discretion. Default: keep it; it's cheap
+   insurance against a botched extract.
+
+Notes:
+
+- These zips include `bundle.json` (the
+  `bris_bundle::BundleManifest`) as of commit a9fd8ea
+  ("bris-android: write bundle.json on debug-buffer save").
+  Older captures predating that commit don't — for those,
+  use `scripts/synthesize_bundle_json.py` to fabricate one
+  before feeding the bundle to `bris replay --bundle`.
+- Never bulk-delete on-device zips without confirming the
+  extracted directory landed locally. An interrupted `adb
+  pull` (USB unplug, phone screen-off-suspend) can produce
+  a truncated local file that *looks* present but isn't
+  the full payload — always verify with `unzip -t` or a
+  non-empty-index check before deleting the source.
+
 ## Cave worktree hygiene
 
 Subagents launched with `isolation: worktree` (the default for

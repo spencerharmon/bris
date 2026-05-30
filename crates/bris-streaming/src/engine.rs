@@ -165,7 +165,8 @@ struct EngineState {
     /// worker thread lands will).
     next_frame_id: u64,
     stages: [PipelineStageStats; 5],
-    last_classification: Option<bris_vision::Condition>,
+    last_raw_classification: Option<bris_vision::Condition>,
+    last_dispatched_condition: Option<bris_vision::Condition>,
     last_processed_frame_tt: Option<bris_core::time::Tt>,
     last_published_fix_tt: Option<bris_core::time::Tt>,
     /// Snapshot of the most recently published fix, used to
@@ -353,7 +354,8 @@ fn update_stage_counters(
         }
     }
 
-    state.last_classification = Some(outcome.classification.condition);
+    state.last_raw_classification = Some(outcome.classification.condition);
+    state.last_dispatched_condition = Some(outcome.dispatched_condition);
     state.last_processed_frame_tt = Some(outcome.frame_tt);
     state.last_horizon_analysis_size = Some(outcome.horizon_analyzed_size);
 
@@ -510,7 +512,8 @@ impl StreamingEngine {
                 frames_dropped: 0,
                 next_frame_id: 0,
                 stages: [PipelineStageStats::default(); 5],
-                last_classification: None,
+                last_raw_classification: None,
+                last_dispatched_condition: None,
                 last_processed_frame_tt: None,
                 last_published_fix_tt: last_published_fix.as_ref().map(|p| p.timestamp),
                 last_published_fix,
@@ -866,7 +869,8 @@ impl StreamingEngine {
             horizon_queue_depth: state.storage.horizon_queue_len(),
             ring_buffer_depth: state.storage.ring_len(),
             sight_window_depth: state.sight_window.len(),
-            last_classification: state.last_classification,
+            last_raw_classification: state.last_raw_classification,
+            last_dispatched_condition: state.last_dispatched_condition,
             last_processed_frame_tt: state.last_processed_frame_tt,
             last_published_fix_tt: state.last_published_fix_tt,
             last_horizon_analysis_size: state.last_horizon_analysis_size,
@@ -1104,7 +1108,7 @@ mod tests {
         let diag = engine.diagnostics();
         assert_eq!(diag.frames_pushed, 0);
         assert_eq!(diag.frames_dropped, 0);
-        assert!(diag.last_classification.is_none());
+        assert!(diag.last_raw_classification.is_none());
         assert!(diag.last_processed_frame_tt.is_none());
         assert!(diag.last_published_fix_tt.is_none());
     }
@@ -1161,7 +1165,7 @@ mod tests {
         assert_eq!(diag.stages[0].failed, 0);
         assert_eq!(diag.stages[0].skipped, 0);
         assert!(
-            diag.last_classification.is_some(),
+            diag.last_raw_classification.is_some(),
             "classifier verdict should be recorded after push_frame"
         );
         assert!(
@@ -1540,7 +1544,7 @@ mod tests {
         // The raw last_classification (recorded after the
         // most recent push) should be Day — the bright
         // frames after the transient.
-        assert_eq!(diag.last_classification, Some(Condition::Day));
+        assert_eq!(diag.last_raw_classification, Some(Condition::Day));
     }
 
     #[test]
@@ -1555,13 +1559,13 @@ mod tests {
         let tt = bris_core::time::Tt::from_julian_date(bris_core::time::JD_J2000);
         engine.push_frame(uniform_frame(tt, u16::MAX / 2)).unwrap();
         let day_diag = engine.diagnostics();
-        assert_eq!(day_diag.last_classification, Some(Condition::Day));
+        assert_eq!(day_diag.last_raw_classification, Some(Condition::Day));
         // A dark frame at noon-Greenwich → image=Night,
         // almanac=Day, conservative pick = Twilight.
         engine.push_frame(uniform_frame(tt, 50)).unwrap();
         let twilight_diag = engine.diagnostics();
         assert_eq!(
-            twilight_diag.last_classification,
+            twilight_diag.last_raw_classification,
             Some(Condition::Twilight),
             "with hysteresis disabled, the dispatched verdict mirrors the raw verdict"
         );
