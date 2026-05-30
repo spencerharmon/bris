@@ -58,6 +58,13 @@ pub struct BundleManifest {
     pub bundle_id: String,
     /// Device that captured this bundle.
     pub device: DeviceInfo,
+    /// Build provenance of the FFI engine that wrote this bundle.
+    /// Optional for backward-compat with pre-Phase-8.5 bundles;
+    /// absent in those, populated in everything written after.
+    /// When absent, regression tooling treats the bundle as
+    /// "unknown build" and excludes it from baseline comparisons.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub build: Option<BuildInfo>,
     /// Capture-window metadata (frame count, timestamps,
     /// rotation declaration, optional first-frame checksum).
     pub capture: CaptureInfo,
@@ -84,6 +91,40 @@ pub struct BundleManifest {
     /// Free-text operator notes. Empty string when absent.
     #[serde(default)]
     pub notes: String,
+}
+
+/// Build provenance: which Rust source tree produced the
+/// `bris-ffi` shared object that wrote this bundle.
+///
+/// Populated from `bris_ffi::version()` (which is in turn
+/// populated by `crates/bris-ffi/build.rs` at compile time).
+/// Mirrored across the FFI as `VersionInfo`; this struct is
+/// the persisted form.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BuildInfo {
+    /// Full git SHA of the source tree at build time, or
+    /// `"unknown"` for non-git builds.
+    pub git_sha: String,
+    /// `git describe --always --tags --dirty` output.
+    pub git_describe: String,
+    /// `true` when the worktree had uncommitted changes at
+    /// build time. Regression baselines refuse dirty builds.
+    pub git_dirty: bool,
+    /// `git rev-list --count HEAD` — monotone commit index.
+    pub commit_count: u32,
+    /// Build-time UTC timestamp, ISO 8601.
+    pub build_timestamp_utc: String,
+    /// Semver of the `bris-ffi` crate at build time.
+    pub bris_ffi_semver: String,
+    /// Android `versionName` from the APK that bundled this
+    /// FFI, when written from the Android shell. `None` for
+    /// non-Android writers (CLI, tests).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub android_version_name: Option<String>,
+    /// Android `versionCode` from the APK that bundled this
+    /// FFI, when written from the Android shell.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub android_version_code: Option<u32>,
 }
 
 /// Current bundle schema version.
@@ -587,6 +628,16 @@ mod tests {
                 os: Some("Android 11".into()),
                 app_version: Some("0.0.1".into()),
             },
+            build: Some(BuildInfo {
+                git_sha: "795b888941e78d9e49602637b5695d2dc3ea1c87".into(),
+                git_describe: "v0.0.1-12-g795b888".into(),
+                git_dirty: false,
+                commit_count: 142,
+                build_timestamp_utc: "2026-05-29T23:57:22Z".into(),
+                bris_ffi_semver: "0.0.1".into(),
+                android_version_name: Some("0.1.0".into()),
+                android_version_code: Some(142),
+            }),
             capture: CaptureInfo {
                 source_rotation_deg: 90,
                 pre_rotation_was_deg: Some(90),
@@ -673,13 +724,16 @@ mod tests {
         m.gps_truth = None;
         m.ap_derivation_trace = None;
         m.atmosphere_hint = None;
+        m.build = None;
         let s = serde_json::to_string(&m).unwrap();
         // None-valued options should be omitted from the JSON.
         assert!(!s.contains("ap_input"));
         assert!(!s.contains("gps_truth"));
+        assert!(!s.contains("\"build\""));
         let back: BundleManifest = serde_json::from_str(&s).unwrap();
         assert!(back.ap_input.is_none());
         assert!(back.gps_truth.is_none());
+        assert!(back.build.is_none());
     }
 
     #[test]

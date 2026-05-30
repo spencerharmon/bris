@@ -52,6 +52,25 @@ class DebugBundleWriterTest {
         assertTrue(obj.has("device"))
         assertTrue(obj.has("capture"))
         assertTrue(obj.has("intrinsics"))
+        assertTrue(obj.has("build"))
+    }
+
+    @Test
+    fun buildBlock_isPresentAndCarriesRequiredKeys() {
+        // In pure-JVM tests the native library is unavailable;
+        // `bris_ffi.version()` throws and the writer falls back
+        // to "unknown" string values. Real APK builds populate
+        // these from build.rs / build.gradle.kts.
+        val build = DebugBundleWriter.buildManifestJson("b", snapshot, placeholderInputs)
+            .getJSONObject("build")
+        assertTrue(build.has("git_sha"))
+        assertTrue(build.has("git_describe"))
+        assertTrue(build.has("git_dirty"))
+        assertTrue(build.has("commit_count"))
+        assertTrue(build.has("build_timestamp_utc"))
+        assertTrue(build.has("bris_ffi_semver"))
+        assertTrue(build.has("android_version_name"))
+        assertTrue(build.has("android_version_code"))
     }
 
     @Test
