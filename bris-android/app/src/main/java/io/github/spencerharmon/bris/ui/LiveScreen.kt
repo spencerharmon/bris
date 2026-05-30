@@ -88,7 +88,7 @@ import java.util.concurrent.Executors
  * Live camera + engine + sight-capture session UI.
  *
  * Engine lifecycle (per the design discussion in
- * `docs/design/sight_session.md`): the streaming engine is
+ * `docs/design/capture.md`): the streaming engine is
  * constructed once when this screen composes and lives until
  * the screen leaves composition. There is no per-session
  * engine reset; the engine has no notion of session.
