@@ -2336,6 +2336,35 @@ references to the regression tests that pin the behavior. See
    capture` (Linux live, via `bris-capture`) subcommand
    lands, it can grow `--session <UUID>` / `--new-session`
    flags reusing the same writer.
+** TODO Android session UI + on-device session creation
+   Today every Android capture is an orphan (no session
+   back-reference written into `bundle.json`); the
+   `BundleManifest::session_id` field is `Option<Uuid>` and
+   Android leaves it `None`. The Linux side already has the
+   creation surface (`bris session new`); Android needs the
+   equivalent.
+
+   Concrete pieces:
+   - "New session" / "Resume session" picker in the Settings
+     or Live screen. On creation, write
+     `<external-files>/sessions/<UUID>/session.json` using
+     `bris_bundle::SessionManifest`. UUIDv4 generated
+     on-device.
+   - Editable fields: title, notes, ap_seed (interim:
+     manual lat/lon entry; later: map UI), kinematics,
+     retention, profile, expected_to_fail.
+   - Live capture writes its bundle under
+     `<external-files>/sessions/<UUID>/captures/<capture-id>/`
+     (was `<external-files>/sights/<capture-id>/`) and stamps
+     `bundle.session_id`.
+   - Engine construction overlays the same `SessionManifest`
+     fields onto `EngineConfig` that the Linux replay
+     overlay applies (`sight_retention_*`, `kinematics`),
+     closing the live←→replay symmetry.
+   - Default-session fallback for operators who never
+     explicitly create one: auto-create a session named
+     "Untitled <date>" at first capture press, so captures
+     are never orphans on disk.
 ** TODO Operator-AP-from-map UI
    Tap a point on a map to seed the AP for the next/current
    session. Until this lands, all sessions start cold-start

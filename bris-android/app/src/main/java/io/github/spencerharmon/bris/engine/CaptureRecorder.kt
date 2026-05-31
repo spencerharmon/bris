@@ -29,7 +29,7 @@ import uniffi.bris_ffi.formatPbris
  * facing settings UI will surface them under Phase 7's session
  * UX work item.
  */
-data class SessionThresholds(
+data class CaptureThresholds(
     val targetSigmaNm: Double = 1.0,
     val hardSigmaNm: Double = 5.0,
     val sustainedGreenMs: Long = 3_000,
@@ -37,8 +37,8 @@ data class SessionThresholds(
 )
 
 /** What the live screen renders to communicate session status. */
-sealed interface SessionStatus {
-    data object Idle : SessionStatus
+sealed interface CaptureStatus {
+    data object Idle : CaptureStatus
     data class Capturing(
         val startedAtMs: Long,
         val lastFix: FfiPublishedFix? = null,
@@ -47,10 +47,10 @@ sealed interface SessionStatus {
         val nGreen: Int = 0,
         val nYellow: Int = 0,
         val nRed: Int = 0,
-    ) : SessionStatus
-    data object Saving : SessionStatus
-    data class Saved(val sessionDir: java.io.File, val outcome: SessionOutcome) : SessionStatus
-    data class Failed(val reason: String) : SessionStatus
+    ) : CaptureStatus
+    data object Saving : CaptureStatus
+    data class Saved(val captureDir: java.io.File, val outcome: CaptureOutcome) : CaptureStatus
+    data class Failed(val reason: String) : CaptureStatus
 }
 
 /**
@@ -65,14 +65,14 @@ sealed interface SessionStatus {
  *     capture** — the recorder begins consuming the engine's
  *     fix stream and the analyzer (caller-managed) is
  *     simultaneously bound on the camera side.
- *  3. The recorder emits [`SessionStatus.Capturing`] updates
+ *  3. The recorder emits [`CaptureStatus.Capturing`] updates
  *     into [`status`] as fixes arrive. When sustained-green
- *     fires it transitions to [`SessionStatus.Saving`], pulls
+ *     fires it transitions to [`CaptureStatus.Saving`], pulls
  *     the contributing-frame bytes from the engine, writes the
- *     sight-log entry, and ends in [`SessionStatus.Saved`].
+ *     sight-log entry, and ends in [`CaptureStatus.Saved`].
  *  4. The caller may also invoke [`stop`] to end early. If a
  *     non-red fix has ever been observed the session captures
- *     the best one; otherwise it ends with [`SessionOutcome.NoFix`].
+ *     the best one; otherwise it ends with [`CaptureOutcome.NoFix`].
  *  5. The session times out after `thresholds.timeoutMs` with
  *     the same best-effort accept-on-yellow-or-better logic as
  *     manual stop.
@@ -82,26 +82,26 @@ sealed interface SessionStatus {
  * across many sessions. This class only listens on the
  * pre-existing fix stream.
  */
-class SessionRecorder(
+class CaptureRecorder(
     private val engine: EngineWrapper,
     private val sightLog: SightLog,
     private val scope: CoroutineScope,
-    private val thresholds: SessionThresholds = SessionThresholds(),
+    private val thresholds: CaptureThresholds = CaptureThresholds(),
     private val deviceUuidProvider: suspend () -> String,
     private val appVersion: String,
     private val coreVersionProvider: () -> String,
 ) {
 
-    private val _status = MutableStateFlow<SessionStatus>(SessionStatus.Idle)
-    val status: StateFlow<SessionStatus> = _status.asStateFlow()
+    private val _status = MutableStateFlow<CaptureStatus>(CaptureStatus.Idle)
+    val status: StateFlow<CaptureStatus> = _status.asStateFlow()
 
-    private var sessionJob: Job? = null
+    private var captureJob: Job? = null
     private var bestFix: FfiPublishedFix? = null
     private var bestVerdict: FixVerdict = FixVerdict.RED
     private var pbrisLines: MutableList<String> = mutableListOf()
     private var sustainedGreenStartMs: Long? = null
-    private var sessionId: String = ""
-    private var sessionStartedAtMs: Long = 0L
+    private var captureId: String = ""
+    private var captureStartedAtMs: Long = 0L
 
     /**
      * Begin a session. No-op if a session is already active —
@@ -112,23 +112,23 @@ class SessionRecorder(
      * for cross-reference if needed.
      */
     fun start(): String {
-        if (sessionJob?.isActive == true) {
-            return sessionId
+        if (captureJob?.isActive == true) {
+            return captureId
         }
-        sessionId = ulid()
-        sessionStartedAtMs = System.currentTimeMillis()
+        captureId = ulid()
+        captureStartedAtMs = System.currentTimeMillis()
         bestFix = null
         bestVerdict = FixVerdict.RED
         pbrisLines.clear()
         sustainedGreenStartMs = null
 
-        _status.value = SessionStatus.Capturing(
-            startedAtMs = sessionStartedAtMs,
+        _status.value = CaptureStatus.Capturing(
+            startedAtMs = captureStartedAtMs,
             lastFix = null,
             lastVerdict = null,
         )
 
-        sessionJob = scope.launch {
+        captureJob = scope.launch {
             // Two parallel concerns:
             //   * consume engine.fixes, score and update state.
             //   * watch for sustained-green / timeout end
@@ -140,7 +140,7 @@ class SessionRecorder(
             }
             val watchdog = launch {
                 while (isActive) {
-                    val elapsed = System.currentTimeMillis() - sessionStartedAtMs
+                    val elapsed = System.currentTimeMillis() - captureStartedAtMs
                     if (elapsed >= thresholds.timeoutMs) {
                         finalize("timeout after ${thresholds.timeoutMs} ms")
                         return@launch
@@ -161,7 +161,7 @@ class SessionRecorder(
             collector.join()
             watchdog.cancelAndJoin()
         }
-        return sessionId
+        return captureId
     }
 
     /**
@@ -173,7 +173,7 @@ class SessionRecorder(
     }
 
     /** True when a session is currently active. */
-    fun isActive(): Boolean = sessionJob?.isActive == true
+    fun isActive(): Boolean = captureJob?.isActive == true
 
     private suspend fun onFix(fix: FfiPublishedFix) {
         val verdict = score(fix)
@@ -198,7 +198,7 @@ class SessionRecorder(
             pbrisLines.add(line)
         }
         // Update counters in status.
-        val s = _status.value as? SessionStatus.Capturing
+        val s = _status.value as? CaptureStatus.Capturing
         if (s != null) {
             _status.value = s.copy(
                 lastFix = fix,
@@ -214,19 +214,19 @@ class SessionRecorder(
     private suspend fun finalize(reasonForUi: String) {
         // Cancel the session job's children. The job itself
         // continues executing this coroutine; we replace
-        // _status as we go, then null sessionJob at the end.
-        val job = sessionJob ?: return
+        // _status as we go, then null captureJob at the end.
+        val job = captureJob ?: return
         if (!job.isActive) return
-        _status.value = SessionStatus.Saving
+        _status.value = CaptureStatus.Saving
 
-        val outcome: SessionOutcome = bestFix?.let { fix ->
-            SessionOutcome.Captured(fix = fix, verdict = bestVerdict)
-        } ?: SessionOutcome.NoFix(reason = reasonForUi)
+        val outcome: CaptureOutcome = bestFix?.let { fix ->
+            CaptureOutcome.Captured(fix = fix, verdict = bestVerdict)
+        } ?: CaptureOutcome.NoFix(reason = reasonForUi)
 
         // Pull contributing-frame bytes from the engine *now*,
         // before they evict from the ring buffer.
         val frames = mutableMapOf<ULong, SightLog.FrameBytes>()
-        if (outcome is SessionOutcome.Captured) {
+        if (outcome is CaptureOutcome.Captured) {
             for (frameId in outcome.fix.contributingFrameIds) {
                 val ff = engine.frameById(frameId) ?: continue
                 frames[frameId] = SightLog.FrameBytes(
@@ -241,8 +241,8 @@ class SessionRecorder(
         try {
             val deviceUuid = deviceUuidProvider()
             val coreVersion = coreVersionProvider()
-            val sessionDir = sightLog.writeEntry(
-                sessionId = sessionId,
+            val captureDir = sightLog.writeEntry(
+                captureId = captureId,
                 outcome = outcome,
                 frames = frames,
                 pbrisLines = pbrisLines.toList(),
@@ -250,16 +250,16 @@ class SessionRecorder(
                 appVersion = appVersion,
                 coreVersion = coreVersion,
             )
-            _status.value = SessionStatus.Saved(sessionDir = sessionDir, outcome = outcome)
+            _status.value = CaptureStatus.Saved(captureDir = captureDir, outcome = outcome)
         } catch (t: Throwable) {
-            _status.value = SessionStatus.Failed(
+            _status.value = CaptureStatus.Failed(
                 reason = "write failed: ${t.javaClass.simpleName}: ${t.message ?: "?"}",
             )
         } finally {
             // Stop the per-session collector + watchdog. We
             // schedule the cancel in the parent scope so the
             // current coroutine isn't cancelling itself.
-            scope.launch { sessionJob?.cancelAndJoin(); sessionJob = null }
+            scope.launch { captureJob?.cancelAndJoin(); captureJob = null }
         }
     }
 
