@@ -8,6 +8,7 @@ import io.github.spencerharmon.bris.upload.GpsInfo
 import org.json.JSONArray
 import org.json.JSONObject
 import uniffi.bris_ffi.writeBundleManifest
+import uniffi.bris_ffi.version as brisFfiVersion
 
 /**
  * Compose a `bris_bundle::BundleManifest` from the on-device
@@ -109,6 +110,8 @@ object DebugBundleWriter {
             .put("os", "Android ${Build.VERSION.RELEASE ?: Build.VERSION.SDK_INT.toString()}")
             .put("app_version", BuildConfig.BRIS_APP_VERSION)
 
+        val build = buildInfoJson()
+
         val capture = JSONObject()
             // Frames written by `DebugCaptureBuffer` are
             // gravity-up already (the YUV path declares the
@@ -134,6 +137,7 @@ object DebugBundleWriter {
             .put("schema_version", 1)
             .put("bundle_id", bundleId)
             .put("device", device)
+            .put("build", build)
             .put("capture", capture)
             .put("intrinsics", intrinsics)
             .put("notes", "")
@@ -243,6 +247,34 @@ object DebugBundleWriter {
             )
         }
         return rec
+    }
+
+    /**
+     * Build a `bris_bundle::BuildInfo` JSON from the FFI's
+     * `version()` call (compile-time-baked git provenance of
+     * the FFI shared object) plus the Android `BuildConfig`
+     * fields stamped by `build.gradle.kts`. Robust to FFI
+     * load failure: a missing native library logs and
+     * returns a build block with `git_sha = "unknown"`
+     * rather than blowing up the manifest save.
+     */
+    private fun buildInfoJson(): JSONObject {
+        val v = try {
+            brisFfiVersion()
+        } catch (t: Throwable) {
+            android.util.Log.w(TAG, "bris_ffi.version() failed: ${t.message}")
+            null
+        }
+        return JSONObject().apply {
+            put("git_sha", v?.gitSha ?: "unknown")
+            put("git_describe", v?.gitDescribe ?: "unknown")
+            put("git_dirty", v?.gitDirty ?: false)
+            put("commit_count", v?.commitCount?.toLong() ?: 0L)
+            put("build_timestamp_utc", v?.buildTimestampUtc ?: "unknown")
+            put("bris_ffi_semver", v?.brisFfi ?: "unknown")
+            put("android_version_name", BuildConfig.BRIS_APP_VERSION)
+            put("android_version_code", BuildConfig.BRIS_VERSION_CODE.toLong())
+        }
     }
 
     private const val TAG = "DebugBundleWriter"

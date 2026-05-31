@@ -118,15 +118,27 @@ pub enum FfiError {
 ///
 /// Surfaced by the Android settings screen as "core version"
 /// and stamped into every diagnostic submission's manifest.
+/// Populated at build time by `build.rs` via `cargo:rustc-env`.
 #[derive(Debug, Clone, uniffi::Record)]
 pub struct VersionInfo {
     /// Semver of the `bris-ffi` crate (which transitively pins
     /// `bris-core` via `Cargo.lock`).
     pub bris_ffi: String,
-    /// Build-time UTC timestamp (ISO 8601) of the FFI shared
-    /// object, or `None` if the build did not record it.
-    /// Reserved; currently `None`.
-    pub build_timestamp_utc: Option<String>,
+    /// Full git SHA of the source tree at build time, or
+    /// `"unknown"` for non-git builds (tarballs, vendored).
+    pub git_sha: String,
+    /// `git describe --always --tags --dirty` output. Useful
+    /// for humans; `git_sha` is canonical.
+    pub git_describe: String,
+    /// `true` if the worktree had uncommitted changes at build
+    /// time. Captured bundles tagged dirty cannot be used as
+    /// authoritative regression baselines.
+    pub git_dirty: bool,
+    /// `git rev-list --count HEAD` — monotone integer used for
+    /// Android `versionCode`.
+    pub commit_count: u32,
+    /// Build-time UTC timestamp, ISO 8601 (`YYYY-MM-DDTHH:MM:SSZ`).
+    pub build_timestamp_utc: String,
 }
 
 /// Report the bound `bris-ffi` version. Cheap; no engine needed.
@@ -135,7 +147,11 @@ pub struct VersionInfo {
 pub fn version() -> VersionInfo {
     VersionInfo {
         bris_ffi: env!("CARGO_PKG_VERSION").to_owned(),
-        build_timestamp_utc: option_env!("BRIS_FFI_BUILD_TIMESTAMP").map(str::to_owned),
+        git_sha: env!("BRIS_GIT_SHA").to_owned(),
+        git_describe: env!("BRIS_GIT_DESCRIBE").to_owned(),
+        git_dirty: env!("BRIS_GIT_DIRTY") == "true",
+        commit_count: env!("BRIS_GIT_COMMIT_COUNT").parse().unwrap_or(0),
+        build_timestamp_utc: env!("BRIS_BUILD_TIMESTAMP").to_owned(),
     }
 }
 

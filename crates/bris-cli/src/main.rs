@@ -530,6 +530,7 @@ fn resolve_manifest(args: &ReplayArgs) -> anyhow::Result<(BundleManifest, PathBu
             os: None,
             app_version: None,
         },
+        build: None,
         capture: CaptureInfo {
             source_rotation_deg: rotation,
             pre_rotation_was_deg: None,
