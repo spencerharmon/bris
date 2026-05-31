@@ -2293,6 +2293,47 @@ references to the regression tests that pin the behavior. See
 ** TODO Mobile calibration UX
    Guided checkerboard capture or "point at a clear night sky"
    star-field auto-calibration. Persists per-device intrinsics.
+** TODO Engine must consume `SessionManifest` identically on Android live and Linux replay
+   A capture whose live engine ran with
+   `kinematics = MaxSpeedKn { kn: 8.0 }` and
+   `sight_retention_seconds = 3 * 86400` must replay with
+   the same publication-gate σ inflation and the same
+   cross-capture pair window. Today the Android session-UI
+   work (Phase 7) will overlay `SessionManifest` onto
+   `EngineConfig` at live-capture time, but `bris replay`
+   builds `EngineConfig` from CLI flags + bundle only and
+   never reads `session.json`. That asymmetry is silent
+   live-vs-replay divergence.
+
+   Fix: `bris replay --bundle <dir>` follows
+   `bundle.session_id` up to the sibling `session.json`,
+   applies the same overlay (kinematics, retention,
+   ap_seed, profile) before instantiating the engine.
+   `bris replay --session <uuid>` already implies this.
+   Single shared overlay function in `bris-bundle` or
+   `bris-streaming` so both call sites use the same code.
+   Block merging the Android session-UI PR on this.
+** TODO Linux session create/resume CLI
+   No `bris` subcommand creates or resumes a session today.
+   Operator on a Linux workstation cannot author sessions
+   without the Android app; corpus contributors who replay
+   third-party bundles cannot group them into a session
+   without hand-editing JSON.
+
+   Add `bris session new --title <t> [--ap-lat ... --ap-lon ...]
+   [--kinematics stationary|max-speed-kn=<kn>]
+   [--retention-seconds <s>] [--profile <p>]` that writes
+   `<corpus-root>/sessions/<uuid>/session.json` and prints
+   the UUID. Add `bris session list` and `bris session show
+   <uuid>`. Add `bris session attach --session <uuid>
+   --bundle <dir>` to set `bundle.session_id` on an
+   existing capture and append to `ordered_capture_ids`.
+
+   When the eventual `bris capture` (Linux live, via
+   `bris-capture`) subcommand lands, it grows
+   `--session <uuid>` and `--new-session` flags reusing
+   this writer. Keeps Android and Linux symmetric on the
+   create side, matching the replay-side symmetry above.
 ** TODO Operator-AP-from-map UI
    Tap a point on a map to seed the AP for the next/current
    session. Until this lands, all sessions start cold-start
