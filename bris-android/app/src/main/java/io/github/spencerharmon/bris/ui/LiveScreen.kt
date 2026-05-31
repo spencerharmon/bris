@@ -64,8 +64,8 @@ import io.github.spencerharmon.bris.engine.FixVerdict
 import io.github.spencerharmon.bris.engine.FrameAnalyzer
 import io.github.spencerharmon.bris.engine.LensCatalog
 import io.github.spencerharmon.bris.engine.SessionHolder
-import io.github.spencerharmon.bris.engine.SessionRecorder
-import io.github.spencerharmon.bris.engine.SessionStatus
+import io.github.spencerharmon.bris.engine.CaptureRecorder
+import io.github.spencerharmon.bris.engine.CaptureStatus
 import io.github.spencerharmon.bris.engine.SightLog
 import io.github.spencerharmon.bris.engine.resolveCalibration
 import kotlinx.coroutines.CoroutineScope
@@ -97,13 +97,13 @@ import java.util.concurrent.Executors
  * Start / Stop buttons. While the session is active the
  * CameraX [`ImageAnalysis`] use case is bound and the engine
  * receives frames; while idle, only the preview is bound and
- * the engine is silent. The [`SessionRecorder`] consumes the
+ * the engine is silent. The [`CaptureRecorder`] consumes the
  * engine's published-fix stream during a session and decides
  * the session's outcome (sustained-green auto-accept, operator
  * stop, or timeout).
  *
  * Storage: captured fixes land in a sight-log entry under
- * `<external-files>/sights/<session-ulid>/` (see [`SightLog`]).
+ * `<external-files>/sights/<capture-id>/` (see [`SightLog`]).
  * Operators pull entries via plain `adb pull` / MTP; the
  * collector network path is a separate, debug-mode-gated
  * affordance.
@@ -198,7 +198,7 @@ fun LiveScreen(
         )
     }
     val recorder = remember(engine, sightLog, prefs) {
-        SessionRecorder(
+        CaptureRecorder(
             engine = engine,
             sightLog = sightLog,
             scope = engineScope,
@@ -208,7 +208,7 @@ fun LiveScreen(
         )
     }
     val snapshot by engine.snapshot.collectAsState()
-    val sessionStatus by recorder.status.collectAsState()
+    val captureStatus by recorder.status.collectAsState()
 
     // ----- Pool / last-persisted / current-fix UI state -----
     var recoveredFix by remember { mutableStateOf<FfiPublishedFix?>(null) }
@@ -248,8 +248,8 @@ fun LiveScreen(
             }
         }
     }
-    val captureActive = sessionStatus is SessionStatus.Capturing ||
-        sessionStatus is SessionStatus.Saving
+    val captureActive = captureStatus is CaptureStatus.Capturing ||
+        captureStatus is CaptureStatus.Saving
     val bufferState by debugBuffer.stateFlow.collectAsState()
     val snackbarHost = remember { SnackbarHostState() }
     val saveAction = rememberDebugSaveAction(
@@ -313,7 +313,7 @@ fun LiveScreen(
             verticalArrangement = Arrangement.spacedBy(6.dp),
         ) {
             DiagnosticOverlay(
-                sessionStatus = sessionStatus,
+                captureStatus = captureStatus,
                 lastRawClassification = snapshot?.lastRawClassification,
                 lastDispatchedCondition = snapshot?.lastDispatchedCondition,
                 framesPushed = snapshot?.framesPushed ?: 0u,
@@ -535,7 +535,7 @@ private fun DebugBufferChip(
  */
 @Composable
 private fun DiagnosticOverlay(
-    sessionStatus: SessionStatus,
+    captureStatus: CaptureStatus,
     lastRawClassification: String?,
     lastDispatchedCondition: String?,
     framesPushed: ULong,
@@ -589,11 +589,11 @@ private fun DiagnosticOverlay(
         Text(calibLabel, color = Color.White)
         Text("capture: ${captureSize.width}×${captureSize.height}", color = Color.White)
         Text("lens: $lensLabel", color = Color.White)
-        when (val s = sessionStatus) {
-            is SessionStatus.Idle -> {
+        when (val s = captureStatus) {
+            is CaptureStatus.Idle -> {
                 Text("Idle. Tap Start capture to begin a session.", color = Color.White)
             }
-            is SessionStatus.Capturing -> {
+            is CaptureStatus.Capturing -> {
                 val elapsed = (System.currentTimeMillis() - s.startedAtMs) / 1000
                 val verdict = s.lastVerdict
                 val verdictColor = when (verdict) {
@@ -609,18 +609,18 @@ private fun DiagnosticOverlay(
                     color = verdictColor,
                 )
             }
-            is SessionStatus.Saving -> Text("Saving…", color = Color.White)
-            is SessionStatus.Saved -> {
+            is CaptureStatus.Saving -> Text("Saving…", color = Color.White)
+            is CaptureStatus.Saved -> {
                 val msg = when (val o = s.outcome) {
-                    is io.github.spencerharmon.bris.engine.SessionOutcome.Captured ->
+                    is io.github.spencerharmon.bris.engine.CaptureOutcome.Captured ->
                         "Captured ${o.verdict.name.lowercase()} fix " +
-                            "(σ=${"%.2f".format(o.fix.sigmaMajorNm)} nm). Saved to ${s.sessionDir.name}."
-                    is io.github.spencerharmon.bris.engine.SessionOutcome.NoFix ->
+                            "(σ=${"%.2f".format(o.fix.sigmaMajorNm)} nm). Saved to ${s.captureDir.name}."
+                    is io.github.spencerharmon.bris.engine.CaptureOutcome.NoFix ->
                         "No fix recorded (${o.reason})."
                 }
                 Text(msg, color = Color.White)
             }
-            is SessionStatus.Failed -> Text("Failed: ${s.reason}", color = Color(0xFFE57373))
+            is CaptureStatus.Failed -> Text("Failed: ${s.reason}", color = Color(0xFFE57373))
         }
         Text(
             "classifier: dispatched=${lastDispatchedCondition ?: "—"}  " +

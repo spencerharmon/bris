@@ -16,7 +16,7 @@ import java.time.Instant
  * On-device sight log: persisted records of operator-captured
  * fixes.
  *
- * Lives at `<external-files>/sights/<session-ulid>/`:
+ * Lives at `<external-files>/sights/<capture-id>/`:
  *
  *   manifest.json                  schema-v1 manifest
  *   media/
@@ -32,7 +32,7 @@ import java.time.Instant
  *
  * Only operator-captured fixes land here. The continuous
  * publication stream the engine emits during a capture session
- * is filtered down to whatever the [`SessionRecorder`] decided
+ * is filtered down to whatever the [`CaptureRecorder`] decided
  * was the session's outcome (the first sustained-green fix, or
  * the best yellow available at Stop / timeout, or nothing if
  * only red was ever published). Debug-capture's every-frame
@@ -49,7 +49,7 @@ class SightLog(private val rootDir: File) {
      * directory the entry landed in (so the caller can show a
      * "saved to ..." toast or navigate the operator to it).
      *
-     * @param sessionId Caller-supplied ULID. The session
+     * @param captureId Caller-supplied ULID. The session
      *                  directory's name; matches the manifest's
      *                  submission ID for cross-reference with
      *                  the collector path.
@@ -72,8 +72,8 @@ class SightLog(private val rootDir: File) {
      */
     @Suppress("LongParameterList")
     fun writeEntry(
-        sessionId: String,
-        outcome: SessionOutcome,
+        captureId: String,
+        outcome: CaptureOutcome,
         frames: Map<ULong, FrameBytes>,
         pbrisLines: List<String>,
         deviceUuid: String,
@@ -82,8 +82,8 @@ class SightLog(private val rootDir: File) {
         gps: GpsInfo? = null,
         note: String? = null,
     ): File {
-        val sessionDir = File(rootDir, sessionId).apply { mkdirs() }
-        val mediaDir = File(sessionDir, "media").apply { mkdirs() }
+        val captureDir = File(rootDir, captureId).apply { mkdirs() }
+        val mediaDir = File(captureDir, "media").apply { mkdirs() }
 
         val media = mutableListOf<MediaSummary>()
         for ((frameId, bytes) in frames) {
@@ -137,7 +137,7 @@ class SightLog(private val rootDir: File) {
         // entries are exactly the per-fix payload the collector
         // would have received.
         val fixSummary = when (outcome) {
-            is SessionOutcome.Captured -> JSONObject()
+            is CaptureOutcome.Captured -> JSONObject()
                 .put("latitude_deg", outcome.fix.latitudeDeg)
                 .put("longitude_deg", outcome.fix.longitudeDeg)
                 .put("sigma_major_nm", outcome.fix.sigmaMajorNm)
@@ -147,7 +147,7 @@ class SightLog(private val rootDir: File) {
                 .put("dominant_source", outcome.fix.dominantSource)
                 .put("verdict", outcome.verdict.name.lowercase())
                 .put("session_outcome", "captured")
-            is SessionOutcome.NoFix -> JSONObject()
+            is CaptureOutcome.NoFix -> JSONObject()
                 .put("session_outcome", "no_fix")
                 .put("reason", outcome.reason)
         }
@@ -164,8 +164,8 @@ class SightLog(private val rootDir: File) {
             fixSummary = fixSummary,
             media = media,
         )
-        File(sessionDir, "manifest.json").writeText(manifestJson)
-        return sessionDir
+        File(captureDir, "manifest.json").writeText(manifestJson)
+        return captureDir
     }
 
     /**
@@ -184,10 +184,10 @@ class SightLog(private val rootDir: File) {
      * sweep removes entries past the retention window
      * (deferred).
      */
-    fun softDelete(sessionDir: File): Boolean {
-        if (!sessionDir.exists()) return false
+    fun softDelete(captureDir: File): Boolean {
+        if (!captureDir.exists()) return false
         val trashDir = File(rootDir, ".trash").apply { mkdirs() }
-        return sessionDir.renameTo(File(trashDir, sessionDir.name))
+        return captureDir.renameTo(File(trashDir, captureDir.name))
     }
 
     /**
@@ -196,8 +196,8 @@ class SightLog(private val rootDir: File) {
      * pbris.log. Frees the bulk of per-entry storage while
      * preserving the diagnostic record.
      */
-    fun deleteImages(sessionDir: File): Int {
-        val mediaDir = File(sessionDir, "media")
+    fun deleteImages(captureDir: File): Int {
+        val mediaDir = File(captureDir, "media")
         if (!mediaDir.isDirectory) return 0
         var n = 0
         mediaDir.listFiles()?.forEach {
@@ -267,8 +267,8 @@ class SightLog(private val rootDir: File) {
     }
 }
 
-/** What the [`SessionRecorder`] decided about a capture session. */
-sealed interface SessionOutcome {
+/** What the [`CaptureRecorder`] decided about a capture session. */
+sealed interface CaptureOutcome {
     /**
      * The session produced a fix worth recording. `verdict` is
      * the threshold band the fix landed in (green if accepted
@@ -278,7 +278,7 @@ sealed interface SessionOutcome {
     data class Captured(
         val fix: FfiPublishedFix,
         val verdict: FixVerdict,
-    ) : SessionOutcome
+    ) : CaptureOutcome
 
     /**
      * The session ended without producing a usable fix. `reason`
@@ -286,7 +286,7 @@ sealed interface SessionOutcome {
      * sight-log entry (e.g. "no fix published before timeout",
      * "operator stopped before any non-red fix").
      */
-    data class NoFix(val reason: String) : SessionOutcome
+    data class NoFix(val reason: String) : CaptureOutcome
 }
 
 /**
@@ -298,6 +298,6 @@ sealed interface SessionOutcome {
  *   red:    σ_major > 5.0 nm  (never accepted)
  *
  * Operator-configurable thresholds are deferred to a settings
- * UI; the values are read from [`SessionThresholds`] today.
+ * UI; the values are read from [`CaptureThresholds`] today.
  */
 enum class FixVerdict { GREEN, YELLOW, RED }

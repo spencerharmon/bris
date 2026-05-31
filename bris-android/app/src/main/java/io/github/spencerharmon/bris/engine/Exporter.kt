@@ -52,7 +52,7 @@ class Exporter(private val rootDir: File) {
     /**
      * Mirror a sight-log entry into the exports tree.
      *
-     * Source: `<external-files>/sights/<session-ulid>/`
+     * Source: `<external-files>/sights/<capture-id>/`
      * Destination: `<exports>/<yyyy>/<mm>/<dd>/fix-<new-ulid>/`
      *
      * Returns the destination directory. Throws on I/O error.
