@@ -23,6 +23,7 @@ use bris_almanac::{refraction::Atmosphere, Observer};
 use bris_bundle::{
     enumerate_frames, verify_first_frame_checksum, ApInput, ApProvenance, BundleManifest,
     CaptureInfo, DeviceInfo, Distortion, FramePathPair, GpsTruth, IntrinsicsRecord,
+    SessionKinematics, SessionManifest,
 };
 use bris_calibrate::{
     calibrate, coverage, default_intrinsics_path, detect_corners_in_directory_with_progress,
@@ -247,7 +248,7 @@ struct CalibrateArgs {
     output: Option<PathBuf>,
 }
 
-#[derive(Debug, clap::Args)]
+#[derive(Debug, Clone, clap::Args)]
 #[allow(clippy::struct_excessive_bools)]
 struct ReplayArgs {
     /// Path to a debug bundle directory. Loads `bundle.json`
@@ -261,6 +262,17 @@ struct ReplayArgs {
     /// values to be supplied via CLI flags below.
     #[arg(long, conflicts_with = "bundle")]
     frames: Option<PathBuf>,
+    /// Replay every capture under `<corpus>/sessions/<UUID>/captures/`
+    /// in chronological order (by `ordered_capture_ids`).
+    /// Each capture still runs through its own engine instance;
+    /// cross-capture state continuity is a Phase 9 follow-up.
+    /// Requires `--corpus` to locate the session directory.
+    #[arg(long, conflicts_with_all = ["bundle", "frames"])]
+    session: Option<uuid::Uuid>,
+    /// Corpus root for `--session` and `--all-sessions`.
+    /// Defaults to `./bris-corpus`.
+    #[arg(long)]
+    corpus: Option<PathBuf>,
 
     /// Assumed-position latitude override (degrees, N positive).
     #[arg(long, allow_hyphen_values = true)]
@@ -447,6 +459,9 @@ struct ModeResult {
 }
 
 fn run_replay(args: &ReplayArgs) -> anyhow::Result<()> {
+    if let Some(session_id) = args.session {
+        return run_replay_session(args, session_id);
+    }
     // 1. Resolve the manifest (from --bundle or synthesized from --frames + flags).
     let (mut manifest, bundle_dir) = resolve_manifest(args)?;
     apply_cli_overrides(&mut manifest, args)?;
@@ -480,7 +495,8 @@ fn run_replay(args: &ReplayArgs) -> anyhow::Result<()> {
     let mut results = Vec::new();
     for mode in modes {
         info!(mode = mode.label(), "replay: running mode");
-        let result = run_one_mode(mode, args, &manifest, &frames)?;
+        let bundle_dir_arg = args.bundle.as_deref();
+        let result = run_one_mode(mode, args, &manifest, bundle_dir_arg, &frames)?;
         log_mode_result(&result, &manifest);
         results.push(result);
     }
@@ -496,6 +512,52 @@ fn run_replay(args: &ReplayArgs) -> anyhow::Result<()> {
 /// Resolve a `BundleManifest` for the run, returning it plus the
 /// directory it lives in. For `--frames` the manifest is
 /// synthesized from CLI flags only.
+/// Replay every capture in a session, chronological order.
+///
+/// Each capture runs through its own engine instance — cross-
+/// capture state continuity is a Phase 9 stretch (tracked in
+/// plan.org). The session.json overlay (kinematics, retention)
+/// is applied identically to every capture so live and replay
+/// stay in lockstep.
+fn run_replay_session(args: &ReplayArgs, session_id: uuid::Uuid) -> anyhow::Result<()> {
+    let corpus = args
+        .corpus
+        .clone()
+        .unwrap_or_else(|| PathBuf::from("./bris-corpus"));
+    let session_dir = corpus
+        .join("sessions")
+        .join(session_id.to_string());
+    let session = SessionManifest::load_from_dir(&session_dir)
+        .with_context(|| format!("load session.json from {}", session_dir.display()))?;
+    if session.ordered_capture_ids.is_empty() {
+        bail!(
+            "session {session_id} has no captures yet (ordered_capture_ids is empty)"
+        );
+    }
+    info!(
+        session_id = %session.session_id,
+        captures = session.ordered_capture_ids.len(),
+        "replay: session resolved"
+    );
+    for cap_id in &session.ordered_capture_ids {
+        let bundle_dir = session_dir.join("captures").join(cap_id);
+        if !bundle_dir.join("bundle.json").exists() {
+            warn!(
+                bundle = %bundle_dir.display(),
+                "replay: capture missing bundle.json; skipping"
+            );
+            continue;
+        }
+        info!(capture_id = %cap_id, "replay: starting capture");
+        let mut per_capture_args = args.clone();
+        per_capture_args.session = None;
+        per_capture_args.bundle = Some(bundle_dir);
+        run_replay(&per_capture_args)
+            .with_context(|| format!("replay capture {cap_id}"))?;
+    }
+    Ok(())
+}
+
 fn resolve_manifest(args: &ReplayArgs) -> anyhow::Result<(BundleManifest, PathBuf)> {
     if let Some(bundle) = &args.bundle {
         let manifest = BundleManifest::load_from_dir(bundle)
@@ -722,10 +784,79 @@ fn resolve_ap(mode: ReplayMode, manifest: &BundleManifest) -> Option<ResolvedAp>
     }
 }
 
+/// Locate the `SessionManifest` for a capture and overlay its
+/// engine-relevant fields onto `cfg`.
+///
+/// Looks for `session.json` two directories above
+/// `bundle_dir` (the canonical
+/// `<corpus-root>/sessions/<uuid>/captures/<cap-id>/` layout).
+/// Cross-checks the manifest's `session_id` back-ref. Silently
+/// no-ops when the file is missing (orphan capture, --frames
+/// mode, or pre-session-aware bundles).
+///
+/// Overlay rules — the engine sees the same values whether it
+/// ran live on Android or replays on Linux:
+/// - `sight_window_seconds`   ← `session.sight_retention_seconds`
+/// - `sight_window_capacity`  ← `session.sight_retention_capacity`
+/// - `publication_gate.assumed_max_speed_kn` ← `session.kinematics`
+///   (Stationary → 0.0; `MaxSpeedKn` { kn } → kn)
+///
+/// `session.ap_seed` is *not* applied here; AP resolution is
+/// `resolve_ap`'s job and already runs before this. The AP
+/// overlay is plumbed in the session-CLI follow-up.
+fn apply_session_overlay(
+    cfg: &mut EngineConfig,
+    manifest: &BundleManifest,
+    bundle_dir: Option<&Path>,
+) {
+    let Some(bundle_dir) = bundle_dir else {
+        return;
+    };
+    let Some(session_dir) = bundle_dir.parent().and_then(Path::parent) else {
+        return;
+    };
+    if !session_dir.join("session.json").exists() {
+        return;
+    }
+    let session = match SessionManifest::load_from_dir(session_dir) {
+        Ok(s) => s,
+        Err(e) => {
+            warn!(error = ?e, dir = %session_dir.display(), "replay: failed to load session.json; ignoring overlay");
+            return;
+        }
+    };
+    if let Some(bundle_session_id) = manifest.session_id {
+        if bundle_session_id != session.session_id {
+            warn!(
+                bundle_session_id = %bundle_session_id,
+                disk_session_id = %session.session_id,
+                "replay: bundle.session_id disagrees with session.json on disk; using session.json anyway"
+            );
+        }
+    }
+    #[allow(clippy::cast_precision_loss)]
+    {
+        cfg.sight_window_seconds = session.sight_retention_seconds as f64;
+    }
+    cfg.sight_window_capacity = session.sight_retention_capacity as usize;
+    cfg.publication_gate.assumed_max_speed_kn = match session.kinematics {
+        SessionKinematics::Stationary => 0.0,
+        SessionKinematics::MaxSpeedKn { kn } => kn,
+    };
+    info!(
+        session_id = %session.session_id,
+        sight_window_seconds = cfg.sight_window_seconds,
+        sight_window_capacity = cfg.sight_window_capacity,
+        assumed_max_speed_kn = cfg.publication_gate.assumed_max_speed_kn,
+        "replay: applied session.json overlay"
+    );
+}
+
 fn build_engine_config(
     mode: ReplayMode,
     ap: Option<ResolvedAp>,
     manifest: &BundleManifest,
+    bundle_dir: Option<&Path>,
     args: &ReplayArgs,
 ) -> anyhow::Result<EngineConfig> {
     let atmosphere = manifest
@@ -755,6 +886,7 @@ fn build_engine_config(
         atmosphere,
     };
     let mut cfg = EngineConfig::new(observer);
+    apply_session_overlay(&mut cfg, manifest, bundle_dir);
     cfg.lock_ap_for_replay = matches!(mode, ReplayMode::ApLockTruth);
     cfg.store.enabled = !args.disable_store;
     cfg.store.data_root = args
@@ -773,10 +905,11 @@ fn run_one_mode(
     mode: ReplayMode,
     args: &ReplayArgs,
     manifest: &BundleManifest,
+    bundle_dir: Option<&Path>,
     frames: &[FramePathPair],
 ) -> anyhow::Result<ModeResult> {
     let ap = resolve_ap(mode, manifest);
-    let cfg = build_engine_config(mode, ap, manifest, args)?;
+    let cfg = build_engine_config(mode, ap, manifest, bundle_dir, args)?;
     let engine = Arc::new(StreamingEngine::new(cfg));
     let fix_rx = engine
         .fix_stream()
@@ -1644,5 +1777,117 @@ fn median(values: &[f64]) -> f64 {
         v[n / 2]
     } else {
         0.5 * (v[n / 2 - 1] + v[n / 2])
+    }
+}
+
+#[cfg(test)]
+mod session_overlay_tests {
+    use super::*;
+    use bris_almanac::{refraction::Atmosphere, Observer};
+    use bris_bundle::{
+        CaptureInfo, Distortion, IntrinsicsRecord, IntrinsicsSource, SessionKinematics,
+        SessionManifest, UseCaseProfile,
+    };
+    use bris_core::angle::{Latitude, Longitude};
+    use tempfile::tempdir;
+    use uuid::Uuid;
+
+    fn dummy_observer() -> Observer {
+        Observer {
+            latitude: Latitude::from_degrees(0.0).unwrap(),
+            longitude: Longitude::from_degrees(0.0).unwrap(),
+            eye_height_m: 2.0,
+            eye_height_sigma_m: 0.5,
+            atmosphere: Atmosphere::STANDARD,
+        }
+    }
+
+    fn dummy_manifest(session_id: Uuid) -> BundleManifest {
+        BundleManifest {
+            schema_version: bris_bundle::SCHEMA_VERSION,
+            bundle_id: "cap-test".into(),
+            session_id: Some(session_id),
+            device: DeviceInfo {
+                model: "t".into(),
+                os: None,
+                app_version: None,
+            },
+            build: None,
+            capture: CaptureInfo {
+                source_rotation_deg: 0,
+                pre_rotation_was_deg: None,
+                frame_count: 0,
+                started_unix_ms: 0,
+                ended_unix_ms: 0,
+                first_frame_blake3: None,
+            },
+            intrinsics: IntrinsicsRecord {
+                source: IntrinsicsSource::Placeholder,
+                profile_key: None,
+                width: 1280,
+                height: 720,
+                fx: 1.0,
+                fy: 1.0,
+                cx: 0.5,
+                cy: 0.5,
+                distortion: Distortion::None,
+                rms_px: None,
+                solved_at_unix_ms: None,
+            },
+            ap_input: None,
+            ap_derivation_trace: None,
+            gps_truth: None,
+            atmosphere_hint: None,
+            notes: String::new(),
+        }
+    }
+
+    #[test]
+    fn overlay_applies_kinematics_and_retention() {
+        let root = tempdir().unwrap();
+        let sid = Uuid::new_v4();
+        let session_dir = root.path().join("sessions").join(sid.to_string());
+        let bundle_dir = session_dir.join("captures").join("cap-abc");
+        std::fs::create_dir_all(&bundle_dir).unwrap();
+        let mut s = SessionManifest::new(
+            sid,
+            "t".into(),
+            DeviceInfo {
+                model: "m".into(),
+                os: None,
+                app_version: None,
+            },
+            0,
+        );
+        s.kinematics = SessionKinematics::MaxSpeedKn { kn: 12.0 };
+        s.sight_retention_seconds = 86_400;
+        s.sight_retention_capacity = 250;
+        s.profile = UseCaseProfile::Marine;
+        s.save_to_dir(&session_dir).unwrap();
+
+        let mut cfg = EngineConfig::new(dummy_observer());
+        apply_session_overlay(&mut cfg, &dummy_manifest(sid), Some(&bundle_dir));
+        assert!((cfg.sight_window_seconds - 86_400.0).abs() < f64::EPSILON);
+        assert_eq!(cfg.sight_window_capacity, 250);
+        assert!((cfg.publication_gate.assumed_max_speed_kn - 12.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn overlay_no_session_json_is_noop() {
+        let root = tempdir().unwrap();
+        let bundle_dir = root.path().join("sessions").join("x").join("captures").join("y");
+        std::fs::create_dir_all(&bundle_dir).unwrap();
+        let mut cfg = EngineConfig::new(dummy_observer());
+        let before = cfg.sight_window_seconds;
+        apply_session_overlay(&mut cfg, &dummy_manifest(Uuid::nil()), Some(&bundle_dir));
+        assert!((cfg.sight_window_seconds - before).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn overlay_no_bundle_dir_is_noop() {
+        let mut cfg = EngineConfig::new(dummy_observer());
+        let before = cfg.sight_window_capacity;
+        apply_session_overlay(&mut cfg, &dummy_manifest(Uuid::nil()), None);
+        assert_eq!(cfg.sight_window_capacity, before);
     }
 }
