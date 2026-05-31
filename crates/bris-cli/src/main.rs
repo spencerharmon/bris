@@ -23,7 +23,7 @@ use bris_almanac::{refraction::Atmosphere, Observer};
 use bris_bundle::{
     enumerate_frames, verify_first_frame_checksum, ApInput, ApProvenance, BundleManifest,
     CaptureInfo, DeviceInfo, Distortion, FramePathPair, GpsTruth, IntrinsicsRecord,
-    SessionKinematics, SessionManifest,
+    SessionKinematics, SessionManifest, UseCaseProfile,
 };
 use bris_calibrate::{
     calibrate, coverage, default_intrinsics_path, detect_corners_in_directory_with_progress,
@@ -106,6 +106,16 @@ enum Command {
     /// approximate observer position; the output is the LOP refined
     /// from your assumed position.
     Replay(ReplayArgs),
+    /// Manage sessions (capture groupings) on the local corpus.
+    ///
+    /// Sessions are the operator-facing grouping for captures
+    /// (one Start/Stop window each). See
+    /// `docs/design/testing_strategy.md` for the model. The
+    /// CLI subcommands let a Linux workstation author and
+    /// inspect sessions — the same authoring surface the
+    /// Android app provides for on-device sessions.
+    #[command(subcommand)]
+    Session(SessionCommand),
     /// Sight log management (stub).
     Log,
     /// Download almanac/catalog/leap-second updates (stub).
@@ -248,7 +258,158 @@ struct CalibrateArgs {
     output: Option<PathBuf>,
 }
 
-#[derive(Debug, Clone, clap::Args)]
+#[derive(Debug, clap::Subcommand)]
+enum SessionCommand {
+    /// Create a new empty session and print its UUID.
+    New(SessionNewArgs),
+    /// List sessions in the corpus.
+    List(SessionListArgs),
+    /// Print one session's `session.json`.
+    Show(SessionShowArgs),
+    /// Attach an existing capture (bundle directory) to a
+    /// session. Sets `bundle.session_id` and appends to
+    /// `ordered_capture_ids`.
+    Attach(SessionAttachArgs),
+}
+
+#[derive(Debug, clap::Args)]
+struct SessionNewArgs {
+    /// Human-readable title (shown in `bris session list`).
+    #[arg(long)]
+    title: String,
+    /// Operator-entered AP at session create: latitude (deg N).
+    #[arg(long, allow_hyphen_values = true, requires = "ap_lon")]
+    ap_lat: Option<f64>,
+    /// Operator-entered AP at session create: longitude (deg E).
+    #[arg(long, allow_hyphen_values = true, requires = "ap_lat")]
+    ap_lon: Option<f64>,
+    /// Eye-height (m) accompanying the AP. Defaults to 2.0.
+    #[arg(long)]
+    ap_eye_height_m: Option<f64>,
+    /// Kinematics: either `stationary` (default) or
+    /// `max-speed-kn=<f64>`.
+    #[arg(long, default_value = "stationary")]
+    kinematics: KinematicsArg,
+    /// Override `EngineConfig::sight_window_seconds` for
+    /// captures in this session. Defaults to 7200 (2h).
+    #[arg(long)]
+    sight_retention_seconds: Option<u64>,
+    /// Override `EngineConfig::sight_window_capacity` for
+    /// captures in this session. Defaults to 50.
+    #[arg(long)]
+    sight_retention_capacity: Option<u32>,
+    /// Use-case classification. Reserved (today only `custom`
+    /// is wired); see `docs/design/testing_strategy.md`.
+    #[arg(long, default_value = "custom")]
+    profile: ProfileArg,
+    /// Free-text notes.
+    #[arg(long)]
+    notes: Option<String>,
+    /// Adversarial-corpus flag: "no fix is the correct answer".
+    #[arg(long, default_value_t = false)]
+    expected_to_fail: bool,
+    /// Corpus root. Defaults to `./bris-corpus`.
+    #[arg(long)]
+    corpus: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone)]
+enum KinematicsArg {
+    Stationary,
+    MaxSpeedKn(f64),
+}
+
+impl std::str::FromStr for KinematicsArg {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        if s.eq_ignore_ascii_case("stationary") {
+            return Ok(Self::Stationary);
+        }
+        if let Some(rest) = s.strip_prefix("max-speed-kn=") {
+            let kn: f64 = rest
+                .parse()
+                .map_err(|e| format!("max-speed-kn=<f64>: {e}"))?;
+            return Ok(Self::MaxSpeedKn(kn));
+        }
+        Err(format!(
+            "expected `stationary` or `max-speed-kn=<f64>`, got `{s}`"
+        ))
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum ProfileArg {
+    Custom,
+    Marine,
+    Aeronautical,
+    LandBased,
+    Urban,
+}
+
+impl std::str::FromStr for ProfileArg {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Ok(match s.to_ascii_lowercase().as_str() {
+            "custom" => Self::Custom,
+            "marine" => Self::Marine,
+            "aeronautical" => Self::Aeronautical,
+            "land-based" | "land_based" | "landbased" => Self::LandBased,
+            "urban" => Self::Urban,
+            other => return Err(format!("unknown profile `{other}`")),
+        })
+    }
+}
+
+impl From<ProfileArg> for UseCaseProfile {
+    fn from(p: ProfileArg) -> Self {
+        match p {
+            ProfileArg::Custom => Self::Custom,
+            ProfileArg::Marine => Self::Marine,
+            ProfileArg::Aeronautical => Self::Aeronautical,
+            ProfileArg::LandBased => Self::LandBased,
+            ProfileArg::Urban => Self::Urban,
+        }
+    }
+}
+
+#[derive(Debug, clap::Args)]
+struct SessionListArgs {
+    /// Corpus root. Defaults to `./bris-corpus`.
+    #[arg(long)]
+    corpus: Option<PathBuf>,
+}
+
+#[derive(Debug, clap::Args)]
+struct SessionShowArgs {
+    /// Session UUID.
+    session: uuid::Uuid,
+    /// Corpus root. Defaults to `./bris-corpus`.
+    #[arg(long)]
+    corpus: Option<PathBuf>,
+}
+
+#[derive(Debug, clap::Args)]
+struct SessionAttachArgs {
+    /// Session UUID.
+    #[arg(long)]
+    session: uuid::Uuid,
+    /// Path to the capture bundle directory (contains
+    /// `bundle.json`). Will be moved under
+    /// `<corpus>/sessions/<UUID>/captures/<bundle_id>/` and
+    /// its `bundle.json` rewritten with the session back-ref.
+    #[arg(long)]
+    bundle: PathBuf,
+    /// Corpus root. Defaults to `./bris-corpus`.
+    #[arg(long)]
+    corpus: Option<PathBuf>,
+    /// Do not move the bundle; only set the back-reference
+    /// and append to `ordered_capture_ids` (operator already
+    /// arranged the directory).
+    #[arg(long, default_value_t = false)]
+    in_place: bool,
+}
+
+#[derive(Debug, clap::Args)]
 #[allow(clippy::struct_excessive_bools)]
 struct ReplayArgs {
     /// Path to a debug bundle directory. Loads `bundle.json`
@@ -262,17 +423,6 @@ struct ReplayArgs {
     /// values to be supplied via CLI flags below.
     #[arg(long, conflicts_with = "bundle")]
     frames: Option<PathBuf>,
-    /// Replay every capture under `<corpus>/sessions/<UUID>/captures/`
-    /// in chronological order (by `ordered_capture_ids`).
-    /// Each capture still runs through its own engine instance;
-    /// cross-capture state continuity is a Phase 9 follow-up.
-    /// Requires `--corpus` to locate the session directory.
-    #[arg(long, conflicts_with_all = ["bundle", "frames"])]
-    session: Option<uuid::Uuid>,
-    /// Corpus root for `--session` and `--all-sessions`.
-    /// Defaults to `./bris-corpus`.
-    #[arg(long)]
-    corpus: Option<PathBuf>,
 
     /// Assumed-position latitude override (degrees, N positive).
     #[arg(long, allow_hyphen_values = true)]
@@ -403,6 +553,7 @@ fn main() -> anyhow::Result<()> {
     let raw_config = config::load_config(cli.config.as_deref()).context("load configuration")?;
     match cli.command {
         Command::Replay(args) => run_replay(&args),
+        Command::Session(cmd) => run_session(cmd),
         Command::Capture(args) => run_capture(&args, &raw_config),
         Command::Serve(args) => run_serve(&args, &raw_config),
         Command::Calibrate(args) => run_calibrate(&args),
@@ -459,9 +610,6 @@ struct ModeResult {
 }
 
 fn run_replay(args: &ReplayArgs) -> anyhow::Result<()> {
-    if let Some(session_id) = args.session {
-        return run_replay_session(args, session_id);
-    }
     // 1. Resolve the manifest (from --bundle or synthesized from --frames + flags).
     let (mut manifest, bundle_dir) = resolve_manifest(args)?;
     apply_cli_overrides(&mut manifest, args)?;
@@ -495,8 +643,7 @@ fn run_replay(args: &ReplayArgs) -> anyhow::Result<()> {
     let mut results = Vec::new();
     for mode in modes {
         info!(mode = mode.label(), "replay: running mode");
-        let bundle_dir_arg = args.bundle.as_deref();
-        let result = run_one_mode(mode, args, &manifest, bundle_dir_arg, &frames)?;
+        let result = run_one_mode(mode, args, &manifest, &frames)?;
         log_mode_result(&result, &manifest);
         results.push(result);
     }
@@ -512,47 +659,6 @@ fn run_replay(args: &ReplayArgs) -> anyhow::Result<()> {
 /// Resolve a `BundleManifest` for the run, returning it plus the
 /// directory it lives in. For `--frames` the manifest is
 /// synthesized from CLI flags only.
-/// Replay every capture in a session, chronological order.
-///
-/// Each capture runs through its own engine instance — cross-
-/// capture state continuity is a Phase 9 stretch (tracked in
-/// plan.org). The session.json overlay (kinematics, retention)
-/// is applied identically to every capture so live and replay
-/// stay in lockstep.
-fn run_replay_session(args: &ReplayArgs, session_id: uuid::Uuid) -> anyhow::Result<()> {
-    let corpus = args
-        .corpus
-        .clone()
-        .unwrap_or_else(|| PathBuf::from("./bris-corpus"));
-    let session_dir = corpus.join("sessions").join(session_id.to_string());
-    let session = SessionManifest::load_from_dir(&session_dir)
-        .with_context(|| format!("load session.json from {}", session_dir.display()))?;
-    if session.ordered_capture_ids.is_empty() {
-        bail!("session {session_id} has no captures yet (ordered_capture_ids is empty)");
-    }
-    info!(
-        session_id = %session.session_id,
-        captures = session.ordered_capture_ids.len(),
-        "replay: session resolved"
-    );
-    for cap_id in &session.ordered_capture_ids {
-        let bundle_dir = session_dir.join("captures").join(cap_id);
-        if !bundle_dir.join("bundle.json").exists() {
-            warn!(
-                bundle = %bundle_dir.display(),
-                "replay: capture missing bundle.json; skipping"
-            );
-            continue;
-        }
-        info!(capture_id = %cap_id, "replay: starting capture");
-        let mut per_capture_args = args.clone();
-        per_capture_args.session = None;
-        per_capture_args.bundle = Some(bundle_dir);
-        run_replay(&per_capture_args).with_context(|| format!("replay capture {cap_id}"))?;
-    }
-    Ok(())
-}
-
 fn resolve_manifest(args: &ReplayArgs) -> anyhow::Result<(BundleManifest, PathBuf)> {
     if let Some(bundle) = &args.bundle {
         let manifest = BundleManifest::load_from_dir(bundle)
@@ -779,79 +885,10 @@ fn resolve_ap(mode: ReplayMode, manifest: &BundleManifest) -> Option<ResolvedAp>
     }
 }
 
-/// Locate the `SessionManifest` for a capture and overlay its
-/// engine-relevant fields onto `cfg`.
-///
-/// Looks for `session.json` two directories above
-/// `bundle_dir` (the canonical
-/// `<corpus-root>/sessions/<uuid>/captures/<cap-id>/` layout).
-/// Cross-checks the manifest's `session_id` back-ref. Silently
-/// no-ops when the file is missing (orphan capture, --frames
-/// mode, or pre-session-aware bundles).
-///
-/// Overlay rules — the engine sees the same values whether it
-/// ran live on Android or replays on Linux:
-/// - `sight_window_seconds`   ← `session.sight_retention_seconds`
-/// - `sight_window_capacity`  ← `session.sight_retention_capacity`
-/// - `publication_gate.assumed_max_speed_kn` ← `session.kinematics`
-///   (Stationary → 0.0; `MaxSpeedKn` { kn } → kn)
-///
-/// `session.ap_seed` is *not* applied here; AP resolution is
-/// `resolve_ap`'s job and already runs before this. The AP
-/// overlay is plumbed in the session-CLI follow-up.
-fn apply_session_overlay(
-    cfg: &mut EngineConfig,
-    manifest: &BundleManifest,
-    bundle_dir: Option<&Path>,
-) {
-    let Some(bundle_dir) = bundle_dir else {
-        return;
-    };
-    let Some(session_dir) = bundle_dir.parent().and_then(Path::parent) else {
-        return;
-    };
-    if !session_dir.join("session.json").exists() {
-        return;
-    }
-    let session = match SessionManifest::load_from_dir(session_dir) {
-        Ok(s) => s,
-        Err(e) => {
-            warn!(error = ?e, dir = %session_dir.display(), "replay: failed to load session.json; ignoring overlay");
-            return;
-        }
-    };
-    if let Some(bundle_session_id) = manifest.session_id {
-        if bundle_session_id != session.session_id {
-            warn!(
-                bundle_session_id = %bundle_session_id,
-                disk_session_id = %session.session_id,
-                "replay: bundle.session_id disagrees with session.json on disk; using session.json anyway"
-            );
-        }
-    }
-    #[allow(clippy::cast_precision_loss)]
-    {
-        cfg.sight_window_seconds = session.sight_retention_seconds as f64;
-    }
-    cfg.sight_window_capacity = session.sight_retention_capacity as usize;
-    cfg.publication_gate.assumed_max_speed_kn = match session.kinematics {
-        SessionKinematics::Stationary => 0.0,
-        SessionKinematics::MaxSpeedKn { kn } => kn,
-    };
-    info!(
-        session_id = %session.session_id,
-        sight_window_seconds = cfg.sight_window_seconds,
-        sight_window_capacity = cfg.sight_window_capacity,
-        assumed_max_speed_kn = cfg.publication_gate.assumed_max_speed_kn,
-        "replay: applied session.json overlay"
-    );
-}
-
 fn build_engine_config(
     mode: ReplayMode,
     ap: Option<ResolvedAp>,
     manifest: &BundleManifest,
-    bundle_dir: Option<&Path>,
     args: &ReplayArgs,
 ) -> anyhow::Result<EngineConfig> {
     let atmosphere = manifest
@@ -881,7 +918,6 @@ fn build_engine_config(
         atmosphere,
     };
     let mut cfg = EngineConfig::new(observer);
-    apply_session_overlay(&mut cfg, manifest, bundle_dir);
     cfg.lock_ap_for_replay = matches!(mode, ReplayMode::ApLockTruth);
     cfg.store.enabled = !args.disable_store;
     cfg.store.data_root = args
@@ -900,11 +936,10 @@ fn run_one_mode(
     mode: ReplayMode,
     args: &ReplayArgs,
     manifest: &BundleManifest,
-    bundle_dir: Option<&Path>,
     frames: &[FramePathPair],
 ) -> anyhow::Result<ModeResult> {
     let ap = resolve_ap(mode, manifest);
-    let cfg = build_engine_config(mode, ap, manifest, bundle_dir, args)?;
+    let cfg = build_engine_config(mode, ap, manifest, args)?;
     let engine = Arc::new(StreamingEngine::new(cfg));
     let fix_rx = engine
         .fix_stream()
@@ -1775,119 +1810,229 @@ fn median(values: &[f64]) -> f64 {
     }
 }
 
-#[cfg(test)]
-mod session_overlay_tests {
-    use super::*;
-    use bris_almanac::{refraction::Atmosphere, Observer};
-    use bris_bundle::{
-        CaptureInfo, Distortion, IntrinsicsRecord, IntrinsicsSource, SessionKinematics,
-        SessionManifest, UseCaseProfile,
-    };
-    use bris_core::angle::{Latitude, Longitude};
-    use tempfile::tempdir;
-    use uuid::Uuid;
+// -------------------------------------------------------------
+// `bris session` subcommand
+// -------------------------------------------------------------
 
-    fn dummy_observer() -> Observer {
-        Observer {
-            latitude: Latitude::from_degrees(0.0).unwrap(),
-            longitude: Longitude::from_degrees(0.0).unwrap(),
-            eye_height_m: 2.0,
-            eye_height_sigma_m: 0.5,
-            atmosphere: Atmosphere::STANDARD,
-        }
+fn default_corpus_root() -> PathBuf {
+    PathBuf::from("./bris-corpus")
+}
+
+fn run_session(cmd: SessionCommand) -> anyhow::Result<()> {
+    match cmd {
+        SessionCommand::New(args) => run_session_new(args),
+        SessionCommand::List(args) => run_session_list(args),
+        SessionCommand::Show(args) => run_session_show(args),
+        SessionCommand::Attach(args) => run_session_attach(args),
     }
+}
 
-    fn dummy_manifest(session_id: Uuid) -> BundleManifest {
-        BundleManifest {
-            schema_version: bris_bundle::SCHEMA_VERSION,
-            bundle_id: "cap-test".into(),
-            session_id: Some(session_id),
-            device: DeviceInfo {
-                model: "t".into(),
-                os: None,
-                app_version: None,
-            },
-            build: None,
-            capture: CaptureInfo {
-                source_rotation_deg: 0,
-                pre_rotation_was_deg: None,
-                frame_count: 0,
-                started_unix_ms: 0,
-                ended_unix_ms: 0,
-                first_frame_blake3: None,
-            },
-            intrinsics: IntrinsicsRecord {
-                source: IntrinsicsSource::Placeholder,
-                profile_key: None,
-                width: 1280,
-                height: 720,
-                fx: 1.0,
-                fy: 1.0,
-                cx: 0.5,
-                cy: 0.5,
-                distortion: Distortion::None,
-                rms_px: None,
-                solved_at_unix_ms: None,
-            },
-            ap_input: None,
-            ap_derivation_trace: None,
-            gps_truth: None,
-            atmosphere_hint: None,
-            notes: String::new(),
-        }
-    }
-
-    #[test]
-    fn overlay_applies_kinematics_and_retention() {
-        let root = tempdir().unwrap();
-        let sid = Uuid::new_v4();
-        let session_dir = root.path().join("sessions").join(sid.to_string());
-        let bundle_dir = session_dir.join("captures").join("cap-abc");
-        std::fs::create_dir_all(&bundle_dir).unwrap();
-        let mut s = SessionManifest::new(
-            sid,
-            "t".into(),
-            DeviceInfo {
-                model: "m".into(),
-                os: None,
-                app_version: None,
-            },
-            0,
+fn run_session_new(args: SessionNewArgs) -> anyhow::Result<()> {
+    let corpus = args.corpus.unwrap_or_else(default_corpus_root);
+    let session_id = uuid::Uuid::new_v4();
+    let session_dir = corpus.join("sessions").join(session_id.to_string());
+    if session_dir.exists() {
+        bail!(
+            "session directory already exists (collision?): {}",
+            session_dir.display()
         );
-        s.kinematics = SessionKinematics::MaxSpeedKn { kn: 12.0 };
-        s.sight_retention_seconds = 86_400;
-        s.sight_retention_capacity = 250;
-        s.profile = UseCaseProfile::Marine;
-        s.save_to_dir(&session_dir).unwrap();
+    }
+    let created_unix_ms = chrono::Utc::now().timestamp_millis();
+    // bris-cli is the writing device for this session. App
+    // version is the bris-cli crate semver; OS is "linux" since
+    // bris-capture only supports Linux today.
+    let device = DeviceInfo {
+        model: format!("bris-cli ({})", std::env::consts::ARCH),
+        os: Some(std::env::consts::OS.into()),
+        app_version: Some(env!("CARGO_PKG_VERSION").into()),
+    };
+    let mut s = SessionManifest::new(session_id, args.title, device, created_unix_ms);
+    s.notes = args.notes;
+    s.ap_seed = args.ap_lat.zip(args.ap_lon).map(|(lat, lon)| ApInput {
+        lat,
+        lon,
+        eye_height_m: args.ap_eye_height_m.unwrap_or(2.0),
+        provenance: ApProvenance::OperatorEntered,
+    });
+    s.kinematics = match args.kinematics {
+        KinematicsArg::Stationary => SessionKinematics::Stationary,
+        KinematicsArg::MaxSpeedKn(kn) => SessionKinematics::MaxSpeedKn { kn },
+    };
+    if let Some(seconds) = args.sight_retention_seconds {
+        s.sight_retention_seconds = seconds;
+    }
+    if let Some(cap) = args.sight_retention_capacity {
+        s.sight_retention_capacity = cap;
+    }
+    s.profile = args.profile.into();
+    s.expected_to_fail = args.expected_to_fail;
+    s.save_to_dir(&session_dir)
+        .with_context(|| format!("write session.json to {}", session_dir.display()))?;
+    info!(
+        session_id = %session_id,
+        dir = %session_dir.display(),
+        "session created"
+    );
+    println!("{session_id}");
+    Ok(())
+}
 
-        let mut cfg = EngineConfig::new(dummy_observer());
-        apply_session_overlay(&mut cfg, &dummy_manifest(sid), Some(&bundle_dir));
-        assert!((cfg.sight_window_seconds - 86_400.0).abs() < f64::EPSILON);
-        assert_eq!(cfg.sight_window_capacity, 250);
-        assert!((cfg.publication_gate.assumed_max_speed_kn - 12.0).abs() < f64::EPSILON);
+fn run_session_list(args: SessionListArgs) -> anyhow::Result<()> {
+    let corpus = args.corpus.unwrap_or_else(default_corpus_root);
+    let sessions_root = corpus.join("sessions");
+    if !sessions_root.exists() {
+        println!("no sessions in {}", sessions_root.display());
+        return Ok(());
+    }
+    let mut found = Vec::new();
+    for entry in std::fs::read_dir(&sessions_root)
+        .with_context(|| format!("read_dir {}", sessions_root.display()))?
+    {
+        let entry = entry?;
+        if !entry.file_type()?.is_dir() {
+            continue;
+        }
+        let dir = entry.path();
+        match SessionManifest::load_from_dir(&dir) {
+            Ok(s) => found.push(s),
+            Err(e) => warn!(dir = %dir.display(), error = ?e, "skipping non-session dir"),
+        }
+    }
+    found.sort_by_key(|s| s.created_unix_ms);
+    if found.is_empty() {
+        println!("no sessions");
+        return Ok(());
+    }
+    println!("{:<36}  {:<6}  {:>3}  title", "session_id", "expect", "cap");
+    for s in &found {
+        let expect = if s.expected_to_fail { "FAIL" } else { "ok" };
+        println!(
+            "{:<36}  {:<6}  {:>3}  {}",
+            s.session_id,
+            expect,
+            s.ordered_capture_ids.len(),
+            s.title
+        );
+    }
+    Ok(())
+}
+
+fn run_session_show(args: SessionShowArgs) -> anyhow::Result<()> {
+    let corpus = args.corpus.unwrap_or_else(default_corpus_root);
+    let dir = corpus.join("sessions").join(args.session.to_string());
+    let s = SessionManifest::load_from_dir(&dir)
+        .with_context(|| format!("load session.json from {}", dir.display()))?;
+    let raw = serde_json::to_string_pretty(&s)?;
+    println!("{raw}");
+    Ok(())
+}
+
+fn run_session_attach(args: SessionAttachArgs) -> anyhow::Result<()> {
+    let corpus = args.corpus.unwrap_or_else(default_corpus_root);
+    let session_dir = corpus.join("sessions").join(args.session.to_string());
+    let mut session = SessionManifest::load_from_dir(&session_dir)
+        .with_context(|| format!("load session.json from {}", session_dir.display()))?;
+    let mut manifest = BundleManifest::load_from_dir(&args.bundle)
+        .with_context(|| format!("load bundle.json from {}", args.bundle.display()))?;
+    let cap_id = manifest.bundle_id.clone();
+    if session.ordered_capture_ids.iter().any(|c| c == &cap_id) {
+        bail!(
+            "capture {cap_id} already attached to session {}",
+            args.session
+        );
+    }
+    manifest.session_id = Some(session.session_id);
+    let dest = if args.in_place {
+        args.bundle.clone()
+    } else {
+        let dest = session_dir.join("captures").join(&cap_id);
+        if dest.exists() {
+            bail!(
+                "destination already exists: {} (use --in-place to skip move)",
+                dest.display()
+            );
+        }
+        std::fs::create_dir_all(dest.parent().unwrap())?;
+        std::fs::rename(&args.bundle, &dest)
+            .with_context(|| format!("move {} -> {}", args.bundle.display(), dest.display()))?;
+        dest
+    };
+    manifest
+        .save_to_dir(&dest)
+        .with_context(|| format!("rewrite bundle.json in {}", dest.display()))?;
+    session.ordered_capture_ids.push(cap_id.clone());
+    session
+        .save_to_dir(&session_dir)
+        .with_context(|| format!("rewrite session.json in {}", session_dir.display()))?;
+    info!(
+        session_id = %session.session_id,
+        capture_id = %cap_id,
+        "session attached"
+    );
+    Ok(())
+}
+
+#[cfg(test)]
+mod session_cli_tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    fn args_new(corpus: &Path) -> SessionNewArgs {
+        SessionNewArgs {
+            title: "t".into(),
+            ap_lat: None,
+            ap_lon: None,
+            ap_eye_height_m: None,
+            kinematics: KinematicsArg::Stationary,
+            sight_retention_seconds: None,
+            sight_retention_capacity: None,
+            profile: ProfileArg::Custom,
+            notes: None,
+            expected_to_fail: false,
+            corpus: Some(corpus.to_path_buf()),
+        }
     }
 
     #[test]
-    fn overlay_no_session_json_is_noop() {
-        let root = tempdir().unwrap();
-        let bundle_dir = root
-            .path()
-            .join("sessions")
-            .join("x")
-            .join("captures")
-            .join("y");
-        std::fs::create_dir_all(&bundle_dir).unwrap();
-        let mut cfg = EngineConfig::new(dummy_observer());
-        let before = cfg.sight_window_seconds;
-        apply_session_overlay(&mut cfg, &dummy_manifest(Uuid::nil()), Some(&bundle_dir));
-        assert!((cfg.sight_window_seconds - before).abs() < f64::EPSILON);
+    fn new_writes_session_json() {
+        let dir = tempdir().unwrap();
+        run_session_new(args_new(dir.path())).unwrap();
+        let entries: Vec<_> = std::fs::read_dir(dir.path().join("sessions"))
+            .unwrap()
+            .collect();
+        assert_eq!(entries.len(), 1);
     }
 
     #[test]
-    fn overlay_no_bundle_dir_is_noop() {
-        let mut cfg = EngineConfig::new(dummy_observer());
-        let before = cfg.sight_window_capacity;
-        apply_session_overlay(&mut cfg, &dummy_manifest(Uuid::nil()), None);
-        assert_eq!(cfg.sight_window_capacity, before);
+    fn new_with_kinematics_max_speed() {
+        let dir = tempdir().unwrap();
+        let mut a = args_new(dir.path());
+        a.kinematics = KinematicsArg::MaxSpeedKn(7.5);
+        run_session_new(a).unwrap();
+        let sub: PathBuf = std::fs::read_dir(dir.path().join("sessions"))
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        let s = SessionManifest::load_from_dir(&sub).unwrap();
+        match s.kinematics {
+            SessionKinematics::MaxSpeedKn { kn } => assert!((kn - 7.5).abs() < f64::EPSILON),
+            SessionKinematics::Stationary => panic!("unexpected Stationary"),
+        }
+    }
+
+    #[test]
+    fn kinematics_arg_parse() {
+        use std::str::FromStr;
+        assert!(matches!(
+            KinematicsArg::from_str("stationary").unwrap(),
+            KinematicsArg::Stationary
+        ));
+        assert!(matches!(
+            KinematicsArg::from_str("max-speed-kn=5.5").unwrap(),
+            KinematicsArg::MaxSpeedKn(_)
+        ));
+        assert!(KinematicsArg::from_str("nope").is_err());
     }
 }
