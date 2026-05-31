@@ -91,6 +91,46 @@ pub struct BundleManifest {
     /// Free-text operator notes. Empty string when absent.
     #[serde(default)]
     pub notes: String,
+    /// Back-reference to the session this capture belongs to,
+    /// per `docs/design/testing_strategy.md`. `UUIDv4` string;
+    /// `None` for bundles produced before the session model
+    /// existed (orphan captures).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+}
+
+/// Build provenance: which Rust source tree produced the
+/// `bris-ffi` shared object that wrote this bundle.
+///
+/// Populated from `bris_ffi::version()` (which is in turn
+/// populated by `crates/bris-ffi/build.rs` at compile time).
+/// Mirrored across the FFI as `VersionInfo`; this struct is
+/// the persisted form.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BuildInfo {
+    /// Full git SHA of the source tree at build time, or
+    /// `"unknown"` for non-git builds.
+    pub git_sha: String,
+    /// `git describe --always --tags --dirty` output.
+    pub git_describe: String,
+    /// `true` when the worktree had uncommitted changes at
+    /// build time. Regression baselines refuse dirty builds.
+    pub git_dirty: bool,
+    /// `git rev-list --count HEAD` — monotone commit index.
+    pub commit_count: u32,
+    /// Build-time UTC timestamp, ISO 8601.
+    pub build_timestamp_utc: String,
+    /// Semver of the `bris-ffi` crate at build time.
+    pub bris_ffi_semver: String,
+    /// Android `versionName` from the APK that bundled this
+    /// FFI, when written from the Android shell. `None` for
+    /// non-Android writers (CLI, tests).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub android_version_name: Option<String>,
+    /// Android `versionCode` from the APK that bundled this
+    /// FFI, when written from the Android shell.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub android_version_code: Option<u32>,
 }
 
 /// Build provenance: which Rust source tree produced the
@@ -129,6 +169,205 @@ pub struct BuildInfo {
 
 /// Current bundle schema version.
 pub const SCHEMA_VERSION: u32 = 1;
+
+/// Session schema version. Sessions and bundles are
+/// versioned independently — a session manifest can evolve
+/// without forcing the per-capture bundle schema to bump.
+pub const SESSION_SCHEMA_VERSION: u32 = 1;
+
+/// Top-level session manifest, persisted as `session.json` at
+/// `<corpus-root>/sessions/<session-id>/session.json`.
+///
+/// A session groups one or more captures (each a
+/// [`BundleManifest`] under `captures/<cap-id>/`) sharing
+/// the operator's intent (same vessel, same trip, same
+/// observing window). See `docs/design/testing_strategy.md`
+/// for the full model. The streaming engine itself is
+/// session-aware only through [`SessionManifest::kinematics`]
+/// and the `sight_retention_*` fields, which override the
+/// corresponding `EngineConfig` defaults at engine
+/// construction.
+///
+/// Sessions are never explicitly "ended". They exist until
+/// the operator deletes them. `ordered_capture_ids` is
+/// append-only; `session.json` is rewritten in place on each
+/// capture save.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionManifest {
+    /// Schema version. Currently [`SESSION_SCHEMA_VERSION`].
+    pub schema_version: u32,
+    /// Stable session identifier, `UUIDv4` string. The on-disk
+    /// directory name matches this value.
+    pub session_id: String,
+    /// Operator-supplied display title; shown in the
+    /// "Resume session" picker. Mutable after creation.
+    pub title: String,
+    /// Unix-ms timestamp of the operator's "New session"
+    /// action.
+    pub created_unix_ms: i64,
+    /// Device that owns this session (the device the operator
+    /// created it on). Copied from the first capture's
+    /// [`DeviceInfo`] for indexing; not authoritative once
+    /// captures exist.
+    pub device: DeviceInfo,
+    /// Build provenance of the FFI engine that wrote this
+    /// session. Mirrors the per-capture
+    /// [`BundleManifest::build`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub build: Option<BuildInfo>,
+    /// Free-text notes about the session.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notes: Option<String>,
+    /// Operator-entered assumed position at session create.
+    /// Threaded into [`EngineConfig`] for the captures in this
+    /// session. `None` = cold-start.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ap_seed: Option<ApInput>,
+    /// Use-case classification. Today only [`UseCaseProfile::Custom`]
+    /// is meaningful; the other variants are reserved and
+    /// behave identically. Eventually drives smart defaults
+    /// for [`Self::kinematics`] and the retention fields.
+    #[serde(default)]
+    pub profile: UseCaseProfile,
+    /// Operator's claim about motion across this session.
+    /// Maps to `PublicationGateConfig::assumed_max_speed_kn`.
+    #[serde(default)]
+    pub kinematics: SessionKinematics,
+    /// Override for `EngineConfig::sight_window_seconds`.
+    /// Lets multi-day stationary sessions (e.g. window-sill
+    /// sun sights over a week) combine sights spanning the
+    /// full window.
+    pub sight_retention_seconds: u64,
+    /// Override for `EngineConfig::sight_window_capacity`.
+    pub sight_retention_capacity: u32,
+    /// Adversarial-corpus flag: `true` marks a session where
+    /// no fix is the correct answer. Default `false`; the
+    /// regression harness flips a "published fix here is a
+    /// regression" assertion when `true`.
+    #[serde(default)]
+    pub expected_to_fail: bool,
+    /// Captures belonging to this session, in chronological
+    /// (replay) order. Append-only.
+    #[serde(default)]
+    pub ordered_capture_ids: Vec<String>,
+}
+
+/// Operator's claim about observer motion across a session.
+///
+/// Drives `PublicationGateConfig::assumed_max_speed_kn`, which
+/// in turn inflates published fix σ by
+/// `assumed_max_speed_kn * oldest_age_seconds / 3600` (RSS).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Default)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum SessionKinematics {
+    /// Observer not moving. σ-inflation contribution from
+    /// motion is zero.
+    #[default]
+    Stationary,
+    /// `MaxSpeedKn` { kn }: observer may move up to `kn` knots.
+    MaxSpeedKn {
+        /// Bound on observer speed, in knots.
+        kn: f64,
+    },
+}
+
+/// Use-case classification for a session. Today only `Custom`
+/// is wired to behavior; the named variants are reserved for
+/// future profile-driven defaults (kinematics, retention,
+/// pipeline tuning).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum UseCaseProfile {
+    /// Operator sets `kinematics` / retention fields directly.
+    #[default]
+    Custom,
+    /// Reserved. Behaves as [`Self::Custom`] today.
+    Marine,
+    /// Reserved. Behaves as [`Self::Custom`] today.
+    Aeronautical,
+    /// Reserved. Behaves as [`Self::Custom`] today.
+    LandBased,
+    /// Reserved. Behaves as [`Self::Custom`] today.
+    Urban,
+}
+
+impl SessionManifest {
+    /// Default sight-retention window: 2 hours, matching
+    /// `EngineConfig::sight_window_seconds`.
+    pub const DEFAULT_RETENTION_SECONDS: u64 = 7200;
+    /// Default sight-retention capacity: 50 sights, matching
+    /// `EngineConfig::sight_window_capacity`.
+    pub const DEFAULT_RETENTION_CAPACITY: u32 = 50;
+
+    /// Construct a fresh session with the engine-default
+    /// retention and `Stationary` kinematics. Caller supplies
+    /// the `UUIDv4` string, title, device, and (Unix-ms) create
+    /// time.
+    #[must_use]
+    pub fn new(
+        session_id: String,
+        title: String,
+        device: DeviceInfo,
+        created_unix_ms: i64,
+    ) -> Self {
+        Self {
+            schema_version: SESSION_SCHEMA_VERSION,
+            session_id,
+            title,
+            created_unix_ms,
+            device,
+            build: None,
+            notes: None,
+            ap_seed: None,
+            profile: UseCaseProfile::default(),
+            kinematics: SessionKinematics::default(),
+            sight_retention_seconds: Self::DEFAULT_RETENTION_SECONDS,
+            sight_retention_capacity: Self::DEFAULT_RETENTION_CAPACITY,
+            expected_to_fail: false,
+            ordered_capture_ids: Vec::new(),
+        }
+    }
+
+    /// Write `session.json` to `<dir>/session.json`. Creates
+    /// the directory if necessary. Pretty-printed.
+    ///
+    /// # Errors
+    ///
+    /// Filesystem or JSON serialization failure.
+    pub fn save_to_dir(&self, dir: &Path) -> Result<(), BundleError> {
+        fs::create_dir_all(dir)?;
+        let path = dir.join("session.json");
+        let raw = serde_json::to_vec_pretty(self).map_err(|source| BundleError::Json {
+            path: path.clone(),
+            source,
+        })?;
+        fs::write(path, raw)?;
+        Ok(())
+    }
+
+    /// Read `<dir>/session.json`. Rejects with
+    /// [`BundleError::UnsupportedSchema`] when
+    /// `schema_version != SESSION_SCHEMA_VERSION`.
+    ///
+    /// # Errors
+    ///
+    /// Filesystem, JSON parse, or schema mismatch.
+    pub fn load_from_dir(dir: &Path) -> Result<Self, BundleError> {
+        let path = dir.join("session.json");
+        let raw = fs::read(&path)?;
+        let manifest: Self = serde_json::from_slice(&raw).map_err(|source| BundleError::Json {
+            path: path.clone(),
+            source,
+        })?;
+        if manifest.schema_version != SESSION_SCHEMA_VERSION {
+            return Err(BundleError::UnsupportedSchema {
+                found: manifest.schema_version,
+                supported: SESSION_SCHEMA_VERSION,
+            });
+        }
+        Ok(manifest)
+    }
+}
 
 /// Device identity.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -222,9 +461,14 @@ pub enum IntrinsicsSource {
     Factory,
     /// User-supplied calibration from `bris calibrate`.
     UserCalibration {
-        /// Stable identifier of the calibration session
-        /// (file name, ULID, etc).
-        session_id: String,
+        /// Stable identifier of the calibration run (file name,
+        /// ULID, etc). Distinct from a capture-session id; see
+        /// `docs/design/testing_strategy.md` on the "session"
+        /// term overloading. `session_id` accepted as an alias
+        /// for backward-compat with bundles written before the
+        /// rename.
+        #[serde(alias = "session_id")]
+        calibration_id: String,
     },
     /// Whatever the platform layer (`CameraX`, `V4L2`) reported.
     DeviceReported,
@@ -700,6 +944,7 @@ mod tests {
                 source: "manual".into(),
             }),
             notes: "test bundle".into(),
+            session_id: Some("550e8400-e29b-41d4-a716-446655440000".into()),
         }
     }
 
@@ -757,6 +1002,107 @@ mod tests {
         m.save_to_dir(dir.path()).unwrap();
         let back = BundleManifest::load_from_dir(dir.path()).unwrap();
         assert_eq!(back.bundle_id, m.bundle_id);
+    }
+
+    fn full_session() -> SessionManifest {
+        let mut s = SessionManifest::new(
+            "550e8400-e29b-41d4-a716-446655440000".into(),
+            "Window-sill sun sights".into(),
+            DeviceInfo {
+                model: "TestPhone".into(),
+                os: Some("Android 11".into()),
+                app_version: Some("0.0.1".into()),
+            },
+            1_700_000_000_000,
+        );
+        s.notes = Some("morning sun, partial cloud".into());
+        s.kinematics = SessionKinematics::MaxSpeedKn { kn: 5.0 };
+        s.sight_retention_seconds = 86_400 * 3;
+        s.profile = UseCaseProfile::Marine;
+        s.expected_to_fail = false;
+        s.ordered_capture_ids.push("cap-0019e7634306b".into());
+        s.ordered_capture_ids.push("cap-0019e7634310c".into());
+        s
+    }
+
+    #[test]
+    fn session_round_trips_through_json() {
+        let s = full_session();
+        let raw = serde_json::to_vec(&s).unwrap();
+        let back: SessionManifest = serde_json::from_slice(&raw).unwrap();
+        assert_eq!(back.session_id, s.session_id);
+        assert_eq!(back.title, s.title);
+        assert_eq!(back.ordered_capture_ids, s.ordered_capture_ids);
+        assert_eq!(back.kinematics, s.kinematics);
+        assert_eq!(back.profile, s.profile);
+        assert_eq!(back.sight_retention_seconds, s.sight_retention_seconds);
+    }
+
+    #[test]
+    fn session_save_load_round_trip() {
+        let dir = tempdir().unwrap();
+        let s = full_session();
+        s.save_to_dir(dir.path()).unwrap();
+        let back = SessionManifest::load_from_dir(dir.path()).unwrap();
+        assert_eq!(back.session_id, s.session_id);
+        assert_eq!(back.ordered_capture_ids, s.ordered_capture_ids);
+    }
+
+    #[test]
+    fn session_schema_version_mismatch_errors() {
+        let dir = tempdir().unwrap();
+        let mut s = full_session();
+        s.schema_version = 999;
+        s.save_to_dir(dir.path()).unwrap();
+        let err = SessionManifest::load_from_dir(dir.path()).unwrap_err();
+        assert!(matches!(
+            err,
+            BundleError::UnsupportedSchema { found: 999, .. }
+        ));
+    }
+
+    #[test]
+    fn session_defaults_match_engine_defaults() {
+        let s = SessionManifest::new(
+            "x".into(),
+            "t".into(),
+            DeviceInfo {
+                model: "m".into(),
+                os: None,
+                app_version: None,
+            },
+            0,
+        );
+        // These mirror EngineConfig defaults (sight_window_seconds = 7200,
+        // sight_window_capacity = 50, assumed_max_speed_kn = 0 ↔ Stationary).
+        assert_eq!(s.sight_retention_seconds, 7200);
+        assert_eq!(s.sight_retention_capacity, 50);
+        assert_eq!(s.kinematics, SessionKinematics::Stationary);
+        assert_eq!(s.profile, UseCaseProfile::Custom);
+        assert!(!s.expected_to_fail);
+    }
+
+    #[test]
+    fn intrinsics_source_user_calibration_accepts_session_id_alias() {
+        // Backward-compat: pre-rename bundles wrote `session_id`.
+        let raw = r#"{"kind":"user_calibration","session_id":"abc-123"}"#;
+        let parsed: IntrinsicsSource = serde_json::from_str(raw).unwrap();
+        match parsed {
+            IntrinsicsSource::UserCalibration { calibration_id } => {
+                assert_eq!(calibration_id, "abc-123");
+            }
+            other => panic!("unexpected variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn intrinsics_source_user_calibration_serializes_calibration_id() {
+        let v = IntrinsicsSource::UserCalibration {
+            calibration_id: "abc-123".into(),
+        };
+        let raw = serde_json::to_string(&v).unwrap();
+        assert!(raw.contains("calibration_id"));
+        assert!(!raw.contains("session_id"));
     }
 
     fn write_sidecar(path: &Path, seq: u32, captured_unix_ms: i64) {
