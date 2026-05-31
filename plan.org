@@ -2313,27 +2313,29 @@ references to the regression tests that pin the behavior. See
    Single shared overlay function in `bris-bundle` or
    `bris-streaming` so both call sites use the same code.
    Block merging the Android session-UI PR on this.
-** TODO Linux session create/resume CLI
-   No `bris` subcommand creates or resumes a session today.
-   Operator on a Linux workstation cannot author sessions
-   without the Android app; corpus contributors who replay
-   third-party bundles cannot group them into a session
-   without hand-editing JSON.
+** DONE Linux session create/resume CLI
+   Landed: `bris session new|list|show|attach`.
 
-   Add `bris session new --title <t> [--ap-lat ... --ap-lon ...]
-   [--kinematics stationary|max-speed-kn=<kn>]
-   [--retention-seconds <s>] [--profile <p>]` that writes
-   `<corpus-root>/sessions/<uuid>/session.json` and prints
-   the UUID. Add `bris session list` and `bris session show
-   <uuid>`. Add `bris session attach --session <uuid>
-   --bundle <dir>` to set `bundle.session_id` on an
-   existing capture and append to `ordered_capture_ids`.
+   `bris session new --title <t>` writes
+   `<corpus>/sessions/<UUID>/session.json` and prints the
+   UUID. Flags: `--ap-lat/--ap-lon[/--ap-eye-height-m]`,
+   `--kinematics stationary|max-speed-kn=<f64>`,
+   `--sight-retention-seconds`, `--sight-retention-capacity`,
+   `--profile`, `--notes`, `--expected-to-fail`.
+   `--corpus` selects the root (default `./bris-corpus`).
 
-   When the eventual `bris capture` (Linux live, via
-   `bris-capture`) subcommand lands, it grows
-   `--session <uuid>` and `--new-session` flags reusing
-   this writer. Keeps Android and Linux symmetric on the
-   create side, matching the replay-side symmetry above.
+   `bris session list` and `bris session show <UUID>`
+   inspect.
+
+   `bris session attach --session <UUID> --bundle <DIR>`
+   sets `bundle.session_id`, moves the bundle under
+   `captures/<bundle_id>/` (unless `--in-place`), and
+   appends to `ordered_capture_ids`.
+
+   3 unit tests in `bris-cli`. When the eventual `bris
+   capture` (Linux live, via `bris-capture`) subcommand
+   lands, it can grow `--session <UUID>` / `--new-session`
+   flags reusing the same writer.
 ** TODO Operator-AP-from-map UI
    Tap a point on a map to seed the AP for the next/current
    session. Until this lands, all sessions start cold-start

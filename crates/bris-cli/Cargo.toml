@@ -25,6 +25,7 @@ bris-nav.workspace = true
 bris-nmea.workspace = true
 bris-streaming = { workspace = true, features = ["segmentation"] }
 bris-bundle.workspace = true
+uuid.workspace = true
 bris-capture.workspace = true
 bris-calibrate.workspace = true
 anyhow.workspace = true

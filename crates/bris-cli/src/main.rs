@@ -23,6 +23,7 @@ use bris_almanac::{refraction::Atmosphere, Observer};
 use bris_bundle::{
     enumerate_frames, verify_first_frame_checksum, ApInput, ApProvenance, BundleManifest,
     CaptureInfo, DeviceInfo, Distortion, FramePathPair, GpsTruth, IntrinsicsRecord,
+    SessionKinematics, SessionManifest, UseCaseProfile,
 };
 use bris_calibrate::{
     calibrate, coverage, default_intrinsics_path, detect_corners_in_directory_with_progress,
@@ -105,6 +106,16 @@ enum Command {
     /// approximate observer position; the output is the LOP refined
     /// from your assumed position.
     Replay(ReplayArgs),
+    /// Manage sessions (capture groupings) on the local corpus.
+    ///
+    /// Sessions are the operator-facing grouping for captures
+    /// (one Start/Stop window each). See
+    /// `docs/design/testing_strategy.md` for the model. The
+    /// CLI subcommands let a Linux workstation author and
+    /// inspect sessions — the same authoring surface the
+    /// Android app provides for on-device sessions.
+    #[command(subcommand)]
+    Session(SessionCommand),
     /// Sight log management (stub).
     Log,
     /// Download almanac/catalog/leap-second updates (stub).
@@ -245,6 +256,157 @@ struct CalibrateArgs {
     /// Default: `$XDG_DATA_HOME/bris/intrinsics.toml`.
     #[arg(long)]
     output: Option<PathBuf>,
+}
+
+#[derive(Debug, clap::Subcommand)]
+enum SessionCommand {
+    /// Create a new empty session and print its UUID.
+    New(SessionNewArgs),
+    /// List sessions in the corpus.
+    List(SessionListArgs),
+    /// Print one session's `session.json`.
+    Show(SessionShowArgs),
+    /// Attach an existing capture (bundle directory) to a
+    /// session. Sets `bundle.session_id` and appends to
+    /// `ordered_capture_ids`.
+    Attach(SessionAttachArgs),
+}
+
+#[derive(Debug, clap::Args)]
+struct SessionNewArgs {
+    /// Human-readable title (shown in `bris session list`).
+    #[arg(long)]
+    title: String,
+    /// Operator-entered AP at session create: latitude (deg N).
+    #[arg(long, allow_hyphen_values = true, requires = "ap_lon")]
+    ap_lat: Option<f64>,
+    /// Operator-entered AP at session create: longitude (deg E).
+    #[arg(long, allow_hyphen_values = true, requires = "ap_lat")]
+    ap_lon: Option<f64>,
+    /// Eye-height (m) accompanying the AP. Defaults to 2.0.
+    #[arg(long)]
+    ap_eye_height_m: Option<f64>,
+    /// Kinematics: either `stationary` (default) or
+    /// `max-speed-kn=<f64>`.
+    #[arg(long, default_value = "stationary")]
+    kinematics: KinematicsArg,
+    /// Override `EngineConfig::sight_window_seconds` for
+    /// captures in this session. Defaults to 7200 (2h).
+    #[arg(long)]
+    sight_retention_seconds: Option<u64>,
+    /// Override `EngineConfig::sight_window_capacity` for
+    /// captures in this session. Defaults to 50.
+    #[arg(long)]
+    sight_retention_capacity: Option<u32>,
+    /// Use-case classification. Reserved (today only `custom`
+    /// is wired); see `docs/design/testing_strategy.md`.
+    #[arg(long, default_value = "custom")]
+    profile: ProfileArg,
+    /// Free-text notes.
+    #[arg(long)]
+    notes: Option<String>,
+    /// Adversarial-corpus flag: "no fix is the correct answer".
+    #[arg(long, default_value_t = false)]
+    expected_to_fail: bool,
+    /// Corpus root. Defaults to `./bris-corpus`.
+    #[arg(long)]
+    corpus: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone)]
+enum KinematicsArg {
+    Stationary,
+    MaxSpeedKn(f64),
+}
+
+impl std::str::FromStr for KinematicsArg {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        if s.eq_ignore_ascii_case("stationary") {
+            return Ok(Self::Stationary);
+        }
+        if let Some(rest) = s.strip_prefix("max-speed-kn=") {
+            let kn: f64 = rest
+                .parse()
+                .map_err(|e| format!("max-speed-kn=<f64>: {e}"))?;
+            return Ok(Self::MaxSpeedKn(kn));
+        }
+        Err(format!(
+            "expected `stationary` or `max-speed-kn=<f64>`, got `{s}`"
+        ))
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum ProfileArg {
+    Custom,
+    Marine,
+    Aeronautical,
+    LandBased,
+    Urban,
+}
+
+impl std::str::FromStr for ProfileArg {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Ok(match s.to_ascii_lowercase().as_str() {
+            "custom" => Self::Custom,
+            "marine" => Self::Marine,
+            "aeronautical" => Self::Aeronautical,
+            "land-based" | "land_based" | "landbased" => Self::LandBased,
+            "urban" => Self::Urban,
+            other => return Err(format!("unknown profile `{other}`")),
+        })
+    }
+}
+
+impl From<ProfileArg> for UseCaseProfile {
+    fn from(p: ProfileArg) -> Self {
+        match p {
+            ProfileArg::Custom => Self::Custom,
+            ProfileArg::Marine => Self::Marine,
+            ProfileArg::Aeronautical => Self::Aeronautical,
+            ProfileArg::LandBased => Self::LandBased,
+            ProfileArg::Urban => Self::Urban,
+        }
+    }
+}
+
+#[derive(Debug, clap::Args)]
+struct SessionListArgs {
+    /// Corpus root. Defaults to `./bris-corpus`.
+    #[arg(long)]
+    corpus: Option<PathBuf>,
+}
+
+#[derive(Debug, clap::Args)]
+struct SessionShowArgs {
+    /// Session UUID.
+    session: uuid::Uuid,
+    /// Corpus root. Defaults to `./bris-corpus`.
+    #[arg(long)]
+    corpus: Option<PathBuf>,
+}
+
+#[derive(Debug, clap::Args)]
+struct SessionAttachArgs {
+    /// Session UUID.
+    #[arg(long)]
+    session: uuid::Uuid,
+    /// Path to the capture bundle directory (contains
+    /// `bundle.json`). Will be moved under
+    /// `<corpus>/sessions/<UUID>/captures/<bundle_id>/` and
+    /// its `bundle.json` rewritten with the session back-ref.
+    #[arg(long)]
+    bundle: PathBuf,
+    /// Corpus root. Defaults to `./bris-corpus`.
+    #[arg(long)]
+    corpus: Option<PathBuf>,
+    /// Do not move the bundle; only set the back-reference
+    /// and append to `ordered_capture_ids` (operator already
+    /// arranged the directory).
+    #[arg(long, default_value_t = false)]
+    in_place: bool,
 }
 
 #[derive(Debug, clap::Args)]
@@ -391,6 +553,7 @@ fn main() -> anyhow::Result<()> {
     let raw_config = config::load_config(cli.config.as_deref()).context("load configuration")?;
     match cli.command {
         Command::Replay(args) => run_replay(&args),
+        Command::Session(cmd) => run_session(cmd),
         Command::Capture(args) => run_capture(&args, &raw_config),
         Command::Serve(args) => run_serve(&args, &raw_config),
         Command::Calibrate(args) => run_calibrate(&args),
@@ -1644,5 +1807,239 @@ fn median(values: &[f64]) -> f64 {
         v[n / 2]
     } else {
         0.5 * (v[n / 2 - 1] + v[n / 2])
+    }
+}
+
+// -------------------------------------------------------------
+// `bris session` subcommand
+// -------------------------------------------------------------
+
+fn default_corpus_root() -> PathBuf {
+    PathBuf::from("./bris-corpus")
+}
+
+fn run_session(cmd: SessionCommand) -> anyhow::Result<()> {
+    match cmd {
+        SessionCommand::New(args) => run_session_new(args),
+        SessionCommand::List(args) => run_session_list(args),
+        SessionCommand::Show(args) => run_session_show(args),
+        SessionCommand::Attach(args) => run_session_attach(args),
+    }
+}
+
+fn run_session_new(args: SessionNewArgs) -> anyhow::Result<()> {
+    let corpus = args.corpus.unwrap_or_else(default_corpus_root);
+    let session_id = uuid::Uuid::new_v4();
+    let session_dir = corpus.join("sessions").join(session_id.to_string());
+    if session_dir.exists() {
+        bail!(
+            "session directory already exists (collision?): {}",
+            session_dir.display()
+        );
+    }
+    let created_unix_ms = chrono::Utc::now().timestamp_millis();
+    // bris-cli is the writing device for this session. App
+    // version is the bris-cli crate semver; OS is "linux" since
+    // bris-capture only supports Linux today.
+    let device = DeviceInfo {
+        model: format!("bris-cli ({})", std::env::consts::ARCH),
+        os: Some(std::env::consts::OS.into()),
+        app_version: Some(env!("CARGO_PKG_VERSION").into()),
+    };
+    let mut s = SessionManifest::new(session_id, args.title, device, created_unix_ms);
+    s.notes = args.notes;
+    s.ap_seed = args.ap_lat.zip(args.ap_lon).map(|(lat, lon)| ApInput {
+        lat,
+        lon,
+        eye_height_m: args.ap_eye_height_m.unwrap_or(2.0),
+        provenance: ApProvenance::OperatorEntered,
+    });
+    s.kinematics = match args.kinematics {
+        KinematicsArg::Stationary => SessionKinematics::Stationary,
+        KinematicsArg::MaxSpeedKn(kn) => SessionKinematics::MaxSpeedKn { kn },
+    };
+    if let Some(seconds) = args.sight_retention_seconds {
+        s.sight_retention_seconds = seconds;
+    }
+    if let Some(cap) = args.sight_retention_capacity {
+        s.sight_retention_capacity = cap;
+    }
+    s.profile = args.profile.into();
+    s.expected_to_fail = args.expected_to_fail;
+    s.save_to_dir(&session_dir)
+        .with_context(|| format!("write session.json to {}", session_dir.display()))?;
+    info!(
+        session_id = %session_id,
+        dir = %session_dir.display(),
+        "session created"
+    );
+    println!("{session_id}");
+    Ok(())
+}
+
+fn run_session_list(args: SessionListArgs) -> anyhow::Result<()> {
+    let corpus = args.corpus.unwrap_or_else(default_corpus_root);
+    let sessions_root = corpus.join("sessions");
+    if !sessions_root.exists() {
+        println!("no sessions in {}", sessions_root.display());
+        return Ok(());
+    }
+    let mut found = Vec::new();
+    for entry in std::fs::read_dir(&sessions_root)
+        .with_context(|| format!("read_dir {}", sessions_root.display()))?
+    {
+        let entry = entry?;
+        if !entry.file_type()?.is_dir() {
+            continue;
+        }
+        let dir = entry.path();
+        match SessionManifest::load_from_dir(&dir) {
+            Ok(s) => found.push(s),
+            Err(e) => warn!(dir = %dir.display(), error = ?e, "skipping non-session dir"),
+        }
+    }
+    found.sort_by_key(|s| s.created_unix_ms);
+    if found.is_empty() {
+        println!("no sessions");
+        return Ok(());
+    }
+    println!(
+        "{:<36}  {:<6}  {:>3}  title",
+        "session_id", "expect", "cap"
+    );
+    for s in &found {
+        let expect = if s.expected_to_fail { "FAIL" } else { "ok" };
+        println!(
+            "{:<36}  {:<6}  {:>3}  {}",
+            s.session_id,
+            expect,
+            s.ordered_capture_ids.len(),
+            s.title
+        );
+    }
+    Ok(())
+}
+
+fn run_session_show(args: SessionShowArgs) -> anyhow::Result<()> {
+    let corpus = args.corpus.unwrap_or_else(default_corpus_root);
+    let dir = corpus
+        .join("sessions")
+        .join(args.session.to_string());
+    let s = SessionManifest::load_from_dir(&dir)
+        .with_context(|| format!("load session.json from {}", dir.display()))?;
+    let raw = serde_json::to_string_pretty(&s)?;
+    println!("{raw}");
+    Ok(())
+}
+
+fn run_session_attach(args: SessionAttachArgs) -> anyhow::Result<()> {
+    let corpus = args.corpus.unwrap_or_else(default_corpus_root);
+    let session_dir = corpus
+        .join("sessions")
+        .join(args.session.to_string());
+    let mut session = SessionManifest::load_from_dir(&session_dir)
+        .with_context(|| format!("load session.json from {}", session_dir.display()))?;
+    let mut manifest = BundleManifest::load_from_dir(&args.bundle)
+        .with_context(|| format!("load bundle.json from {}", args.bundle.display()))?;
+    let cap_id = manifest.bundle_id.clone();
+    if session.ordered_capture_ids.iter().any(|c| c == &cap_id) {
+        bail!(
+            "capture {cap_id} already attached to session {}",
+            args.session
+        );
+    }
+    manifest.session_id = Some(session.session_id);
+    let dest = if args.in_place {
+        args.bundle.clone()
+    } else {
+        let dest = session_dir.join("captures").join(&cap_id);
+        if dest.exists() {
+            bail!(
+                "destination already exists: {} (use --in-place to skip move)",
+                dest.display()
+            );
+        }
+        std::fs::create_dir_all(dest.parent().unwrap())?;
+        std::fs::rename(&args.bundle, &dest)
+            .with_context(|| format!("move {} -> {}", args.bundle.display(), dest.display()))?;
+        dest
+    };
+    manifest
+        .save_to_dir(&dest)
+        .with_context(|| format!("rewrite bundle.json in {}", dest.display()))?;
+    session.ordered_capture_ids.push(cap_id.clone());
+    session
+        .save_to_dir(&session_dir)
+        .with_context(|| format!("rewrite session.json in {}", session_dir.display()))?;
+    info!(
+        session_id = %session.session_id,
+        capture_id = %cap_id,
+        "session attached"
+    );
+    Ok(())
+}
+
+#[cfg(test)]
+mod session_cli_tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    fn args_new(corpus: &Path) -> SessionNewArgs {
+        SessionNewArgs {
+            title: "t".into(),
+            ap_lat: None,
+            ap_lon: None,
+            ap_eye_height_m: None,
+            kinematics: KinematicsArg::Stationary,
+            sight_retention_seconds: None,
+            sight_retention_capacity: None,
+            profile: ProfileArg::Custom,
+            notes: None,
+            expected_to_fail: false,
+            corpus: Some(corpus.to_path_buf()),
+        }
+    }
+
+    #[test]
+    fn new_writes_session_json() {
+        let dir = tempdir().unwrap();
+        run_session_new(args_new(dir.path())).unwrap();
+        let entries: Vec<_> = std::fs::read_dir(dir.path().join("sessions"))
+            .unwrap()
+            .collect();
+        assert_eq!(entries.len(), 1);
+    }
+
+    #[test]
+    fn new_with_kinematics_max_speed() {
+        let dir = tempdir().unwrap();
+        let mut a = args_new(dir.path());
+        a.kinematics = KinematicsArg::MaxSpeedKn(7.5);
+        run_session_new(a).unwrap();
+        let sub: PathBuf = std::fs::read_dir(dir.path().join("sessions"))
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        let s = SessionManifest::load_from_dir(&sub).unwrap();
+        match s.kinematics {
+            SessionKinematics::MaxSpeedKn { kn } => assert!((kn - 7.5).abs() < f64::EPSILON),
+            SessionKinematics::Stationary => panic!("unexpected Stationary"),
+        }
+    }
+
+    #[test]
+    fn kinematics_arg_parse() {
+        use std::str::FromStr;
+        assert!(matches!(
+            KinematicsArg::from_str("stationary").unwrap(),
+            KinematicsArg::Stationary
+        ));
+        assert!(matches!(
+            KinematicsArg::from_str("max-speed-kn=5.5").unwrap(),
+            KinematicsArg::MaxSpeedKn(_)
+        ));
+        assert!(KinematicsArg::from_str("nope").is_err());
     }
 }
