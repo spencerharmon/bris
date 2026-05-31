@@ -398,6 +398,70 @@ Rules for agents:
 
 ## Pulling debug captures from the phone
 
+### Importing into the corpus
+
+The corpus (under `bris-corpus/` at the repo root, or any
+directory the operator points `bris replay` at) is a tree of
+sessions and captures:
+
+```
+<corpus-root>/
+  sessions/
+    <session-uuid>/
+      session.json
+      captures/
+        <capture-id>/
+          bundle.json
+          frames/
+            000000000001.pgm
+            000000000001.json
+            ...
+          pbris.log
+```
+
+When pulling debug zips off the phone (per the
+"Pulling debug captures" workflow below), the canonical
+import step is **`unzip -n`**:
+
+```sh
+unzip -n bris-exports/incoming/bris-debug-<cap-id>.zip \
+     -d <corpus-root>/
+```
+
+`-n` (never overwrite) is load-bearing: the same capture-id
+will not produce different contents across pulls, so seeing
+"file exists" warnings is the expected idempotent-import
+signal. If you find yourself reaching for `-o` (overwrite),
+stop — either the zip is corrupted, or you're about to clobber
+an edited session.json with the on-device default.
+
+A zip whose internal nesting predates the session-aware
+writer lands directly under `<corpus-root>/bris-debug-<cap-id>/`
+instead of under a session. Use
+`scripts/synthesize_bundle_json.py` to fabricate a stub
+session + move the capture into place. **Never** rewrite the
+zip's internal structure to match — the zip is the operator's
+backup; rewriting it loses provenance.
+
+Replay them with:
+
+```sh
+bris replay --bundle <corpus-root>/sessions/<uuid>/captures/<cap-id>/
+```
+
+or (once #4 of the testing-strategy stack lands):
+
+```sh
+bris replay --session <session-uuid>           # one session
+bris replay --all-sessions --corpus <root>     # full corpus
+```
+
+The regression harness's K=3 σ-honesty pass rule (described in
+`docs/design/testing_strategy.md`) is the single global gate;
+there are no per-session expectations files.
+
+## Pulling debug captures from the phone (mechanics)
+
 The operator consistently saves debug-buffer zips on the
 phone at `/sdcard/Documents/bris-debug-<ulid>.zip` (the
 `DebugBufferActions.saveAll` "Save buffer" path in the
