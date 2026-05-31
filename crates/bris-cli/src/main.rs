@@ -524,15 +524,11 @@ fn run_replay_session(args: &ReplayArgs, session_id: uuid::Uuid) -> anyhow::Resu
         .corpus
         .clone()
         .unwrap_or_else(|| PathBuf::from("./bris-corpus"));
-    let session_dir = corpus
-        .join("sessions")
-        .join(session_id.to_string());
+    let session_dir = corpus.join("sessions").join(session_id.to_string());
     let session = SessionManifest::load_from_dir(&session_dir)
         .with_context(|| format!("load session.json from {}", session_dir.display()))?;
     if session.ordered_capture_ids.is_empty() {
-        bail!(
-            "session {session_id} has no captures yet (ordered_capture_ids is empty)"
-        );
+        bail!("session {session_id} has no captures yet (ordered_capture_ids is empty)");
     }
     info!(
         session_id = %session.session_id,
@@ -552,8 +548,7 @@ fn run_replay_session(args: &ReplayArgs, session_id: uuid::Uuid) -> anyhow::Resu
         let mut per_capture_args = args.clone();
         per_capture_args.session = None;
         per_capture_args.bundle = Some(bundle_dir);
-        run_replay(&per_capture_args)
-            .with_context(|| format!("replay capture {cap_id}"))?;
+        run_replay(&per_capture_args).with_context(|| format!("replay capture {cap_id}"))?;
     }
     Ok(())
 }
@@ -1875,7 +1870,12 @@ mod session_overlay_tests {
     #[test]
     fn overlay_no_session_json_is_noop() {
         let root = tempdir().unwrap();
-        let bundle_dir = root.path().join("sessions").join("x").join("captures").join("y");
+        let bundle_dir = root
+            .path()
+            .join("sessions")
+            .join("x")
+            .join("captures")
+            .join("y");
         std::fs::create_dir_all(&bundle_dir).unwrap();
         let mut cfg = EngineConfig::new(dummy_observer());
         let before = cfg.sight_window_seconds;
