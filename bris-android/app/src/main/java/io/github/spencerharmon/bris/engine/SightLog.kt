@@ -246,11 +246,31 @@ class SightLog(private val rootDir: File) {
     }
 
     companion object {
-        /** Mount the sight log under `<external-files>/sights/`. */
+        /**
+         * Mount the sight log under `<external-files>/sights/`
+         * (legacy orphan path, used when no active session is
+         * selected).
+         */
         fun forApp(context: Context): SightLog {
             val root = context.getExternalFilesDir(null)
                 ?: context.filesDir
             return SightLog(File(root, "sights"))
+        }
+
+        /**
+         * Mount the sight log under a specific session's
+         * captures tree:
+         * `<external-files>/sessions/<sessionId>/captures/`.
+         *
+         * Each `writeEntry(captureId, ...)` then lands at
+         * `<external-files>/sessions/<sessionId>/captures/<captureId>/`
+         * — the path the bundle schema documents and the
+         * `bris-cli replay --session` walker expects.
+         */
+        fun forSession(context: Context, sessionId: java.util.UUID): SightLog {
+            val root = context.getExternalFilesDir(null) ?: context.filesDir
+            val captures = File(File(File(root, "sessions"), sessionId.toString()), "captures")
+            return SightLog(captures)
         }
 
         /**

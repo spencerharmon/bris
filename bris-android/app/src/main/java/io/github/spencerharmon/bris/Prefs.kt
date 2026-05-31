@@ -67,6 +67,19 @@ class Prefs(private val context: Context) {
      */
     val coarseHemisphereFlow: Flow<String?> = context.dataStore.data.map { it[KEY_COARSE_HEMISPHERE] }
 
+    /**
+     * Operator-selected active session id (UUIDv4 string), or
+     * `null` if no session is currently selected. New captures
+     * land under `<external-files>/sessions/<uuid>/captures/`
+     * when set; the LiveScreen offers "create session" /
+     * "resume session" entry points to populate it.
+     *
+     * When `null` at first-capture press, a default session
+     * named `"Untitled <date>"` is auto-created and made active
+     * so captures are never orphans on disk.
+     */
+    val activeSessionIdFlow: Flow<String?> = context.dataStore.data.map { it[KEY_ACTIVE_SESSION_ID] }
+
     suspend fun setDebugMode(enabled: Boolean) {
         context.dataStore.edit { it[KEY_DEBUG_MODE] = enabled }
     }
@@ -100,6 +113,14 @@ class Prefs(private val context: Context) {
         }
     }
 
+    /** Persist (or clear) the active session id. */
+    suspend fun setActiveSessionId(sessionId: String?) {
+        context.dataStore.edit {
+            if (sessionId == null) it.remove(KEY_ACTIVE_SESSION_ID)
+            else it[KEY_ACTIVE_SESSION_ID] = sessionId
+        }
+    }
+
     /** Get or lazily generate the per-install device UUID. */
     suspend fun deviceUuid(): String {
         val current = context.dataStore.data.map { it[KEY_DEVICE_UUID] }.first()
@@ -117,5 +138,6 @@ class Prefs(private val context: Context) {
         private val KEY_SELECTED_LENS_ID = stringPreferencesKey("selected_lens_id")
         private val KEY_DEBUG_SAVE_URI = stringPreferencesKey("debug_save_uri")
         private val KEY_COARSE_HEMISPHERE = stringPreferencesKey("coarse_hemisphere")
+        private val KEY_ACTIVE_SESSION_ID = stringPreferencesKey("active_session_id")
     }
 }

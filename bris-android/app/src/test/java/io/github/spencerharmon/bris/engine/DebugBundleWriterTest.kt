@@ -187,4 +187,24 @@ class DebugBundleWriterTest {
         assertEquals(12.5, gps.getDouble("lon_sigma_m"), 1e-9)
         assertEquals("android_network", gps.getString("source"))
     }
+
+    @Test
+    fun session_id_emitted_when_set() {
+        val obj = DebugBundleWriter.buildManifestJson(
+            "b",
+            snapshot,
+            placeholderInputs.copy(sessionId = "abc-123"),
+        )
+        assertEquals("abc-123", obj.getString("session_id"))
+    }
+
+    @Test
+    fun session_id_omitted_when_null() {
+        val obj = DebugBundleWriter.buildManifestJson(
+            "b",
+            snapshot,
+            placeholderInputs.copy(sessionId = null),
+        )
+        assertFalse("session_id should be omitted when null", obj.has("session_id"))
+    }
 }

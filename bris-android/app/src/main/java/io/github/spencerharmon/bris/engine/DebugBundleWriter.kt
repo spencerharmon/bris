@@ -71,6 +71,12 @@ object DebugBundleWriter {
         val calibration: CalibrationSource,
         /** Optional ground-truth GPS fix; **never** used as AP. */
         val gpsTruth: GpsInfo? = null,
+        /**
+         * Owning session UUIDv4 (string). When non-null, stamped
+         * into `bundle.session_id` so `bris replay --bundle`
+         * can locate the sibling `session.json` for overlay.
+         */
+        val sessionId: String? = null,
     )
 
     /**
@@ -141,6 +147,8 @@ object DebugBundleWriter {
             .put("capture", capture)
             .put("intrinsics", intrinsics)
             .put("notes", "")
+
+        inputs.sessionId?.let { root.put("session_id", it) }
 
         if (inputs.observer != null) {
             val ap = JSONObject()

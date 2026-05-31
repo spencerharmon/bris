@@ -2336,35 +2336,72 @@ references to the regression tests that pin the behavior. See
    capture` (Linux live, via `bris-capture`) subcommand
    lands, it can grow `--session <UUID>` / `--new-session`
    flags reusing the same writer.
-** TODO Android session UI + on-device session creation
-   Today every Android capture is an orphan (no session
-   back-reference written into `bundle.json`); the
-   `BundleManifest::session_id` field is `Option<Uuid>` and
-   Android leaves it `None`. The Linux side already has the
-   creation surface (`bris session new`); Android needs the
-   equivalent.
+** DONE Android session UI + on-device session creation
+   Landed:
+   - `Session` + `SessionStore` (Kotlin) write JSON identical
+     to `bris_bundle::SessionManifest` (schema_version=1),
+     mounted at `<external-files>/sessions/<UUID>/`. Round-
+     trip JVM tests (`SessionTest`) cover stationary +
+     max-speed kinematics, default factory, missing optional
+     fields, schema-version rejection.
+   - `SessionPickerScreen`: list/create/use sessions; jumps
+     to edit on "New session".
+   - `SessionEditScreen`: title, notes, AP seed (lat/lon/eye-
+     height), kinematics (stationary | max-speed-kn),
+     retention (seconds, capacity), profile, expected-to-fail.
+     Validation matches the Linux CLI (lat ±90°, lon ±180°,
+     positive speed/retention).
+   - LiveScreen "Sessions" button + per-active-session sight
+     log root via `SightLog.forSession(context, uuid)`. New
+     captures land under `<external-files>/sessions/<UUID>/
+     captures/<capture-id>/`.
+   - `CaptureRecorder.onCaptureSaved` callback appends the
+     captured id to `SessionManifest.ordered_capture_ids`.
+   - `DebugBundleWriter.Inputs.sessionId` stamps
+     `bundle.session_id` so replay can locate the sibling
+     `session.json` for overlay.
+   - `defaultEngineConfig(session=...)` overlays
+     `sight_window_seconds`/`sight_window_capacity` (and
+     observer from `ap_seed`) onto the FFI engine config.
+     `assumed_max_speed_kn` cannot be threaded through today;
+     see follow-up TODO. Replay-side overlay already applies
+     it identically, so live↔replay match for the retention
+     half; the kinematics half waits on the FFI surface.
+   - Default-session fallback: pressing Start with no active
+     session auto-creates `Untitled <date>` and makes it
+     active. (Caveat: the first capture pressed in that flow
+     still lands in the orphan `sights/` path because the
+     SightLog binding rebinds on the next recomposition;
+     subsequent captures use the session path. Tracked in
+     plan.org sub-TODO.)
+** TODO Plumb `assumed_max_speed_kn` through `FfiEngineConfig`
+   `bris-streaming::PublicationGateConfig::assumed_max_speed_kn`
+   is not exposed by `FfiEngineConfig`. `bris replay` applies
+   it via `apply_session_overlay`; Android live captures can't.
+   Today every live engine runs with the core default
+   (`0.0`, treated as stationary).
 
-   Concrete pieces:
-   - "New session" / "Resume session" picker in the Settings
-     or Live screen. On creation, write
-     `<external-files>/sessions/<UUID>/session.json` using
-     `bris_bundle::SessionManifest`. UUIDv4 generated
-     on-device.
-   - Editable fields: title, notes, ap_seed (interim:
-     manual lat/lon entry; later: map UI), kinematics,
-     retention, profile, expected_to_fail.
-   - Live capture writes its bundle under
-     `<external-files>/sessions/<UUID>/captures/<capture-id>/`
-     (was `<external-files>/sights/<capture-id>/`) and stamps
-     `bundle.session_id`.
-   - Engine construction overlays the same `SessionManifest`
-     fields onto `EngineConfig` that the Linux replay
-     overlay applies (`sight_retention_*`, `kinematics`),
-     closing the live←→replay symmetry.
-   - Default-session fallback for operators who never
-     explicitly create one: auto-create a session named
-     "Untitled <date>" at first capture press, so captures
-     are never orphans on disk.
+   Add `assumed_max_speed_kn: Option<f64>` to `FfiEngineConfig`,
+   forward into `EngineConfig::publication_gate`, and have
+   `defaultEngineConfig(session = s)` in `LiveScreen` set it
+   from `s.kinematics` so live and replay produce the same
+   inflated σ for moving observers.
+** TODO Default-session-on-first-capture: rebind SightLog before start
+   When the operator presses "Start capture" with no active
+   session, LiveScreen auto-creates one and sets it active,
+   but the `recorder` was constructed in a prior composition
+   with `SightLog.forApp(context)` (the orphan path). The
+   first capture lands in `sights/<capture-id>/` instead of
+   `sessions/<uuid>/captures/<capture-id>/`; subsequent
+   captures use the session path once Compose recomposes.
+
+   Fix: either await composition before calling
+   `recorder.start()`, or have `CaptureRecorder` look up its
+   sight-log root per-capture rather than holding it for
+   life. The latter is cleaner and aligns with the
+   per-capture `bundle.session_id` lookup. Low-stakes UX
+   wart — acceptable for the spike; revisit when the
+   live-session work hits Phase 7.
 ** TODO Operator-AP-from-map UI
    Tap a point on a map to seed the AP for the next/current
    session. Until this lands, all sessions start cold-start

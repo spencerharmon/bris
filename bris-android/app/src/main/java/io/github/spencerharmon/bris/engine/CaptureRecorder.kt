@@ -90,6 +90,7 @@ class CaptureRecorder(
     private val deviceUuidProvider: suspend () -> String,
     private val appVersion: String,
     private val coreVersionProvider: () -> String,
+    private val onCaptureSaved: ((String) -> Unit)? = null,
 ) {
 
     private val _status = MutableStateFlow<CaptureStatus>(CaptureStatus.Idle)
@@ -251,6 +252,7 @@ class CaptureRecorder(
                 coreVersion = coreVersion,
             )
             _status.value = CaptureStatus.Saved(captureDir = captureDir, outcome = outcome)
+            onCaptureSaved?.invoke(captureId)
         } catch (t: Throwable) {
             _status.value = CaptureStatus.Failed(
                 reason = "write failed: ${t.javaClass.simpleName}: ${t.message ?: "?"}",
