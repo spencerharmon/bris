@@ -44,6 +44,7 @@
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
+use uuid::Uuid;
 
 /// Top-level bundle manifest, persisted as `bundle.json` at the
 /// bundle directory root.
@@ -96,7 +97,7 @@ pub struct BundleManifest {
     /// `None` for bundles produced before the session model
     /// existed (orphan captures).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub session_id: Option<String>,
+    pub session_id: Option<Uuid>,
 }
 
 /// Build provenance: which Rust source tree produced the
@@ -164,7 +165,7 @@ pub struct SessionManifest {
     pub schema_version: u32,
     /// Stable session identifier, `UUIDv4` string. The on-disk
     /// directory name matches this value.
-    pub session_id: String,
+    pub session_id: Uuid,
     /// Operator-supplied display title; shown in the
     /// "Resume session" picker. Mutable after creation.
     pub title: String,
@@ -270,12 +271,7 @@ impl SessionManifest {
     /// the `UUIDv4` string, title, device, and (Unix-ms) create
     /// time.
     #[must_use]
-    pub fn new(
-        session_id: String,
-        title: String,
-        device: DeviceInfo,
-        created_unix_ms: i64,
-    ) -> Self {
+    pub fn new(session_id: Uuid, title: String, device: DeviceInfo, created_unix_ms: i64) -> Self {
         Self {
             schema_version: SESSION_SCHEMA_VERSION,
             session_id,
@@ -928,7 +924,7 @@ mod tests {
                 source: "manual".into(),
             }),
             notes: "test bundle".into(),
-            session_id: Some("550e8400-e29b-41d4-a716-446655440000".into()),
+            session_id: Some("550e8400-e29b-41d4-a716-446655440000".parse().unwrap()),
         }
     }
 
@@ -990,7 +986,7 @@ mod tests {
 
     fn full_session() -> SessionManifest {
         let mut s = SessionManifest::new(
-            "550e8400-e29b-41d4-a716-446655440000".into(),
+            "550e8400-e29b-41d4-a716-446655440000".parse().unwrap(),
             "Window-sill sun sights".into(),
             DeviceInfo {
                 model: "TestPhone".into(),
@@ -1048,7 +1044,7 @@ mod tests {
     #[test]
     fn session_defaults_match_engine_defaults() {
         let s = SessionManifest::new(
-            "x".into(),
+            Uuid::nil(),
             "t".into(),
             DeviceInfo {
                 model: "m".into(),

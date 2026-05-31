@@ -209,7 +209,7 @@ object DebugBundleWriter {
                     // can at least correlate two bundles that
                     // ran against the same calibration.
                     .put(
-                        "session_id",
+                        "calibration_id",
                         "operator-${source.intrinsics.width}x${source.intrinsics.height}",
                     )
             is CalibrationSource.Factory -> JSONObject().put("kind", "factory")
