@@ -1903,10 +1903,7 @@ fn run_session_list(args: SessionListArgs) -> anyhow::Result<()> {
         println!("no sessions");
         return Ok(());
     }
-    println!(
-        "{:<36}  {:<6}  {:>3}  title",
-        "session_id", "expect", "cap"
-    );
+    println!("{:<36}  {:<6}  {:>3}  title", "session_id", "expect", "cap");
     for s in &found {
         let expect = if s.expected_to_fail { "FAIL" } else { "ok" };
         println!(
@@ -1922,9 +1919,7 @@ fn run_session_list(args: SessionListArgs) -> anyhow::Result<()> {
 
 fn run_session_show(args: SessionShowArgs) -> anyhow::Result<()> {
     let corpus = args.corpus.unwrap_or_else(default_corpus_root);
-    let dir = corpus
-        .join("sessions")
-        .join(args.session.to_string());
+    let dir = corpus.join("sessions").join(args.session.to_string());
     let s = SessionManifest::load_from_dir(&dir)
         .with_context(|| format!("load session.json from {}", dir.display()))?;
     let raw = serde_json::to_string_pretty(&s)?;
@@ -1934,9 +1929,7 @@ fn run_session_show(args: SessionShowArgs) -> anyhow::Result<()> {
 
 fn run_session_attach(args: SessionAttachArgs) -> anyhow::Result<()> {
     let corpus = args.corpus.unwrap_or_else(default_corpus_root);
-    let session_dir = corpus
-        .join("sessions")
-        .join(args.session.to_string());
+    let session_dir = corpus.join("sessions").join(args.session.to_string());
     let mut session = SessionManifest::load_from_dir(&session_dir)
         .with_context(|| format!("load session.json from {}", session_dir.display()))?;
     let mut manifest = BundleManifest::load_from_dir(&args.bundle)
