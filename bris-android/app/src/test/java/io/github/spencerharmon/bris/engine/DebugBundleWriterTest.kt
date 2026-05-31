@@ -128,7 +128,7 @@ class DebugBundleWriterTest {
             placeholderInputs.copy(calibration = CalibrationSource.Operator(intrinsics)),
         ).getJSONObject("intrinsics").getJSONObject("source")
         assertEquals("user_calibration", src.getString("kind"))
-        assertTrue(src.getString("session_id").startsWith("operator-1280x720"))
+        assertTrue(src.getString("calibration_id").startsWith("operator-1280x720"))
     }
 
     @Test
