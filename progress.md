@@ -566,7 +566,7 @@ left in place for a follow-up that revisits the ordering.
   contributing-frame PGMs + per-frame JSON snapshots +
   pbris.log), plus list + detail review screens with
   delete-images-only and soft-delete affordances. Design
-  doc: `docs/design/sight_session.md`. Operator-facing
+  doc: `docs/design/capture.md`. Operator-facing
   threshold settings UI, frame thumbnails, map preview, and
   the foreground service for backgrounding survival are all
   tracked follow-ups.

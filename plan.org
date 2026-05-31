@@ -1473,7 +1473,7 @@ references to the regression tests that pin the behavior. See
    The mobile sight-capture session needs to copy out the
    exact frames a published fix referenced, before they evict
    from the engine's ring buffer. Engine surface added in the
-   sight-capture spike (see [[file:docs/design/sight_session.md][docs/design/sight_session.md]]):
+   sight-capture spike (see [[file:docs/design/capture.md][docs/design/capture.md]]):
 
    - ~Sight~ gains ~horizon_frame_id~ alongside the existing
      ~source_frame_id~. Same-frame sights set both equal;
@@ -2219,7 +2219,7 @@ references to the regression tests that pin the behavior. See
 ** PARTIAL Sight session UX
    *Done in the sight-capture spike (commits e815b46 .. 9c46333):*
    developer-iteration version of the start/stop session loop.
-   See [[file:docs/design/sight_session.md][docs/design/sight_session.md]] for the design rationale
+   See [[file:docs/design/capture.md][docs/design/capture.md]] for the design rationale
    and on-disk layout.
 
    - Engine + FFI surface: ~PublishedFix.contributing_frame_ids~,
@@ -2293,6 +2293,75 @@ references to the regression tests that pin the behavior. See
 ** TODO Mobile calibration UX
    Guided checkerboard capture or "point at a clear night sky"
    star-field auto-calibration. Persists per-device intrinsics.
+** TODO Engine must consume `SessionManifest` identically on Android live and Linux replay
+   A capture whose live engine ran with
+   `kinematics = MaxSpeedKn { kn: 8.0 }` and
+   `sight_retention_seconds = 3 * 86400` must replay with
+   the same publication-gate σ inflation and the same
+   cross-capture pair window. Today the Android session-UI
+   work (Phase 7) will overlay `SessionManifest` onto
+   `EngineConfig` at live-capture time, but `bris replay`
+   builds `EngineConfig` from CLI flags + bundle only and
+   never reads `session.json`. That asymmetry is silent
+   live-vs-replay divergence.
+
+   Fix: `bris replay --bundle <dir>` follows
+   `bundle.session_id` up to the sibling `session.json`,
+   applies the same overlay (kinematics, retention,
+   ap_seed, profile) before instantiating the engine.
+   `bris replay --session <uuid>` already implies this.
+   Single shared overlay function in `bris-bundle` or
+   `bris-streaming` so both call sites use the same code.
+   Block merging the Android session-UI PR on this.
+** TODO Linux session create/resume CLI
+   No `bris` subcommand creates or resumes a session today.
+   Operator on a Linux workstation cannot author sessions
+   without the Android app; corpus contributors who replay
+   third-party bundles cannot group them into a session
+   without hand-editing JSON.
+
+   Add `bris session new --title <t> [--ap-lat ... --ap-lon ...]
+   [--kinematics stationary|max-speed-kn=<kn>]
+   [--retention-seconds <s>] [--profile <p>]` that writes
+   `<corpus-root>/sessions/<uuid>/session.json` and prints
+   the UUID. Add `bris session list` and `bris session show
+   <uuid>`. Add `bris session attach --session <uuid>
+   --bundle <dir>` to set `bundle.session_id` on an
+   existing capture and append to `ordered_capture_ids`.
+
+   When the eventual `bris capture` (Linux live, via
+   `bris-capture`) subcommand lands, it grows
+   `--session <uuid>` and `--new-session` flags reusing
+   this writer. Keeps Android and Linux symmetric on the
+   create side, matching the replay-side symmetry above.
+** TODO Operator-AP-from-map UI
+   Tap a point on a map to seed the AP for the next/current
+   session. Until this lands, all sessions start cold-start
+   with no operator AP (see `docs/design/testing_strategy.md`).
+   When it lands, `SessionManifest::ap_seed` becomes the on-
+   disk record of what the operator picked; the engine still
+   treats the seed as advisory (subject to re-derivation per
+   `docs/design/replay_modes.md`). Same value threaded into
+   the `EngineConfig` so live fixes and replay agree.
+** TODO Session management UI: list, edit, delete; capture buffer mgmt
+   List sessions (sorted by most-recent capture, displayed by
+   title). Edit any field except `session_id` (title, notes,
+   ap_seed, profile, kinematics, retention overrides). Delete
+   session (drops the entire `sessions/<uuid>/` tree). Drill
+   into a session to list captures; per-capture delete; per-
+   capture-sight delete (already partially covered by
+   `docs/design/capture.md`'s soft-delete affordances).
+   Eventually: storage gauge, free-space warning, bulk delete
+   by age, export-to-zip per session.
+** TODO Use-case profile defaults
+   `SessionManifest::profile` (Marine / Aeronautical / LandBased
+   / Urban / Custom). Today only `Custom` is meaningful; the
+   others are reserved and behave identically. Eventually each
+   profile carries smart defaults for `kinematics` and
+   `sight_retention_*`, and may drive pipeline tuning
+   (e.g. urban profile expects vertical-line horizon
+   providers). Until then, advanced settings / CLI flags let
+   the operator set the underlying parameters directly.
 ** DONE Lens selection (multi-camera Android devices)
    Modern phones expose multiple physical cameras (ultrawide,
    wide, telephoto) through CameraX's logical-camera API. The
@@ -2414,6 +2483,112 @@ references to the regression tests that pin the behavior. See
 ** TODO Mechanical pan rig reference design (servo + 3D-printed mount).
 ** TODO Lunar distance method for time independence.
 ** TODO Cloud/web frontend for offline analysis of uploaded frames.
+** TODO Multi-instance gossip for shared session state
+   Multiple Bris appliances on a single vessel (e.g. five fixed-
+   mount cameras pointed every which way) sharing sight and fix
+   data live, fusing observations from physically distinct
+   vantages into one navigational outcome. Would require a
+   distributed gossip protocol with consensus on session
+   identity, conflict resolution on overlapping sights, and a
+   trust/auth model between peers. Deliberately out of scope
+   for the current single-observer session design
+   (see `docs/design/testing_strategy.md`).
+
+* Phase 8.5: Build provenance & version stamping (testing-revamp prerequisite)
+  Every captured bundle and every replayed sight/fix must be
+  reconstructible back to the exact engine code that produced it.
+  Today nothing in `bundle.json` lets us do this: `device.app_version`
+  is a hand-edited `"0.1.0"` in `bris-android/app/build.gradle.kts`,
+  `bris-ffi::version()` returns the workspace `Cargo.toml` semver
+  (`"0.0.1"`), the reserved `build_timestamp_utc` is hardcoded
+  `None`, and no git SHA is captured anywhere. Two bundles stamped
+  `"0.1.0"` could be a hundred commits apart.
+
+  This phase is a prerequisite for the testing-strategy revamp: the
+  regression corpus is worthless if we can't pin a sight to the
+  engine code that emitted it.
+** TODO `bris-ffi` build script captures git provenance
+   `build.rs` shells out to `git rev-parse HEAD`,
+   `git describe --dirty --always --tags`, and `git rev-list --count
+   HEAD`. Exposes them as env vars (`BRIS_GIT_SHA`,
+   `BRIS_GIT_DESCRIBE`, `BRIS_GIT_DIRTY`, `BRIS_GIT_COMMIT_COUNT`,
+   `BRIS_BUILD_TIMESTAMP`) consumed via `env!`. Hand-rolled (~30
+   lines, zero deps); reject `vergen` to avoid pulling `git2`.
+** TODO Extend `VersionInfo` across the FFI
+   Add `git_sha`, `git_describe`, `git_dirty: bool`, `commit_count`,
+   `build_timestamp_utc` to `bris_ffi::VersionInfo`. Existing
+   `bris_ffi` semver field stays as the workspace semver. Document
+   the FFI surface change in the bindings.
+** TODO `bundle.json` carries a `build` block
+   Additive within `schema_version: 1`. New struct on
+   `bris_bundle::BundleManifest`:
+   #+begin_src json
+   "build": {
+     "git_sha": "795b888...",
+     "git_describe": "v0.0.1-12-g795b888",
+     "git_dirty": false,
+     "commit_count": 142,
+     "build_timestamp_utc": "2026-05-29T23:57:22Z",
+     "bris_ffi_semver": "0.0.1",
+     "android_app_version_name": "0.1.0",
+     "android_version_code": 142,
+     "rustc": "1.94.0",
+     "profile": "release"
+   }
+   #+end_src
+   `device.app_version` stays one cycle for back-compat, then
+   removed.
+** TODO Android consumes build stamp via FFI, not BuildConfig
+   `DebugBundleWriter` calls `uniffi.version()` once at save time;
+   writes the full `build` block. Drop `BRIS_APP_VERSION` from
+   `build.gradle.kts` (or keep only as `android_app_version_name`
+   for human readability).
+** TODO Android `versionCode` derives from commit count
+   `gradle.properties` populated by CI from `git rev-list --count
+   HEAD` so `versionCode` is monotone across nightly builds and
+   Android will accept in-place upgrades. Local builds get a
+   placeholder constant (clearly marked).
+** TODO Engine stamps sight/fix records with engine build
+   Each persisted sight/fix in `bris-streaming::store` carries the
+   git SHA of the engine that produced it. Either an 8-byte truncated
+   SHA in record padding bytes (25..32 in `Sight`, similar for `Fix`)
+   or a one-time header at the top of `current.log`. Per-record is
+   robust to log concatenation; header is cheaper. Resolution TODO
+   when we touch the store format next.
+** TODO Replay logs both capture-build and engine-build
+   `bris replay` emits `capture_build = <sha from bundle>` and
+   `engine_build = <sha from current binary>` in the diagnostics
+   line. CSV summary gains both columns. Regression-test harness
+   gates pass/fail on engine build; capture build is reported but
+   not asserted (the same bundle is replayed against many engine
+   builds).
+** TODO Dirty-tree policy
+   `git_dirty: true` is *recorded*, never *rejected* at capture
+   time (operator captures opportunistically; refusing would lose
+   data). Replay accepts dirty captures with a warning. The
+   regression-test harness *rejects* dirty engine builds for
+   pass/fail assertions but records the result anyway.
+** Open questions
+   - Where exactly to put the per-record engine SHA: repurpose
+     existing padding bytes vs. grow the record? Touching record
+     size is a store-format break; if we're going to break the
+     format we should do it for a real reason. Decide when we next
+     touch the store.
+   - Should `EngineConfig` carry the build stamp so it appears in
+     `EngineDiagnostics`, or is the FFI `version()` call enough?
+     Probably the latter — the diagnostics struct is already large
+     and the FFI call is cheap.
+   - Does `cargo deny check` accept `vergen` if we ever change our
+     mind on the hand-rolled-vs-crate question? Worth checking once
+     so the answer is on file.
+   - CI dirty-build detection on Android: the Gradle build mutates
+     `local.properties` and `gradle.properties` per-run; need to
+     ensure those mutations don't flip `git_dirty: true` falsely.
+     `git update-index --skip-worktree` for the mutated files, or
+     compute dirty against a known-clean subset (`crates/`,
+     `bris-android/app/src/`).
+   - Reproducible builds? Out of scope for this phase; recording
+     `SOURCE_DATE_EPOCH` would be a cheap step toward it.
 
 * Open questions for you
 1. Is there anything in the "Decisions baked in" block at the top that

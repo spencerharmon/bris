@@ -12,14 +12,15 @@ documents go in this directory as design questions are settled.
 - [diagnostic_collection.md](diagnostic_collection.md) — operator-
   initiated diagnostic submission from device to collector; the
   one network surface in Bris.
-- [sight_session.md](sight_session.md) — mobile-only sight-capture
-  session UX: Start/Stop on top of the continuous engine,
-  contributing-frame retrieval, on-device sight log under
-  `<external-files>/sights/`.
+- [capture.md](capture.md) — per-capture (Start/Stop) UX on top
+  of the continuous engine: contributing-frame retrieval,
+  per-capture live-fix sight log under
+  `sessions/<uuid>/captures/<cap-id>/sights/`. A capture
+  belongs to one session (see `testing_strategy.md`).
 - [pre_classification_masking.md](pre_classification_masking.md) —
   draft: reorder per-frame pipeline so day/night classification
   consumes the seg sky-mask and a cheap bright-blob mask,
   rather than averaging the raw middle-band.
 - [testing_strategy.md](testing_strategy.md) — session / corpus
-  layout proposal + cold-start variant matrix. Companion to
-  Phase 8.5 (build provenance) in `plan.org`.
+  layout + cold-start coverage. Companion to Phase 8.5 (build
+  provenance) in `plan.org`.

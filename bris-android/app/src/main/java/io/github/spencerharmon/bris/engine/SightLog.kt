@@ -27,7 +27,7 @@ import java.time.Instant
  * Stored under the app's external-files dir specifically so
  * the operator can pull entries off the device via plain MTP /
  * `adb pull` without `run-as` gymnastics. See AGENTS.md
- * "Where work runs" and `docs/design/sight_session.md` for the
+ * "Where work runs" and `docs/design/capture.md` for the
  * lifecycle.
  *
  * Only operator-captured fixes land here. The continuous
