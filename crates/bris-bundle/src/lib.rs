@@ -271,12 +271,7 @@ impl SessionManifest {
     /// the `UUIDv4` string, title, device, and (Unix-ms) create
     /// time.
     #[must_use]
-    pub fn new(
-        session_id: Uuid,
-        title: String,
-        device: DeviceInfo,
-        created_unix_ms: i64,
-    ) -> Self {
+    pub fn new(session_id: Uuid, title: String, device: DeviceInfo, created_unix_ms: i64) -> Self {
         Self {
             schema_version: SESSION_SCHEMA_VERSION,
             session_id,
