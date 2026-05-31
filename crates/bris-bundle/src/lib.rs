@@ -133,40 +133,6 @@ pub struct BuildInfo {
     pub android_version_code: Option<u32>,
 }
 
-/// Build provenance: which Rust source tree produced the
-/// `bris-ffi` shared object that wrote this bundle.
-///
-/// Populated from `bris_ffi::version()` (which is in turn
-/// populated by `crates/bris-ffi/build.rs` at compile time).
-/// Mirrored across the FFI as `VersionInfo`; this struct is
-/// the persisted form.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct BuildInfo {
-    /// Full git SHA of the source tree at build time, or
-    /// `"unknown"` for non-git builds.
-    pub git_sha: String,
-    /// `git describe --always --tags --dirty` output.
-    pub git_describe: String,
-    /// `true` when the worktree had uncommitted changes at
-    /// build time. Regression baselines refuse dirty builds.
-    pub git_dirty: bool,
-    /// `git rev-list --count HEAD` — monotone commit index.
-    pub commit_count: u32,
-    /// Build-time UTC timestamp, ISO 8601.
-    pub build_timestamp_utc: String,
-    /// Semver of the `bris-ffi` crate at build time.
-    pub bris_ffi_semver: String,
-    /// Android `versionName` from the APK that bundled this
-    /// FFI, when written from the Android shell. `None` for
-    /// non-Android writers (CLI, tests).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub android_version_name: Option<String>,
-    /// Android `versionCode` from the APK that bundled this
-    /// FFI, when written from the Android shell.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub android_version_code: Option<u32>,
-}
-
 /// Current bundle schema version.
 pub const SCHEMA_VERSION: u32 = 1;
 
@@ -658,6 +624,24 @@ pub struct FrameSidecar {
     /// `serde_json::Value`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub diagnostic_snapshot: Option<serde_json::Value>,
+    /// Unit gravity vector in the camera frame at capture time
+    /// (image-right = +x, image-down = +y, lens-forward = +z),
+    /// as reported by the platform's gravity sensor. Replay
+    /// reconstructs the live `Frame::gravity_camera_frame` from
+    /// this; absent means the bundle predates per-frame gravity
+    /// recording and replay falls back to image-down (the
+    /// historical behavior, which silently miscomputes
+    /// artificial-horizon reflection pairs).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gravity_camera_frame: Option<[f64; 3]>,
+    /// Per-frame ground-truth GPS stamp (debug feature). A
+    /// capture running hours at speed has truth that varies
+    /// per frame; the bundle-level `gps_truth` field is
+    /// implicitly wrong for any moving capture, so truth
+    /// lives here. **Never** substituted for `ap_input` at
+    /// engine time; replay scoring is the only consumer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gps_truth: Option<GpsTruth>,
 }
 
 impl FrameSidecar {
@@ -1105,6 +1089,46 @@ mod tests {
         assert!(!raw.contains("session_id"));
     }
 
+    #[test]
+    fn sidecar_round_trips_gravity_and_gps_truth() {
+        let s = FrameSidecar {
+            seq: 0,
+            captured_unix_ms: 1_700_000_000_000,
+            width: 4032,
+            height: 3024,
+            exposure_us: Some(8333),
+            sensor_gain: Some(2.5),
+            diagnostic_snapshot: None,
+            gravity_camera_frame: Some([0.0, 1.0, 0.0]),
+            gps_truth: Some(GpsTruth {
+                lat: 30.1488,
+                lon: -97.8432,
+                lat_sigma_m: 4.0,
+                lon_sigma_m: 4.0,
+                altitude_m: None,
+                altitude_sigma_m: None,
+                captured_unix_ms: 1_700_000_000_000,
+                source: "android_gps".into(),
+                satellites_used: Some(11),
+            }),
+        };
+        let raw = serde_json::to_vec(&s).unwrap();
+        let back: FrameSidecar = serde_json::from_slice(&raw).unwrap();
+        assert_eq!(back.gravity_camera_frame, Some([0.0, 1.0, 0.0]));
+        let g = back.gps_truth.expect("gps_truth round-trip");
+        assert!((g.lat - 30.1488).abs() < 1e-9);
+        assert_eq!(g.satellites_used, Some(11));
+    }
+
+    #[test]
+    fn sidecar_old_schema_loads_without_new_fields() {
+        // Pre-Phase-8.5 bundles wrote no gravity / gps_truth.
+        let raw = r#"{"seq":0,"captured_unix_ms":1700000000000,"width":4032,"height":3024}"#;
+        let s: FrameSidecar = serde_json::from_str(raw).unwrap();
+        assert!(s.gravity_camera_frame.is_none());
+        assert!(s.gps_truth.is_none());
+    }
+
     fn write_sidecar(path: &Path, seq: u32, captured_unix_ms: i64) {
         let s = FrameSidecar {
             seq,
@@ -1114,6 +1138,8 @@ mod tests {
             exposure_us: None,
             sensor_gain: None,
             diagnostic_snapshot: None,
+            gravity_camera_frame: None,
+            gps_truth: None,
         };
         std::fs::write(path, serde_json::to_vec(&s).unwrap()).unwrap();
     }

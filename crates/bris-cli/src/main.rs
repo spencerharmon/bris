@@ -812,6 +812,11 @@ fn run_one_mode(
                 .with_context(|| format!("load {}", pair.pgm.display()))?
                 .with_sensor_gain(gain)
                 .with_source_path(pair.pgm.clone());
+                let frame = if let Some([gx, gy, gz]) = s.gravity_camera_frame {
+                    frame.with_gravity_camera_frame((gx, gy, gz))
+                } else {
+                    frame
+                };
                 if let Err(e) = engine_feed.push_frame(frame) {
                     warn!(error = ?e, frame = %pair.pgm.display(), "replay: push_frame failed");
                 } else {
