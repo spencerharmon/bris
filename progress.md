@@ -9,6 +9,51 @@ For the end-to-end pipeline architecture and data flow, see
 
 ---
 
+## Session UI + rotation: half-landed (2026-06-01)
+
+PRs #46 (session UI) + #47 (display rotation) merged. First
+on-device verification surfaced two regressions plus several
+gaps the audit didn't anticipate:
+
+**Rotation works only without rotate-lock.** A 74-frame Cat
+S62 Pro debug capture spanning a manual rotation showed
+frames 0–41 (4032×3024 landscape) with gravity pointing
+*sideways* in the saved PGMs — the `DisplayManager.
+DisplayListener` never fired because rotate-lock pinned
+`display.rotation`. Frames 42–73 (3024×4032 portrait,
+likely captured after unlocking) were correctly gravity-down.
+Fix tracked in plan.org “Rotation: handle rotate-lock”
+TODO; needs `SensorManager` accelerometer-derived orientation
+instead of `display.rotation`.
+
+**Debug-buffer zip is not canonical.** The “Save buffer”
+button emits flat `bris-debug-<id>/{bundle.json,...}`, not
+`sessions/<UUID>/captures/<id>/...`, and does not include
+the sibling `session.json` in the export. Bundle's
+`session_id` field is populated (back-reference), but
+`unzip -n` against the canonical corpus tree doesn't merge
+correctly. Tracked as two TODOs:
+“Debug-buffer zip writes canonical session layout” and
+“Debug-buffer save appends to session.ordered_capture_ids”.
+
+**SightLogScreen invisible to sessions.** The on-device
+sight-log list still reads only `<external-files>/sights/`,
+so captures saved under an active session (`sessions/<UUID>/
+captures/...`) don’t appear. New TODO
+“SightLogScreen lists per-session captures”.
+
+**CalibrationStore + Exporter remain session-blind.** Less
+urgent (calibration linkage runs via `calibration_id` in
+bundle manifest), but tracked.
+
+`docs/design/capture.md` carries an implementation-status
+callout describing the partial coverage. `AGENTS.md`
+documents the manual workaround for the flat zip layout
+(extract, read session_id, mv into canonical, `adb pull`
+the session.json) until the writer fix lands.
+
+---
+
 ## Stage E cross-frame execution wired (2026-05-28)
 
 `bris-vision` gained `panorama_altitude_for_pair`: composes
