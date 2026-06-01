@@ -23,6 +23,7 @@ import androidx.compose.ui.unit.dp
 import io.github.spencerharmon.bris.engine.BodyLabel
 import io.github.spencerharmon.bris.engine.EngineWrapper
 import io.github.spencerharmon.bris.engine.Exporter
+import io.github.spencerharmon.bris.engine.CaptureCatalog
 import io.github.spencerharmon.bris.engine.SightLog
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -54,10 +55,13 @@ fun SightLogScreen(
 ) {
     val context = LocalContext.current
     val sightLog = remember(context) { SightLog.forApp(context) }
+    val catalog = remember(context) { CaptureCatalog.forApp(context) }
     var rows by remember { mutableStateOf<List<SightLogRow>>(emptyList()) }
+    var groups by remember { mutableStateOf<List<CaptureCatalog.SessionGroup>>(emptyList()) }
     var recent by remember { mutableStateOf<List<FfiSight>>(emptyList()) }
     LaunchedEffect(sightLog) {
         rows = sightLog.list().mapNotNull { dir -> SightLogRow.fromDir(dir) }
+        groups = catalog.listGroups()
     }
     LaunchedEffect(engine) {
         if (engine == null) return@LaunchedEffect
@@ -86,6 +90,48 @@ fun SightLogScreen(
                 verticalArrangement = Arrangement.spacedBy(2.dp),
             ) {
                 items(recent) { s -> RecentSightRow(s) }
+            }
+        }
+        HorizontalDivider(modifier = Modifier.padding(vertical = 12.dp))
+        Text(
+            "Sessions (${groups.count { it.sessionId != null }})",
+            style = androidx.compose.material3.MaterialTheme.typography.titleLarge,
+        )
+        if (groups.isEmpty()) {
+            Text(
+                "No sessions on device. Create one from the Sessions screen.",
+                modifier = Modifier.padding(top = 8.dp),
+            )
+        } else {
+            LazyColumn(
+                modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                items(groups) { g ->
+                    Column(modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
+                        Text(
+                            "${g.title}  (${g.captures.size} captures)",
+                            style = androidx.compose.material3.MaterialTheme.typography.titleMedium,
+                        )
+                        val idLabel = g.sessionId?.toString()?.take(8) ?: "orphan"
+                        Text(
+                            "id $idLabel",
+                            style = androidx.compose.material3.MaterialTheme.typography.bodySmall,
+                        )
+                        g.captures.forEach { cap ->
+                            val kindLabel = when (cap.kind) {
+                                CaptureCatalog.CaptureKind.Bundle -> "bundle"
+                                CaptureCatalog.CaptureKind.SightLog -> "sight-log"
+                                CaptureCatalog.CaptureKind.Unknown -> "unknown"
+                            }
+                            Text(
+                                "  • ${cap.id.take(13)}…  ($kindLabel)",
+                                style = androidx.compose.material3.MaterialTheme.typography.bodySmall,
+                            )
+                        }
+                        HorizontalDivider(modifier = Modifier.padding(top = 4.dp))
+                    }
+                }
             }
         }
         HorizontalDivider(modifier = Modifier.padding(vertical = 12.dp))
