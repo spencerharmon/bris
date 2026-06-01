@@ -163,6 +163,23 @@ by `bris replay --bundle` or `bris replay --session`).
 tooling (review web UI, regression promoter, collector ingest)
 can consume both on-device entries and uploaded submissions.
 
+> **Implementation status (2026-06-01):** This layout is
+> *aspirational* for the debug-buffer save path. Today,
+> `CaptureRecorder.finalize` writes sight-log entries
+> under the canonical `sessions/<UUID>/captures/<cap-id>/`
+> root **iff** an active session is set; otherwise the
+> orphan path `<external-files>/sights/<id>/` is used.
+> The `DebugBufferActions.saveAll` ("Save buffer") writer
+> stamps `bundle.session_id` but does **not** yet land the
+> bundle under `sessions/<UUID>/captures/` and does **not**
+> include a `session.json` copy in the exported zip. Two
+> plan.org TODOs ("Debug-buffer zip writes canonical
+> session layout", "Debug-buffer save appends to
+> session.ordered_capture_ids") track the gap. The
+> `bris-android/` `SightLogScreen` also only enumerates
+> the orphan root; sessions-rooted captures are invisible
+> in the on-device list until that TODO lands.
+
 `fix` sub-object format:
 
 ```json

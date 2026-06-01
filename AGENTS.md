@@ -435,13 +435,50 @@ signal. If you find yourself reaching for `-o` (overwrite),
 stop — either the zip is corrupted, or you're about to clobber
 an edited session.json with the on-device default.
 
+**Known gap as of 2026-06-01 (PRs #46 + #47 merged):** the
+on-device `DebugBufferActions.saveAll` writer still emits
+**flat-layout** zips:
+
+```
+bris-debug-<cap-id>/
+  bundle.json
+  index.jsonl
+  pbris.log
+  frames/...
+```
+
+These **do not** drop into the canonical `sessions/<UUID>/
+captures/<cap-id>/` tree under `unzip -n`. The bundle carries
+`session_id` as a back-reference, but no `session.json` is
+included in the archive, and `bris replay --bundle` against
+the flat-extracted path cannot find a sibling `session.json`
+for overlay. Two follow-up TODOs in `plan.org` track the
+fix ("Debug-buffer zip writes canonical session layout" and
+"Debug-buffer save appends to session.ordered_capture_ids");
+until they land, manually fabricate the canonical layout
+on import:
+
+```sh
+# 1. extract the flat zip
+unzip -n bris-exports/incoming/bris-debug-<cap-id>.zip -d /tmp/
+# 2. read session_id from bundle.json
+SID=$(python3 -c "import json;print(json.load(open('/tmp/bris-debug-<cap-id>/bundle.json'))['session_id'])")
+# 3. move into canonical layout
+mkdir -p <corpus-root>/sessions/$SID/captures/
+mv /tmp/bris-debug-<cap-id> <corpus-root>/sessions/$SID/captures/bris-debug-<cap-id>
+# 4. pull session.json off the device once per session
+adb pull /sdcard/Android/data/io.github.spencerharmon.bris/files/sessions/$SID/session.json \
+  <corpus-root>/sessions/$SID/session.json
+```
+
 A zip whose internal nesting predates the session-aware
-writer lands directly under `<corpus-root>/bris-debug-<cap-id>/`
-instead of under a session. Use
-`scripts/synthesize_bundle_json.py` to fabricate a stub
-session + move the capture into place. **Never** rewrite the
-zip's internal structure to match — the zip is the operator's
-backup; rewriting it loses provenance.
+writer (no `session_id` in `bundle.json`) lands directly
+under `<corpus-root>/bris-debug-<cap-id>/` instead of under
+a session. Use `scripts/synthesize_bundle_json.py` to
+fabricate a stub session + move the capture into place.
+**Never** rewrite the zip's internal structure to match —
+the zip is the operator's backup; rewriting it loses
+provenance.
 
 Replay them with:
 

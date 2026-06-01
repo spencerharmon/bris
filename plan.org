@@ -2336,7 +2336,7 @@ references to the regression tests that pin the behavior. See
    capture` (Linux live, via `bris-capture`) subcommand
    lands, it can grow `--session <UUID>` / `--new-session`
    flags reusing the same writer.
-** DONE Android session UI + on-device session creation
+** PARTIAL Android session UI + on-device session creation
    Landed:
    - `Session` + `SessionStore` (Kotlin) write JSON identical
      to `bris_bundle::SessionManifest` (schema_version=1),
@@ -2353,10 +2353,12 @@ references to the regression tests that pin the behavior. See
      positive speed/retention).
    - LiveScreen "Sessions" button + per-active-session sight
      log root via `SightLog.forSession(context, uuid)`. New
-     captures land under `<external-files>/sessions/<UUID>/
-     captures/<capture-id>/`.
+     sight-log captures land under `<external-files>/sessions/
+     <UUID>/captures/<capture-id>/`.
    - `CaptureRecorder.onCaptureSaved` callback appends the
-     captured id to `SessionManifest.ordered_capture_ids`.
+     captured id to `SessionManifest.ordered_capture_ids`
+     **on sight-log save only**. Debug-buffer save path
+     skips this; see TODO below.
    - `DebugBundleWriter.Inputs.sessionId` stamps
      `bundle.session_id` so replay can locate the sibling
      `session.json` for overlay.
@@ -2374,6 +2376,164 @@ references to the regression tests that pin the behavior. See
      SightLog binding rebinds on the next recomposition;
      subsequent captures use the session path. Tracked in
      plan.org sub-TODO.)
+
+   Not yet landed (audited 2026-06-01, after first on-device
+   verification with PR #46 + #47 merged): the storage
+   contract "all save paths produce the canonical layout
+   `sessions/<UUID>/captures/<cap-id>/...` with `session.json`
+   alongside" is only partially honored. Specifically:
+   - Debug-buffer "Save buffer" zip dumps flat
+     `bris-debug-<id>/{frames/,bundle.json,index.jsonl,
+     pbris.log}`. No `sessions/<UUID>/captures/` nesting; no
+     `session.json` copy. `unzip -n` lands it outside the
+     canonical corpus tree, and `bris replay --bundle` can't
+     find a sibling `session.json` to overlay.
+   - Debug-buffer save does not call
+     `SessionStore.appendCapture(activeUuid, bundleId)`, so
+     the session's `ordered_capture_ids` doesn't list
+     debug-buffer-saved captures even though their
+     `bundle.session_id` points at the session. `bris replay
+     --session <UUID>` then walks an incomplete list.
+   - `SightLogScreen` enumerates only `<external-files>/
+     sights/` (the orphan root). Captures saved under an
+     active session (`sessions/<UUID>/captures/...`) are
+     invisible in the on-device sight-log UI.
+   - `CalibrationStore` writes are session-blind
+     (`<files>/calibration/<lensId>/<WxH>/<ulid>/`). No
+     session prefix, no `session.json` copy in calibration
+     exports.
+   - `Exporter.exportCalibrationSession` and
+     `Exporter.exportDebugCapture` mirror into
+     `<external-files>/exports/yyyy/mm/dd/...`; also session-
+     blind, no `session.json`.
+
+   Tracked individually below.
+** TODO Collapse capture save paths (umbrella refactor)
+   Today the live screen exposes two parallel save paths and
+   neither produces the canonical layout the operator
+   expects:
+
+   1. Start/Stop button → `CaptureRecorder.finalize` writes
+      a sight-log entry (`manifest.json` + `media/`) under
+      `sessions/<UUID>/captures/<cap-id>/`. **Saves frame
+      bytes only when a fix was published.** No-fix
+      captures are empty manifests with no pixels.
+
+   2. "Save buffer" button → `DebugBufferActions.saveAll`
+      zips an app-lifetime singleton `DebugCaptureBuffer`
+      that accumulates frames whenever Debug Capture is
+      ON in settings. Session-blind. Spans Start/Stop
+      boundaries, spans session creation, spans days.
+      Lands as flat `bris-debug-<id>/...` in
+      `/sdcard/Documents/`, not under any session.
+
+   First on-device verification (2026-06-01) made the
+   gap obvious: the operator ran three Start/Stop captures
+   (all no-fix, so three empty manifests) and pressed
+   "Save buffer" to recover the actual pixels. The export
+   contained 74 frames spanning two days, including
+   frames captured *before* the session was created. The
+   session.json wasn't in the zip. Bundle.session_id
+   pointed at the session correctly but everything else
+   about the layout was wrong.
+
+   Refactor:
+   - `CaptureRecorder` writes **every analyzer frame seen
+     during Start→Stop** into the capture directory's
+     `frames/` subtree, regardless of fix outcome. Engine
+     still gets its independent push of those frames in
+     parallel; the on-disk write is a tap, not a
+     replacement.
+   - `bundle.json` (the schema-versioned manifest) is
+     written at Stop time from `CaptureRecorder.finalize`,
+     with the same content `DebugBundleWriter` produces
+     today. Capture directory is now a full bundle, not a
+     sight-log stub.
+   - `appendCapture(activeUuid, captureId)` fires on
+     **every** Stop, fix or no-fix.
+   - `SessionStore.appendCapture` already idempotent.
+   - `DebugCaptureBuffer` either deleted or repurposed
+     as a tiny ring (~30s) used by an explicit
+     "Emergency snapshot" button that produces an orphan
+     capture under the active session. If kept, it must
+     reset on Start and at session-switch time.
+   - `DebugBundleWriter` becomes a function called from
+     `CaptureRecorder.finalize`, not from
+     `DebugBufferActions`.
+   - `DebugBufferActions.saveAll` either deleted or
+     reduced to a thin wrapper that zips the existing
+     capture directory (no separate buffer).
+   - Export: a separate "Share capture" action zips
+     `sessions/<UUID>/{session.json, captures/<cap-id>/}`
+     so `unzip -n` lands it canonically. Bytes already on
+     disk; this is pure SAF/zip glue.
+
+   This refactor obsoletes three previously-tracked TODOs:
+   - "Debug-buffer zip writes canonical session layout"
+     (no debug-buffer save path remains).
+   - "Debug-buffer save appends to session.ordered_capture_ids"
+     (appendCapture always fires from
+     `CaptureRecorder.finalize`).
+   - "Default-session-on-first-capture: rebind SightLog
+     before start" (`CaptureRecorder` resolves the
+     destination path at finalize, no stale binding).
+
+   The result: "Save" means one thing. The Start/Stop
+   window IS the recording boundary. The canonical layout
+   the docs describe matches what the code produces.
+** TODO SightLogScreen lists per-session captures
+   `SightLogScreen` (`ui/SightLogScreen.kt:56`) calls
+   `SightLog.forApp(context)` and enumerates only
+   `<external-files>/sights/`. Captures saved under an
+   active session land at `<external-files>/sessions/<UUID>/
+   captures/<cap-id>/` and are invisible.
+
+   Fix: enumerate `<external-files>/sessions/*/captures/*/`
+   as well, group by session (show session title + capture
+   count). Keep the orphan `sights/` group as a separate
+   top-level entry. Sort sessions by `session.json`
+   `created_unix_ms` descending; within a session, sort
+   captures by their entry timestamp.
+** TODO CalibrationStore writes under sessions/
+   `CalibrationStore` (`engine/CalibrationStore.kt:55-89`)
+   writes `<files>/calibration/<lensId>/<WxH>/<ulid>/`. No
+   session prefix. A calibration session done while an
+   active capture session exists has no on-disk linkage to
+   that session.
+
+   Two questions to resolve before doing this:
+   1. Should calibration sessions live *inside* a capture
+      session (`sessions/<UUID>/calibration/<lensId>/...`)
+      or as a peer (`sessions/<UUID>/captures/cal-<ulid>/`
+      treating calibration as a special capture kind)?
+   2. Backward compatibility: existing on-device
+      calibrations under `<files>/calibration/...` must keep
+      working. A read-through fallback in
+      `CalibrationStore.load` is fine.
+
+   Until decided: calibration stays session-blind. The
+   on-disk linkage works via the `intrinsics.source.
+   calibration_id` in the bundle manifest (already wired).
+** TODO Exporter share-capture action under sessions/
+   Subsumed by the capture-save-paths refactor above.
+   `Exporter.exportDebugCapture` becomes a thin SAF/zip
+   wrapper that bundles
+   `sessions/<UUID>/{session.json, captures/<cap-id>/}`
+   into a self-contained zip that drops canonically under
+   `unzip -n`. No new layout, no new mirror; just pack the
+   bytes that are already where they should be.
+** TODO Exporter paths thread session id
+   `Exporter.exportDebugCapture` and
+   `Exporter.exportCalibrationSession` mirror into
+   `<external-files>/exports/yyyy/mm/dd/<kind>-<ulid>/`. No
+   session prefix, no `session.json` copy. Less urgent than
+   the SAF "Save buffer" path because operators interact
+   with the SAF path day-to-day; the in-app exporter is the
+   submission-pipeline target.
+
+   Fix follows the same shape as the debug-buffer-zip fix:
+   land the export under a `sessions/<UUID>/` prefix and
+   copy `session.json` next to the kind directory.
 ** TODO Plumb `assumed_max_speed_kn` through `FfiEngineConfig`
    `bris-streaming::PublicationGateConfig::assumed_max_speed_kn`
    is not exposed by `FfiEngineConfig`. `bris replay` applies
@@ -2386,22 +2546,42 @@ references to the regression tests that pin the behavior. See
    `defaultEngineConfig(session = s)` in `LiveScreen` set it
    from `s.kinematics` so live and replay produce the same
    inflated σ for moving observers.
-** TODO Default-session-on-first-capture: rebind SightLog before start
-   When the operator presses "Start capture" with no active
-   session, LiveScreen auto-creates one and sets it active,
-   but the `recorder` was constructed in a prior composition
-   with `SightLog.forApp(context)` (the orphan path). The
-   first capture lands in `sights/<capture-id>/` instead of
-   `sessions/<uuid>/captures/<capture-id>/`; subsequent
-   captures use the session path once Compose recomposes.
+** TODO Rotation: handle rotate-lock (display.rotation stays stale)
+   PR #47 wired `ImageAnalysis.setTargetRotation(display.
+   rotation)` + a `DisplayManager.DisplayListener` that
+   updates on `onDisplayChanged`. On-device verification
+   2026-06-01 (Cat S62 Pro, Android 11) shows the design
+   works **only when rotate-lock is off**.
 
-   Fix: either await composition before calling
-   `recorder.start()`, or have `CaptureRecorder` look up its
-   sight-log root per-capture rather than holding it for
-   life. The latter is cleaner and aligns with the
-   per-capture `bundle.session_id` lookup. Low-stakes UX
-   wart — acceptable for the spike; revisit when the
-   live-session work hits Phase 7.
+   Empirical: a 74-frame debug capture spanning a rotation
+   showed frames 0–41 stored landscape 4032×3024 with
+   gravity pointing sideways in the saved PGMs, frames
+   42–73 stored portrait 3024×4032 with gravity-down
+   correct. The transition coincided with the operator
+   physically rotating the phone *after* unlocking rotate-
+   lock, suggesting the analyzer was getting
+   `rotationDegrees=0` for the entire first segment because
+   `display.rotation` was pinned by the system rotate-lock.
+
+   Fix: stop trusting `display.rotation` as a proxy for
+   physical orientation. Subscribe to
+   `SensorManager.TYPE_ACCELEROMETER` (or
+   `TYPE_DEVICE_ORIENTATION` where available, API 30+) and
+   derive the discrete 0/90/180/270 from the gravity
+   vector. Call `imageAnalysis.setTargetRotation(...)` from
+   that derived rotation instead. Preview can keep using
+   `display.rotation` if the operator wants the preview to
+   stay locked even while analyzer follows the device — or
+   we drive both from the same source.
+
+   Open question: this is the same sensor source that
+   `FrameSidecar.gravity_camera_frame` is supposed to come
+   from (still TODO). Doing them together is cheaper than
+   doing them separately. Recommend bundling the
+   accelerometer subscription into a single
+   `OrientationSource` that drives both the rotation choice
+   and the per-frame gravity vector.
+** TODO Plumb `assumed_max_speed_kn` through `FfiEngineConfig`
 ** TODO Operator-AP-from-map UI
    Tap a point on a map to seed the AP for the next/current
    session. Until this lands, all sessions start cold-start
