@@ -850,19 +850,13 @@ private fun placeholderIntrinsicsFor(width: Int, height: Int): FfiIntrinsics {
  * Placeholder engine config. Observer is the dev default
  * (equator/Greenwich, 2 m eye height); real callers will read
  * the operator's stored observer settings.
- */
-/**
- * Placeholder engine config. Observer is the dev default
- * (equator/Greenwich, 2 m eye height); real callers will read
- * the operator's stored observer settings.
  *
  * When [session] is non-null, session-level retention overrides
  * apply: `sight_window_seconds` / `sight_window_capacity` come
- * from the session. `kinematics`→`assumed_max_speed_kn` is
- * **not** yet plumbed through the FFI (the field isn't on
- * `FfiEngineConfig`); see plan.org "Plumb assumed_max_speed_kn
- * through FFI" TODO. Replay still applies it; live engine
- * defaults to 0 kn until the FFI surface lands.
+ * from the session, and `kinematics`→`assumed_max_speed_kn`
+ * is plumbed through the FFI (paired with the replay-side
+ * `apply_session_overlay`, this closes the live↔replay
+ * symmetry).
  */
 private fun defaultEngineConfig(
     coarseHemisphere: String? = null,
@@ -880,20 +874,16 @@ private fun defaultEngineConfig(
     minFixPublicationIntervalMs = 1000u,
     inputRingCapacity = 120u,
     segmentationModelPath = null,
-    // Per-stage analysis resolution (plan.org Phase 2 / Per-
-    // stage-resolution step 3b + the long-edge follow-up):
-    // leave the explicit width/height pair null so the engine
-    // falls back to its long-edge cap, which the core defaults
-    // to 1280 px. Horizon detectors saturate well below 1280
-    // on the long edge — gradient SNR is set by the sky-sea
-    // contrast, not pixel count, and segmentation gets worse
-    // above its training resolution. Passing the cap
-    // explicitly here keeps Kotlin honest about the contract
-    // (and would let a future Settings toggle override it).
     horizonAnalysisWidth = null,
     horizonAnalysisHeight = null,
     horizonAnalysisMaxLongEdgePx = 1280u,
     coldStartCoarseHemisphere = coarseHemisphere,
+    assumedMaxSpeedKn = session?.kinematics?.let {
+        when (it) {
+            io.github.spencerharmon.bris.engine.Session.Kinematics.Stationary -> 0.0
+            is io.github.spencerharmon.bris.engine.Session.Kinematics.MaxSpeedKn -> it.kn
+        }
+    },
 )
 
 /**
