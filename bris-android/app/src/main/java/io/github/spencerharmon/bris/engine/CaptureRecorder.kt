@@ -91,6 +91,21 @@ class CaptureRecorder(
     private val appVersion: String,
     private val coreVersionProvider: () -> String,
     private val onCaptureSaved: ((String) -> Unit)? = null,
+    /**
+     * Returns the on-disk directory the capture's bundle
+     * payload should be written to. The recorder writes
+     * `frames/`, `index.jsonl`, and `bundle.json` here
+     * (in addition to the sight-log entry produced by
+     * `SightLog.writeEntry`). `null` disables the streaming
+     * frame-tap and bundle write (legacy behavior).
+     */
+    private val captureDirProvider: ((String) -> java.io.File)? = null,
+    /**
+     * Builds the [`DebugBundleWriter.Inputs`] used for the
+     * per-capture `bundle.json` write at finalize. Called
+     * once at finalize, after the frame writer is closed.
+     */
+    private val bundleInputsProvider: (() -> DebugBundleWriter.Inputs)? = null,
 ) {
 
     private val _status = MutableStateFlow<CaptureStatus>(CaptureStatus.Idle)
@@ -103,6 +118,32 @@ class CaptureRecorder(
     private var sustainedGreenStartMs: Long? = null
     private var captureId: String = ""
     private var captureStartedAtMs: Long = 0L
+    private var frameWriter: CaptureFrameWriter? = null
+    private var captureDir: java.io.File? = null
+
+    /**
+     * Per-analyzer-frame tap. LiveScreen wires this as
+     * `FrameAnalyzer.captureFrameTap` so every frame seen
+     * during Start→Stop lands in the capture directory's
+     * `frames/` regardless of fix outcome. No-op when the
+     * recorder isn't currently capturing.
+     */
+    fun onAnalyzerFrame(frame: uniffi.bris_ffi.FfiFrame) {
+        val writer = frameWriter ?: return
+        try {
+            writer.appendFrame(
+                width = frame.width.toInt(),
+                height = frame.height.toInt(),
+                pixels = frame.pixels,
+                capturedUnixMs = frame.capturedUnixMs.toLong(),
+            )
+        } catch (t: Throwable) {
+            android.util.Log.w(
+                TAG,
+                "frame tap drop: ${t.javaClass.simpleName}: ${t.message ?: "?"}",
+            )
+        }
+    }
 
     /**
      * Begin a session. No-op if a session is already active —
@@ -122,6 +163,14 @@ class CaptureRecorder(
         bestVerdict = FixVerdict.RED
         pbrisLines.clear()
         sustainedGreenStartMs = null
+
+        // Open the streaming frame writer for this capture.
+        // captureDirProvider == null → legacy mode, no
+        // frame tap, no bundle.json.
+        captureDir = captureDirProvider?.invoke(captureId)?.also { dir ->
+            dir.mkdirs()
+            frameWriter = CaptureFrameWriter(dir)
+        }
 
         _status.value = CaptureStatus.Capturing(
             startedAtMs = captureStartedAtMs,
@@ -242,7 +291,7 @@ class CaptureRecorder(
         try {
             val deviceUuid = deviceUuidProvider()
             val coreVersion = coreVersionProvider()
-            val captureDir = sightLog.writeEntry(
+            val sightDir = sightLog.writeEntry(
                 captureId = captureId,
                 outcome = outcome,
                 frames = frames,
@@ -251,12 +300,55 @@ class CaptureRecorder(
                 appVersion = appVersion,
                 coreVersion = coreVersion,
             )
-            _status.value = CaptureStatus.Saved(captureDir = captureDir, outcome = outcome)
+
+            // Close the streaming frame writer (if any) and
+            // emit `bundle.json` into the capture directory.
+            // This is what makes the capture self-contained:
+            // every analyzer frame seen during Start→Stop is
+            // already on disk (via the frame tap), and now
+            // the manifest gets written alongside.
+            val writer = frameWriter
+            val dir = captureDir
+            if (writer != null && dir != null) {
+                writer.close()
+                frameWriter = null
+                val inputs = bundleInputsProvider?.invoke()
+                if (inputs != null) {
+                    val frameCount = writer.frameCount()
+                    val startedMs = writer.startedUnixMs() ?: captureStartedAtMs
+                    val endedMs = writer.endedUnixMs() ?: System.currentTimeMillis()
+                    val snap = DebugCaptureBuffer.CaptureSnapshot(
+                        frameCount = frameCount.toLong(),
+                        startedUnixMs = startedMs,
+                        endedUnixMs = endedMs,
+                        // CaptureRecorder doesn't compute a frame
+                        // hash today; bundle integrity verification
+                        // via blake3 is reserved for the share-
+                        // capture export path. Empty string =
+                        // "not recorded" downstream.
+                        firstFrameBlake3 = "",
+                        firstFrameWidth = 0,
+                        firstFrameHeight = 0,
+                    )
+                    DebugBundleWriter.write(
+                        bundleDir = dir,
+                        bundleId = captureId,
+                        snapshot = snap,
+                        inputs = inputs,
+                    )
+                }
+            }
+
+            _status.value = CaptureStatus.Saved(captureDir = sightDir, outcome = outcome)
+            // ALWAYS append, fix-or-no-fix. The capture
+            // happened on disk regardless of outcome.
             onCaptureSaved?.invoke(captureId)
         } catch (t: Throwable) {
             _status.value = CaptureStatus.Failed(
                 reason = "write failed: ${t.javaClass.simpleName}: ${t.message ?: "?"}",
             )
+            runCatching { frameWriter?.close() }
+            frameWriter = null
         } finally {
             // Stop the per-session collector + watchdog. We
             // schedule the cancel in the parent scope so the
@@ -282,6 +374,7 @@ class CaptureRecorder(
 
     companion object {
         private const val WATCHDOG_TICK_MS = 200L
+        private const val TAG = "CaptureRecorder"
     }
 }
 
