@@ -290,6 +290,22 @@ pub struct FfiEngineConfig {
     /// results are not auto-published). Wires through to
     /// [`bris_streaming::ColdStartEngineConfig::coarse_hemisphere`].
     pub cold_start_coarse_hemisphere: Option<String>,
+
+    /// Optional override for
+    /// [`bris_streaming::PublicationGateConfig::assumed_max_speed_kn`].
+    /// When `Some(kn)`, the engine inflates published-fix
+    /// σ_major by `kn * oldest_sight_age_seconds / 3600` to
+    /// account for observer motion. `None` keeps the core
+    /// default (0.0 = stationary observer).
+    ///
+    /// Mirrors the `SessionKinematics`→`assumed_max_speed_kn`
+    /// overlay that `bris replay` applies via
+    /// `apply_session_overlay`, closing the live↔replay
+    /// symmetry: an Android live capture and an offline
+    /// replay of the same bundle produce identical σ
+    /// inflation when the operator's session declares a
+    /// non-zero kinematics bound.
+    pub assumed_max_speed_kn: Option<f64>,
 }
 
 impl FfiEngineConfig {
@@ -335,6 +351,14 @@ impl FfiEngineConfig {
         }
         if let Some(h) = self.cold_start_coarse_hemisphere {
             cfg.cold_start.coarse_hemisphere = Some(parse_hemisphere(&h)?);
+        }
+        if let Some(kn) = self.assumed_max_speed_kn {
+            if !kn.is_finite() || kn < 0.0 {
+                return Err(FfiError::InvalidArgument {
+                    detail: format!("assumed_max_speed_kn must be ≥ 0 and finite; got {kn}"),
+                });
+            }
+            cfg.publication_gate.assumed_max_speed_kn = kn;
         }
         Ok(cfg)
     }
@@ -1848,5 +1872,79 @@ mod bundle_writer_tests {
         )
         .unwrap_err();
         assert!(matches!(err, FfiError::InvalidArgument { .. }));
+    }
+}
+
+#[cfg(test)]
+mod kinematics_overlay_tests {
+    use super::*;
+
+    fn base_cfg() -> FfiEngineConfig {
+        FfiEngineConfig {
+            observer: FfiObserver {
+                latitude_deg: 0.0,
+                longitude_deg: 0.0,
+                eye_height_m: 2.0,
+                eye_height_sigma_m: 0.5,
+            },
+            stitching_window_seconds: 2.0,
+            sight_window_seconds: 600.0,
+            sight_window_capacity: 10,
+            min_fix_publication_interval_ms: 1000,
+            input_ring_capacity: 120,
+            segmentation_model_path: None,
+            horizon_analysis_width: None,
+            horizon_analysis_height: None,
+            horizon_analysis_max_long_edge_px: None,
+            cold_start_coarse_hemisphere: None,
+            assumed_max_speed_kn: None,
+        }
+    }
+
+    #[test]
+    fn none_preserves_core_default() {
+        let cfg = base_cfg().into_core().unwrap();
+        assert!((cfg.publication_gate.assumed_max_speed_kn - 0.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn some_overrides_to_value() {
+        let mut c = base_cfg();
+        c.assumed_max_speed_kn = Some(8.5);
+        let cfg = c.into_core().unwrap();
+        assert!((cfg.publication_gate.assumed_max_speed_kn - 8.5).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn negative_rejected() {
+        let mut c = base_cfg();
+        c.assumed_max_speed_kn = Some(-1.0);
+        let err = c.into_core().unwrap_err();
+        assert!(matches!(err, FfiError::InvalidArgument { .. }));
+    }
+
+    #[test]
+    fn nan_rejected() {
+        let mut c = base_cfg();
+        c.assumed_max_speed_kn = Some(f64::NAN);
+        let err = c.into_core().unwrap_err();
+        assert!(matches!(err, FfiError::InvalidArgument { .. }));
+    }
+
+    #[test]
+    fn infinity_rejected() {
+        let mut c = base_cfg();
+        c.assumed_max_speed_kn = Some(f64::INFINITY);
+        let err = c.into_core().unwrap_err();
+        assert!(matches!(err, FfiError::InvalidArgument { .. }));
+    }
+
+    #[test]
+    fn zero_explicit_overrides_to_zero() {
+        // Explicit Some(0.0) is honored; degenerate but valid.
+        let mut c = base_cfg();
+        c.assumed_max_speed_kn = Some(0.0);
+        let cfg = c.into_core().unwrap();
+        assert!((cfg.publication_gate.assumed_max_speed_kn - 0.0).abs() < f64::EPSILON);
     }
 }
