@@ -120,11 +120,16 @@ object DebugBundleWriter {
 
         val capture = JSONObject()
             // Frames written by `DebugCaptureBuffer` are
-            // gravity-up already (the YUV path declares the
-            // sensor as identity-rotation; CameraX's
-            // `targetRotation` is applied upstream of the
-            // analyzer). Declare 0 here and record the same
-            // value in `pre_rotation_was_deg` for audit.
+            // gravity-up: `FrameAnalyzer` reads
+            // `ImageProxy.imageInfo.rotationDegrees` and rotates
+            // the Y plane (and intrinsics cx/cy/fx/fy) before
+            // pushing to the engine. `CameraSurface` sets the
+            // analyzer's `targetRotation` to the current display
+            // rotation at bind time and re-binds on
+            // `DisplayManager.DisplayListener.onDisplayChanged`,
+            // so portrait ↔ landscape rotation is honored.
+            // Declare 0 here and record the same value in
+            // `pre_rotation_was_deg` for audit.
             .put("source_rotation_deg", 0)
             .put("pre_rotation_was_deg", 0)
             .put("frame_count", snapshot.frameCount)

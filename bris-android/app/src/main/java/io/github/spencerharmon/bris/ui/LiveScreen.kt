@@ -450,12 +450,49 @@ private fun CameraSurface(
     val analyzerExecutor = remember { Executors.newSingleThreadExecutor() }
     val cameraSelector = remember(lensId) { LensCatalog.selectorFor(lensId) }
 
-    LaunchedEffect(captureActive, lifecycleOwner, cameraSelector, captureSize) {
+    // Track the current display rotation reactively. We update
+    // it on every display-change event (rotate-lock toggle,
+    // physical rotation while unlocked) and pass it as a key to
+    // the bind LaunchedEffect so the use cases rebind with the
+    // correct targetRotation. Both Preview (ViewPort) and
+    // ImageAnalysis honor the value: the analyzer's incoming
+    // ImageProxy.imageInfo.rotationDegrees becomes the
+    // rotation-from-sensor-to-display delta, and FrameAnalyzer
+    // rotates the Y plane accordingly before pushing to the
+    // engine.
+    val displayManager = remember(context) {
+        context.getSystemService(android.content.Context.DISPLAY_SERVICE)
+            as android.hardware.display.DisplayManager
+    }
+    val display = remember(context, previewView) {
+        // PreviewView's attached display is the source of truth
+        // for Camera2's notion of "the surface's rotation";
+        // fall back to the default display before attach.
+        previewView.display
+            ?: displayManager.getDisplay(android.view.Display.DEFAULT_DISPLAY)
+    }
+    var displayRotation by remember { mutableStateOf(display?.rotation ?: 0) }
+    androidx.compose.runtime.DisposableEffect(displayManager, display) {
+        val listener = object : android.hardware.display.DisplayManager.DisplayListener {
+            override fun onDisplayAdded(displayId: Int) = Unit
+            override fun onDisplayRemoved(displayId: Int) = Unit
+            override fun onDisplayChanged(displayId: Int) {
+                if (display != null && displayId == display.displayId) {
+                    displayRotation = display.rotation
+                }
+            }
+        }
+        displayManager.registerDisplayListener(listener, null)
+        onDispose { displayManager.unregisterDisplayListener(listener) }
+    }
+
+    LaunchedEffect(captureActive, lifecycleOwner, cameraSelector, captureSize, displayRotation) {
         val provider = ProcessCameraProvider.getInstance(context).get()
         provider.unbindAll()
-        val preview = Preview.Builder().build().also {
-            it.setSurfaceProvider(previewView.surfaceProvider)
-        }
+        val preview = Preview.Builder()
+            .setTargetRotation(displayRotation)
+            .build()
+            .also { it.setSurfaceProvider(previewView.surfaceProvider) }
         // Pin every use case to the same crop rectangle. Without
         // a shared ViewPort, PreviewView shows the full sensor
         // crop while ImageAnalysis sees a different one — the
@@ -463,13 +500,14 @@ private fun CameraSurface(
         // analyzer would be analyzing a different frame.
         val viewport = ViewPort.Builder(
             CameraConstants.aspectRatioOf(captureSize),
-            preview.targetRotation,
+            displayRotation,
         )
             .setScaleType(ViewPort.FIT)
             .build()
         if (captureActive) {
             val analysis = ImageAnalysis.Builder()
                 .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+                .setTargetRotation(displayRotation)
                 .setResolutionSelector(
                     ResolutionSelector.Builder()
                         .setResolutionStrategy(

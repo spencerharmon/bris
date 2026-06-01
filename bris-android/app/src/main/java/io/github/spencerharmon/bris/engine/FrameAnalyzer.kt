@@ -73,9 +73,22 @@ class FrameAnalyzer(
 
     override fun analyze(image: ImageProxy) {
         try {
+            // CameraX sets `rotationDegrees` to the rotation
+            // the analyzer must apply to the buffer to land it
+            // at the use case's `targetRotation` (which we tie
+            // to the device's display rotation; see
+            // `CameraSurface` in `LiveScreen`). The Y bytes in
+            // `image.image.planes[0]` are *not* pre-rotated by
+            // CameraX for the YUV format; we have to rotate
+            // them ourselves here. Doing it on Android keeps
+            // the FfiFrame contract honest: the engine always
+            // sees gravity-up pixels and `source_rotation_deg`
+            // in the bundle stays truthfully 0.
+            val rotationDeg = image.imageInfo.rotationDegrees
             val ffiFrame = image.image?.toFfiFrame(
                 intrinsicsProvider(),
                 sensorGainProvider(),
+                rotationDeg,
             ) ?: return
             engine.pushFrame(ffiFrame)
             frameCount.incrementAndGet()
@@ -139,6 +152,7 @@ class FrameAnalyzer(
 private fun Image.toFfiFrame(
     intrinsics: FfiIntrinsics,
     gainEPerAdu: Double,
+    rotationDeg: Int,
 ): FfiFrame {
     val yPlane = planes[0]
     val rowStride = yPlane.rowStride
@@ -146,14 +160,14 @@ private fun Image.toFfiFrame(
     val w = width
     val h = height
     val src = yPlane.buffer
-    val dst = ByteArray(w * h)
+    val sensor = ByteArray(w * h)
 
     if (pixelStride == 1 && rowStride == w) {
         // Tight packing. The buffer's remaining() should equal
         // w * h exactly in this case but cap defensively.
         val available = src.remaining()
-        val toRead = minOf(dst.size, available)
-        src.get(dst, 0, toRead)
+        val toRead = minOf(sensor.size, available)
+        src.get(sensor, 0, toRead)
     } else {
         // Stride normalization. Each row except the last is
         // `rowStride` bytes in the source buffer; the last row
@@ -173,23 +187,115 @@ private fun Image.toFfiFrame(
             src.get(rowBuf, 0, toRead)
             if (pixelStride == 1) {
                 val copy = minOf(w, toRead)
-                System.arraycopy(rowBuf, 0, dst, row * w, copy)
+                System.arraycopy(rowBuf, 0, sensor, row * w, copy)
             } else {
                 val maxCol = minOf(w, (toRead + pixelStride - 1) / pixelStride)
                 for (col in 0 until maxCol) {
-                    dst[row * w + col] = rowBuf[col * pixelStride]
+                    sensor[row * w + col] = rowBuf[col * pixelStride]
                 }
             }
         }
     }
+
+    // Rotate sensor-orientation pixels to gravity-up. Mod 360
+    // and normalise; CameraX only ever emits 0/90/180/270.
+    val rot = ((rotationDeg % 360) + 360) % 360
+    val (outW, outH, dst) = when (rot) {
+        0 -> Triple(w, h, sensor)
+        90 -> Triple(h, w, rotate90(sensor, w, h))
+        180 -> Triple(w, h, rotate180(sensor, w, h))
+        270 -> Triple(h, w, rotate270(sensor, w, h))
+        else -> Triple(w, h, sensor) // unreachable in practice
+    }
+
+    // Rotate intrinsics to match. cx/cy/fx/fy are defined in
+    // sensor coords; when we rotate the pixel grid we must
+    // rotate the principal point and swap (fx, fy) for 90/270.
+    // Distortion coefficients k1/k2/k3/p1/p2 are radially
+    // symmetric (around the principal point) so they don't
+    // change under a frame-rotation; p1/p2 are tangential and
+    // *do* rotate, but for the small values bris's calibration
+    // produces (<1e-3 typical), the rotation is a second-order
+    // correction we can defer until the calibration path itself
+    // becomes rotation-aware (separate Phase-2 follow-up).
+    val rotatedIntrinsics = when (rot) {
+        0 -> intrinsics
+        180 -> FfiIntrinsics(
+            fx = intrinsics.fx, fy = intrinsics.fy,
+            cx = (w - 1).toDouble() - intrinsics.cx,
+            cy = (h - 1).toDouble() - intrinsics.cy,
+            k1 = intrinsics.k1, k2 = intrinsics.k2, k3 = intrinsics.k3,
+            p1 = intrinsics.p1, p2 = intrinsics.p2,
+        )
+        90 -> FfiIntrinsics(
+            // 90° CW: (x,y) -> (h-1-y, x). Swap fx/fy, remap cx/cy.
+            fx = intrinsics.fy, fy = intrinsics.fx,
+            cx = (h - 1).toDouble() - intrinsics.cy,
+            cy = intrinsics.cx,
+            k1 = intrinsics.k1, k2 = intrinsics.k2, k3 = intrinsics.k3,
+            p1 = intrinsics.p1, p2 = intrinsics.p2,
+        )
+        270 -> FfiIntrinsics(
+            // 270° CW: (x,y) -> (y, w-1-x). Swap fx/fy.
+            fx = intrinsics.fy, fy = intrinsics.fx,
+            cx = intrinsics.cy,
+            cy = (w - 1).toDouble() - intrinsics.cx,
+            k1 = intrinsics.k1, k2 = intrinsics.k2, k3 = intrinsics.k3,
+            p1 = intrinsics.p1, p2 = intrinsics.p2,
+        )
+        else -> intrinsics
+    }
+
     return FfiFrame(
-        width = w.toUInt(),
-        height = h.toUInt(),
+        width = outW.toUInt(),
+        height = outH.toUInt(),
         format = FfiPixelFormat.GRAY8,
         pixels = dst,
         capturedUnixMs = System.currentTimeMillis(),
         exposureUs = 0u,
-        intrinsics = intrinsics,
+        intrinsics = rotatedIntrinsics,
         gainEPerAdu = gainEPerAdu,
     )
+}
+
+/**
+ * 90° clockwise rotation: dst[col, h-1-row] <- src[row, col].
+ * Output dimensions: (h, w).
+ */
+internal fun rotate90(src: ByteArray, w: Int, h: Int): ByteArray {
+    val dst = ByteArray(w * h)
+    for (row in 0 until h) {
+        val srcBase = row * w
+        val dstCol = h - 1 - row
+        for (col in 0 until w) {
+            // dst is (h, w) addressed as col * h + dstCol
+            dst[col * h + dstCol] = src[srcBase + col]
+        }
+    }
+    return dst
+}
+
+/** 180°: dst[w-1-col, h-1-row] <- src[col, row]. */
+internal fun rotate180(src: ByteArray, w: Int, h: Int): ByteArray {
+    val n = w * h
+    val dst = ByteArray(n)
+    for (i in 0 until n) dst[i] = src[n - 1 - i]
+    return dst
+}
+
+/**
+ * 270° clockwise (= 90° counter-clockwise):
+ * dst[h-1-col, row] <- src[row, col]. Output dimensions: (h, w).
+ */
+internal fun rotate270(src: ByteArray, w: Int, h: Int): ByteArray {
+    val dst = ByteArray(w * h)
+    for (row in 0 until h) {
+        val srcBase = row * w
+        val dstRow0 = row
+        for (col in 0 until w) {
+            // dst is (h, w) addressed as (w-1-col) * h + row
+            dst[(w - 1 - col) * h + dstRow0] = src[srcBase + col]
+        }
+    }
+    return dst
 }
