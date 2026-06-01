@@ -215,6 +215,30 @@ fun LiveScreen(
             },
         )
     }
+    // Shared bundle.json inputs builder. Used by both the
+    // streaming capture-recorder write at Stop and the
+    // (now-legacy) DebugBuffer "Save buffer" path. Capturing
+    // the same inputs at both call sites keeps the two
+    // writers honest against each other.
+    val bundleInputsBuilder: () -> io.github.spencerharmon.bris.engine.DebugBundleWriter.Inputs = {
+        io.github.spencerharmon.bris.engine.DebugBundleWriter.Inputs(
+            observer = io.github.spencerharmon.bris.engine.DebugBundleWriter.ObserverFix(
+                latitudeDeg = 0.0,
+                longitudeDeg = 0.0,
+                eyeHeightM = 2.0,
+            ),
+            apProvenance = "operator_entered",
+            lensId = effectiveLensId,
+            captureWidth = captureSize.width,
+            captureHeight = captureSize.height,
+            calibration = calibration,
+            gpsTruth = if (debugMode) {
+                io.github.spencerharmon.bris.engine.DebugBundleWriter.maybeGpsTruth(context)
+            } else null,
+            sessionId = activeSessionUuid?.toString(),
+        )
+    }
+
     val recorder = remember(engine, sightLog, prefs, activeSessionUuid) {
         CaptureRecorder(
             engine = engine,
@@ -229,6 +253,25 @@ fun LiveScreen(
                 // walks them in chronological order.
                 activeSessionUuid?.let { sessionStore.appendCapture(it, captureId) }
             },
+            captureDirProvider = { capId ->
+                // Active session set → canonical path:
+                // <files>/sessions/<UUID>/captures/<capId>/
+                // Else → orphan path: <files>/sights/<capId>/
+                val externalRoot = context.getExternalFilesDir(null) ?: context.filesDir
+                val capturesRoot = if (activeSessionUuid != null) {
+                    java.io.File(
+                        java.io.File(
+                            java.io.File(externalRoot, "sessions"),
+                            activeSessionUuid.toString(),
+                        ),
+                        "captures",
+                    )
+                } else {
+                    java.io.File(externalRoot, "sights")
+                }
+                java.io.File(capturesRoot, capId)
+            },
+            bundleInputsProvider = bundleInputsBuilder,
         )
     }
     val snapshot by engine.snapshot.collectAsState()
@@ -280,32 +323,7 @@ fun LiveScreen(
         buffer = debugBuffer,
         prefs = prefs,
         snackbarHost = snackbarHost,
-        bundleInputsProvider = {
-            // Mirror the engine's runtime inputs into the
-            // bundle manifest. Observer here is the placeholder
-            // (0,0,2m) consumed by `defaultEngineConfig`; once
-            // the operator-entered observer UI lands the same
-            // value should be threaded through both this and
-            // the `EngineConfig` builder so the manifest's
-            // `ap_input` is honest about what the engine ran
-            // against.
-            io.github.spencerharmon.bris.engine.DebugBundleWriter.Inputs(
-                observer = io.github.spencerharmon.bris.engine.DebugBundleWriter.ObserverFix(
-                    latitudeDeg = 0.0,
-                    longitudeDeg = 0.0,
-                    eyeHeightM = 2.0,
-                ),
-                apProvenance = "operator_entered",
-                lensId = effectiveLensId,
-                captureWidth = captureSize.width,
-                captureHeight = captureSize.height,
-                calibration = calibration,
-                gpsTruth = if (debugMode) {
-                    io.github.spencerharmon.bris.engine.DebugBundleWriter.maybeGpsTruth(context)
-                } else null,
-                sessionId = activeSessionUuid?.toString(),
-            )
-        },
+        bundleInputsProvider = bundleInputsBuilder,
     )
 
     Box(modifier = Modifier.fillMaxSize()) {
@@ -331,6 +349,7 @@ fun LiveScreen(
             debugBuffer = debugBuffer,
             lensId = effectiveLensId,
             captureSize = captureSize,
+            captureFrameTap = recorder::onAnalyzerFrame,
         )
 
         Column(
@@ -444,6 +463,7 @@ private fun CameraSurface(
     debugBuffer: DebugCaptureBuffer,
     lensId: String,
     captureSize: android.util.Size,
+    captureFrameTap: ((uniffi.bris_ffi.FfiFrame) -> Unit)? = null,
 ) {
     val context = LocalContext.current
     val previewView = remember(context) { PreviewView(context) }
@@ -532,6 +552,7 @@ private fun CameraSurface(
                     },
                     debugCaptureProvider = { debugCaptureEnabled },
                     debugBuffer = debugBuffer,
+                    captureFrameTap = captureFrameTap,
                 ),
             )
             val group = UseCaseGroup.Builder()

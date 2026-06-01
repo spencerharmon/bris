@@ -40,6 +40,16 @@ class FrameAnalyzer(
     private val debugCaptureProvider: () -> Boolean = { false },
     private val debugBuffer: DebugCaptureBuffer? = null,
     /**
+     * Per-frame callback fired after the analyzer has
+     * constructed the [`FfiFrame`] and pushed it to the
+     * engine. `null` when no active capture is recording.
+     * Used by `CaptureRecorder` to tap every analyzer frame
+     * into the capture directory's `frames/` subtree so
+     * Start→Stop recording captures *every* frame, not just
+     * the contributing-frame bytes of a fix.
+     */
+    private val captureFrameTap: ((FfiFrame) -> Unit)? = null,
+    /**
      * Returns the **current** sensor analog conversion gain
      * in electrons per ADU for the active camera, scaled to
      * the current ISO. The wiring is:
@@ -92,6 +102,7 @@ class FrameAnalyzer(
             ) ?: return
             engine.pushFrame(ffiFrame)
             frameCount.incrementAndGet()
+            captureFrameTap?.invoke(ffiFrame)
             if (debugCaptureProvider() && debugBuffer != null) {
                 val snap = engine.snapshot.value
                 debugBuffer.appendFrame(
