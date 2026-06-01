@@ -15,6 +15,8 @@ import androidx.navigation.compose.rememberNavController
 import io.github.spencerharmon.bris.ui.CalibrationScreen
 import io.github.spencerharmon.bris.ui.LiveScreen
 import io.github.spencerharmon.bris.ui.PreUploadReviewScreen
+import io.github.spencerharmon.bris.ui.SessionEditScreen
+import io.github.spencerharmon.bris.ui.SessionPickerScreen
 import io.github.spencerharmon.bris.ui.SettingsScreen
 import io.github.spencerharmon.bris.ui.SightLogDetailScreen
 import io.github.spencerharmon.bris.ui.SightLogScreen
@@ -65,6 +67,24 @@ class MainActivity : ComponentActivity() {
                                 onSendFix = { nav.navigate("review/fix") },
                                 onOpenCalibration = { nav.navigate("calibration") },
                                 onOpenSightLog = { nav.navigate("sight-log") },
+                                onOpenSessions = { nav.navigate("sessions") },
+                            )
+                        }
+                        composable("sessions") {
+                            SessionPickerScreen(
+                                prefs = prefs,
+                                onBack = { nav.popBackStack() },
+                                onEdit = { uuid ->
+                                    nav.navigate("sessions/edit/$uuid")
+                                },
+                            )
+                        }
+                        composable("sessions/edit/{uuid}") { backStack ->
+                            val raw = backStack.arguments?.getString("uuid") ?: return@composable
+                            SessionEditScreen(
+                                prefs = prefs,
+                                sessionId = java.util.UUID.fromString(raw),
+                                onBack = { nav.popBackStack() },
                             )
                         }
                         composable("settings") {

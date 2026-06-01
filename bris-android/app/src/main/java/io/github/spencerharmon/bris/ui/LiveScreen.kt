@@ -121,6 +121,7 @@ fun LiveScreen(
     onSendFix: () -> Unit,
     onOpenCalibration: () -> Unit,
     onOpenSightLog: () -> Unit,
+    onOpenSessions: () -> Unit,
 ) {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
@@ -182,7 +183,23 @@ fun LiveScreen(
             height = captureSize.height,
         )
     }
-    val sightLog = remember(context) { SightLog.forApp(context) }
+    val sessionStore = remember(context) {
+        io.github.spencerharmon.bris.engine.SessionStore.forApp(context)
+    }
+    val activeSessionId by prefs.activeSessionIdFlow.collectAsState(initial = null)
+    val activeSessionUuid = activeSessionId?.let {
+        runCatching { java.util.UUID.fromString(it) }.getOrNull()
+    }
+    // Sight-log root: per-session when an active session exists
+    // (writes captures under sessions/<uuid>/captures/), else the
+    // legacy orphan path <external-files>/sights/.
+    val sightLog = remember(context, activeSessionUuid) {
+        if (activeSessionUuid != null) {
+            SightLog.forSession(context, activeSessionUuid)
+        } else {
+            SightLog.forApp(context)
+        }
+    }
 
     val engineScope = remember { CoroutineScope(SupervisorJob()) }
     val engine = remember(context) {
@@ -190,14 +207,15 @@ fun LiveScreen(
             context = context,
             configFactory = {
                 val hemi = runBlocking { prefs.coarseHemisphereFlow.first() }
-                defaultEngineConfig(coarseHemisphere = hemi)
+                val s = activeSessionUuid?.let { sessionStore.loadOrNull(it) }
+                defaultEngineConfig(coarseHemisphere = hemi, session = s)
             },
             pbrisSink = { line ->
                 if (debugCaptureEnabled) debugBuffer.appendPbris(line)
             },
         )
     }
-    val recorder = remember(engine, sightLog, prefs) {
+    val recorder = remember(engine, sightLog, prefs, activeSessionUuid) {
         CaptureRecorder(
             engine = engine,
             sightLog = sightLog,
@@ -205,6 +223,12 @@ fun LiveScreen(
             deviceUuidProvider = { prefs.deviceUuid() },
             appVersion = BuildConfig.BRIS_APP_VERSION,
             coreVersionProvider = { version().brisFfi },
+            onCaptureSaved = { captureId ->
+                // Append captureId to the active session's
+                // ordered_capture_ids so `bris replay --session`
+                // walks them in chronological order.
+                activeSessionUuid?.let { sessionStore.appendCapture(it, captureId) }
+            },
         )
     }
     val snapshot by engine.snapshot.collectAsState()
@@ -279,6 +303,7 @@ fun LiveScreen(
                 gpsTruth = if (debugMode) {
                     io.github.spencerharmon.bris.engine.DebugBundleWriter.maybeGpsTruth(context)
                 } else null,
+                sessionId = activeSessionUuid?.toString(),
             )
         },
     )
@@ -339,13 +364,47 @@ fun LiveScreen(
                 if (captureActive) {
                     Button(onClick = { recorder.stop() }) { Text("Stop capture") }
                 } else {
-                    Button(onClick = { recorder.start() }) { Text("Start capture") }
+                    Button(onClick = {
+                        // Default-session fallback: if no active
+                        // session is set, auto-create one named
+                        // "Untitled <date>" so this capture is
+                        // never an orphan on disk. The operator
+                        // can rename later from the Sessions
+                        // screen.
+                        if (activeSessionUuid == null) {
+                            val now = System.currentTimeMillis()
+                            val s = io.github.spencerharmon.bris.engine.Session.new(
+                                "Untitled " + java.time.format.DateTimeFormatter
+                                    .ofPattern("yyyy-MM-dd HH:mm")
+                                    .withZone(java.time.ZoneId.systemDefault())
+                                    .format(java.time.Instant.ofEpochMilli(now)),
+                            )
+                            sessionStore.save(s)
+                            engineScope.launch {
+                                prefs.setActiveSessionId(s.sessionId.toString())
+                            }
+                            // Note: this recorder is the one bound
+                            // to the prior `activeSessionUuid` via
+                            // `remember(...)`. Recomposition after
+                            // setActiveSessionId rebuilds a new
+                            // recorder rooted at the new session
+                            // path. The first capture's frames
+                            // land in the orphan path; subsequent
+                            // captures use the new session. This
+                            // is a known UX wart and goes away
+                            // once Phase 7 collapses the path
+                            // choice into the recorder's
+                            // per-capture lookup.
+                        }
+                        recorder.start()
+                    }) { Text("Start capture") }
                 }
                 OutlinedButton(onClick = onOpenSightLog) { Text("Sight log") }
             }
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 OutlinedButton(onClick = onOpenSettings) { Text("Settings") }
                 OutlinedButton(onClick = onOpenCalibration) { Text("Calibration") }
+                OutlinedButton(onClick = onOpenSessions) { Text("Sessions") }
             }
             if (debugMode) {
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -733,16 +792,32 @@ private fun placeholderIntrinsicsFor(width: Int, height: Int): FfiIntrinsics {
  * (equator/Greenwich, 2 m eye height); real callers will read
  * the operator's stored observer settings.
  */
-private fun defaultEngineConfig(coarseHemisphere: String? = null): FfiEngineConfig = FfiEngineConfig(
+/**
+ * Placeholder engine config. Observer is the dev default
+ * (equator/Greenwich, 2 m eye height); real callers will read
+ * the operator's stored observer settings.
+ *
+ * When [session] is non-null, session-level retention overrides
+ * apply: `sight_window_seconds` / `sight_window_capacity` come
+ * from the session. `kinematics`→`assumed_max_speed_kn` is
+ * **not** yet plumbed through the FFI (the field isn't on
+ * `FfiEngineConfig`); see plan.org "Plumb assumed_max_speed_kn
+ * through FFI" TODO. Replay still applies it; live engine
+ * defaults to 0 kn until the FFI surface lands.
+ */
+private fun defaultEngineConfig(
+    coarseHemisphere: String? = null,
+    session: io.github.spencerharmon.bris.engine.Session? = null,
+): FfiEngineConfig = FfiEngineConfig(
     observer = FfiObserver(
-        latitudeDeg = 0.0,
-        longitudeDeg = 0.0,
-        eyeHeightM = 2.0,
+        latitudeDeg = session?.apSeed?.latDeg ?: 0.0,
+        longitudeDeg = session?.apSeed?.lonDeg ?: 0.0,
+        eyeHeightM = session?.apSeed?.eyeHeightM ?: 2.0,
         eyeHeightSigmaM = 0.5,
     ),
     stitchingWindowSeconds = 2.0,
-    sightWindowSeconds = 600.0,
-    sightWindowCapacity = 10u,
+    sightWindowSeconds = session?.sightRetentionSeconds?.toDouble() ?: 600.0,
+    sightWindowCapacity = session?.sightRetentionCapacity?.toUInt() ?: 10u,
     minFixPublicationIntervalMs = 1000u,
     inputRingCapacity = 120u,
     segmentationModelPath = null,
