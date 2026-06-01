@@ -480,31 +480,23 @@ private fun CameraSurface(
     // rotation-from-sensor-to-display delta, and FrameAnalyzer
     // rotates the Y plane accordingly before pushing to the
     // engine.
-    val displayManager = remember(context) {
-        context.getSystemService(android.content.Context.DISPLAY_SERVICE)
-            as android.hardware.display.DisplayManager
+    // Source of analyzer's target rotation: the device's
+    // physical orientation derived from the accelerometer,
+    // not `display.rotation`. The latter is pinned by the
+    // system rotate-lock; the former always reflects how the
+    // operator is actually holding the phone. Cat S62 Pro
+    // verification 2026-06-01 showed `display.rotation`
+    // stayed stale through a manual phone rotation while
+    // rotate-lock was on, causing 42 of 74 frames to be
+    // stored with sideways gravity.
+    val orientationSource = remember(context) {
+        io.github.spencerharmon.bris.engine.DeviceOrientationSource.forContext(context)
     }
-    val display = remember(context, previewView) {
-        // PreviewView's attached display is the source of truth
-        // for Camera2's notion of "the surface's rotation";
-        // fall back to the default display before attach.
-        previewView.display
-            ?: displayManager.getDisplay(android.view.Display.DEFAULT_DISPLAY)
+    androidx.compose.runtime.DisposableEffect(orientationSource) {
+        orientationSource.start()
+        onDispose { orientationSource.stop() }
     }
-    var displayRotation by remember { mutableStateOf(display?.rotation ?: 0) }
-    androidx.compose.runtime.DisposableEffect(displayManager, display) {
-        val listener = object : android.hardware.display.DisplayManager.DisplayListener {
-            override fun onDisplayAdded(displayId: Int) = Unit
-            override fun onDisplayRemoved(displayId: Int) = Unit
-            override fun onDisplayChanged(displayId: Int) {
-                if (display != null && displayId == display.displayId) {
-                    displayRotation = display.rotation
-                }
-            }
-        }
-        displayManager.registerDisplayListener(listener, null)
-        onDispose { displayManager.unregisterDisplayListener(listener) }
-    }
+    val displayRotation by orientationSource.rotation.collectAsState()
 
     LaunchedEffect(captureActive, lifecycleOwner, cameraSelector, captureSize, displayRotation) {
         val provider = ProcessCameraProvider.getInstance(context).get()
