@@ -9,6 +9,64 @@ For the end-to-end pipeline architecture and data flow, see
 
 ---
 
+## Storage contract clarified (2026-06-01)
+
+Three rounds of clarification with the operator converged
+on a unified on-device tree with retention-metadata
+differentiation, not parallel locations:
+
+- **One tree per session**:
+  `<external-files>/sessions/<UUID>/{session.json,
+  engine-store/, captures/<cap-id>/{manifest.json,
+  bundle.json, pbris.log, [index.jsonl], frames/...}}`
+- **One `frames/` directory per capture**, with per-frame
+  sidecar `retention: "fix_frame" | "debug"` distinguishing
+  retention class. Fix-frame bytes are never duplicated;
+  Debug ON writes a frame as `"debug"` initially and
+  `CaptureRecorder.finalize` promotes contributing-fix
+  frames in place (sidecar rewrite, no copy).
+- **`manifest.json` (sight-log review) + `bundle.json`
+  (replay) both always-on**; differ only in consumer and
+  schema. KB each.
+- **Engine `SightStore` per-session** via `data_root =
+  <external-files>/sessions/<UUID>/engine-store/`. The
+  Rust crate is unchanged — 96-byte binary record format,
+  session-blind. Per-session isolation is purely a
+  filesystem property; sights from session A never
+  hydrate into session B's pool on restart. `SessionHolder`
+  rebuilds the engine when the active session changes.
+- **No `bris-exports/` parallel tree**, no `media/`
+  mirror, no rolling debug buffer, no per-capture Share
+  button. One Settings **Share sessions** action SAF-zips
+  the entire `sessions/` tree.
+
+Debug mode gates exactly two things: per-frame disk writes
+for non-fix frames (the analyzer tap), and GPS-truth
+attachment to `bundle.json`. Fix-frame pixels are always
+persisted regardless of Debug. Disk cost per capture: KB
+to ~50 MB (Debug OFF) vs ~4 MB × fps × duration (Debug ON).
+
+Docs updated: `AGENTS.md` (Debug-mode bullet + corpus
+import workflow), `docs/design/capture.md` (on-disk
+layout + retention classes + manifest semantics),
+`docs/design/diagnostic_collection.md` (operator surface +
+on-device storage + per-session engine persistence),
+`plan.org` (umbrella TODO 'Unify on-device save paths'
+with PR A–D breakdown).
+
+Code PRs follow in order:
+- **PR A**: FFI `store_data_root` + per-session `SessionHolder`.
+- **PR B**: Unified frame writer + retention promotion +
+  delete `DebugCaptureBuffer`/`DebugBufferActions`/
+  `DebugSaveAction`/`PreUploadReviewScreen`/`Exporter`/
+  `Submitter`/`ManifestBuilder` collector parts.
+- **PR C**: Calibration under
+  `<external-files>/calibration/<UUID>/`, factory
+  intrinsics get baked-in UUID.
+- **PR D**: Settings **Share sessions** SAF-zip action.
+
+---
+
 ## Session UI + rotation: half-landed (2026-06-01)
 
 PRs #46 (session UI) + #47 (display rotation) merged. First

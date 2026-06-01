@@ -144,41 +144,80 @@ tracked under Phase 7.
 Each captured Start/Stop window lives under its session:
 
 ```
-<external-files>/sessions/<session-uuid>/captures/<cap-id>/
-  bundle.json                  per docs/design/debug_bundle_schema.md
-  frames/NNNNNNNN.pgm          contributing-frame bytes
-  frames/NNNNNNNN.json         FrameSidecar (incl. per-frame gps_truth,
-                               gravity_camera_frame)
-  pbris.log                    formatted $PBRIS,FIX line(s)
-  sights/
-    <sight-ulid>/              one per published live fix
-      manifest.json            collector schema v1, kind = "fix"
-      media/                   thumbnails / aux media
+<external-files>/sessions/<session-uuid>/
+  session.json                 # operator-edited SessionManifest
+  engine-store/
+    sights/current.log         # bris_streaming::SightStore
+    fixes/current.log          # 96-byte binary, per-session
+  captures/<cap-id>/
+    manifest.json              # always-on; sight-log entry
+                               # (operator review schema,
+                               # references frames by `seq`)
+    bundle.json                # always-on; replay manifest
+                               # (bris_bundle::BundleManifest)
+    pbris.log                  # always-on; $PBRIS lines
+    index.jsonl                # Debug ON only; frame catalog
+    frames/
+      NNNNNNNN.pgm             # frame pixels (P5 grayscale)
+      NNNNNNNN.json            # FrameSidecar; retention class
 ```
 
-`bundle.json` is the canonical capture artifact (replayable
-by `bris replay --bundle` or `bris replay --session`).
-`sights/<sight-ulid>/manifest.json` matches
-`bris_collector::manifest::Manifest` so the same downstream
-tooling (review web UI, regression promoter, collector ingest)
-can consume both on-device entries and uploaded submissions.
+One `frames/` directory per capture. No separate `media/`
+mirror, no `bris-exports/` sibling. What distinguishes a
+frame is its sidecar's `retention` class, not its path.
 
-> **Implementation status (2026-06-01):** This layout is
-> *aspirational* for the debug-buffer save path. Today,
-> `CaptureRecorder.finalize` writes sight-log entries
-> under the canonical `sessions/<UUID>/captures/<cap-id>/`
-> root **iff** an active session is set; otherwise the
-> orphan path `<external-files>/sights/<id>/` is used.
-> The `DebugBufferActions.saveAll` ("Save buffer") writer
-> stamps `bundle.session_id` but does **not** yet land the
-> bundle under `sessions/<UUID>/captures/` and does **not**
-> include a `session.json` copy in the exported zip. Two
-> plan.org TODOs ("Debug-buffer zip writes canonical
-> session layout", "Debug-buffer save appends to
-> session.ordered_capture_ids") track the gap. The
-> `bris-android/` `SightLogScreen` also only enumerates
-> the orphan root; sessions-rooted captures are invisible
-> in the on-device list until that TODO lands.
+### Frame retention classes
+
+`frames/NNNNNNNN.json` carries `retention: "fix_frame" |
+"debug"`:
+
+- **`"fix_frame"`** — contributed to a published fix.
+  Always written; kept through any future debug-data
+  purge. With Debug OFF, only fix frames exist in
+  `frames/`. With Debug ON, fix frames are first written
+  as `"debug"` by the per-frame analyzer tap and promoted
+  in place at `CaptureRecorder.finalize` when the engine
+  reports their frame IDs as contributing to a published
+  fix. No file copy; the sidecar is rewritten.
+- **`"debug"`** — captured because Debug mode was ON at
+  write time. Eligible for future purge (deletion path
+  not yet implemented; operator can manually `rm`).
+
+Disk cost per capture:
+- **Debug OFF**: KB for `manifest.json` + `bundle.json` +
+  `pbris.log`, plus the 1–3 fix-frame PGMs (each ~12 MB at
+  4032×3024). Total typically <50 MB.
+- **Debug ON**: ~4 MB × fps × duration. A 30-second 30 fps
+  capture at full sensor resolution is ~3.6 GB.
+
+### Manifest files
+
+- **`manifest.json`** — the sight-log entry. Schema is the
+  shape `bris-android/upload/ManifestBuilder.kt` produces
+  (matches `bris_collector::Manifest`). Read by the
+  on-device `SightLogScreen` for operator review.
+  References frames via `fix_frame_seqs: [seq, …]` into
+  `frames/`.
+- **`bundle.json`** — the replay manifest
+  (`bris_bundle::BundleManifest`). Read by
+  `bris replay --bundle`. Written always (KB), even with
+  Debug OFF; the embedded frame list contains only
+  fix-frames when Debug was OFF, the full catalog when ON.
+- **`pbris.log`** — the `$PBRIS` engine narrative for the
+  capture window. Stable protocol
+  (`docs/protocol/pbris.md`); consumed by review tooling,
+  replay scoring, and any external NMEA bus.
+- **`index.jsonl`** — frame catalog, one JSON row per
+  persisted frame. Debug-only because it adds nothing
+  beyond what walking `frames/` provides, and only Debug
+  captures justify the additional file. Replay
+  enumeration uses it when present, otherwise walks the
+  directory.
+
+`bundle.json` is the canonical capture artifact;
+`manifest.json` is the operator-facing sight-log summary.
+The two coexist with different consumers and different
+schemas, both at KB cost.
 
 `fix` sub-object format:
 
