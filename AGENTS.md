@@ -254,14 +254,40 @@ stack). A naive `target/` reaches 20+ GiB. Standing policy:
 - Native libraries for the bound Rust core are packaged per ABI
   under `app/src/main/jniLibs/<abi>/libbris_ffi.so`. The
   Gradle build orchestrates the cross-compile.
-- The "Debug mode" toggle in settings is the **only operator
-  surface for diagnostic submission**. When off, no submission
-  UI is visible anywhere in the app. When on, three contextual
-  actions appear: debug capture (rolling on-device buffer of
-  all processed frames + logs), send fix (uploads the on-device
-  retained data for a single fix), send calibration (uploads
-  the calibration session bundle). Every send action shows a
-  one-screen pre-upload review.
+- The "Debug mode" toggle in settings is the **single
+  operator surface controlling per-frame debug archival**.
+  With Debug OFF the engine runs normally and each capture
+  persists only its operator-facing artifacts:
+  `manifest.json` (sight-log entry), `bundle.json` (replay
+  manifest), `pbris.log`, plus the 1–3 fix-frame PGMs that
+  backed any published fix — sidecared
+  `retention: "fix_frame"`. KB to ~50 MB per capture.
+
+  With Debug ON the analyzer additionally taps every frame
+  during Start→Stop into the same `captures/<id>/frames/`
+  directory with sidecar `retention: "debug"`. Fix frames
+  are promoted in place (no file copy) at finalize.
+  `bundle.json` gets the full frame catalog +
+  `gps_truth` attachment. `index.jsonl` is added.
+  ~4 MB × fps × duration per capture.
+
+  This is the **only** debug-related save path. One toggle,
+  one capture directory layout, one frame directory per
+  capture; differentiation is by sidecar retention
+  metadata, not by location. A single Settings **Share
+  sessions** action SAF-zips the entire
+  `<external-files>/sessions/` tree for off-device
+  transfer. The on-disk tree IS the canonical corpus
+  layout; `unzip -n <zip> -d <corpus>/` lands it correctly.
+
+  Engine cross-restart persistence (`bris_streaming::
+  SightStore`) is session-scoped via its `data_root`: each
+  session has its own
+  `<external-files>/sessions/<UUID>/engine-store/`. The
+  96-byte binary record format is session-blind;
+  session-awareness is purely the path the caller picks.
+  `SessionHolder` rebuilds the engine when the active
+  session changes.
 
 ## Where work runs
 
@@ -435,46 +461,31 @@ signal. If you find yourself reaching for `-o` (overwrite),
 stop — either the zip is corrupted, or you're about to clobber
 an edited session.json with the on-device default.
 
-**Known gap as of 2026-06-01 (PRs #46 + #47 merged):** the
-on-device `DebugBufferActions.saveAll` writer still emits
-**flat-layout** zips:
+Zips produced by the on-device **Share capture** action are
+already in canonical layout:
 
 ```
-bris-debug-<cap-id>/
-  bundle.json
-  index.jsonl
-  pbris.log
-  frames/...
+sessions/<UUID>/
+  session.json
+  captures/<cap-id>/
+    bundle.json
+    index.jsonl
+    pbris.log
+    frames/...
 ```
 
-These **do not** drop into the canonical `sessions/<UUID>/
-captures/<cap-id>/` tree under `unzip -n`. The bundle carries
-`session_id` as a back-reference, but no `session.json` is
-included in the archive, and `bris replay --bundle` against
-the flat-extracted path cannot find a sibling `session.json`
-for overlay. Two follow-up TODOs in `plan.org` track the
-fix ("Debug-buffer zip writes canonical session layout" and
-"Debug-buffer save appends to session.ordered_capture_ids");
-until they land, manually fabricate the canonical layout
-on import:
-
-```sh
-# 1. extract the flat zip
-unzip -n bris-exports/incoming/bris-debug-<cap-id>.zip -d /tmp/
-# 2. read session_id from bundle.json
-SID=$(python3 -c "import json;print(json.load(open('/tmp/bris-debug-<cap-id>/bundle.json'))['session_id'])")
-# 3. move into canonical layout
-mkdir -p <corpus-root>/sessions/$SID/captures/
-mv /tmp/bris-debug-<cap-id> <corpus-root>/sessions/$SID/captures/bris-debug-<cap-id>
-# 4. pull session.json off the device once per session
-adb pull /sdcard/Android/data/io.github.spencerharmon.bris/files/sessions/$SID/session.json \
-  <corpus-root>/sessions/$SID/session.json
-```
+so `unzip -n <zip> -d <corpus-root>/` drops them straight
+into the corpus tree. No flat-layout fixup required. There
+is exactly one on-device save path; the operator either has
+Debug mode ON (frames persist, Share button visible on
+that capture) or OFF (sight-log manifest only, nothing to
+share).
 
 A zip whose internal nesting predates the session-aware
-writer (no `session_id` in `bundle.json`) lands directly
-under `<corpus-root>/bris-debug-<cap-id>/` instead of under
-a session. Use `scripts/synthesize_bundle_json.py` to
+writer (no `session_id` in `bundle.json`, or no
+`session.json` alongside) lands directly under
+`<corpus-root>/bris-debug-<cap-id>/` instead of under a
+session. Use `scripts/synthesize_bundle_json.py` to
 fabricate a stub session + move the capture into place.
 **Never** rewrite the zip's internal structure to match —
 the zip is the operator's backup; rewriting it loses
@@ -499,52 +510,65 @@ there are no per-session expectations files.
 
 ## Pulling debug captures from the phone (mechanics)
 
-The operator consistently saves debug-buffer zips on the
-phone at `/sdcard/Documents/bris-debug-<ulid>.zip` (the
-`DebugBufferActions.saveAll` "Save buffer" path in the
-Android app). When asked to pull captures off the phone,
-use this workflow:
+The operator triggers an export by tapping the **Share
+capture** button on a capture row in the on-device
+SightLogScreen (visible only for captures recorded with
+Debug mode ON — those have a `bundle.json` on disk; ones
+recorded with Debug OFF carry only a sight-log manifest
+and are nothing to share). The Share action writes a
+canonical-layout zip via SAF; the operator picks a
+destination, and the resulting file is named
+`/sdcard/<picked-tree>/bris-session-<UUID>-cap-<id>.zip`
+or similar (SAF-determined).
 
-1. **List zips on the phone.**
+When asked to pull captures off the phone, use this
+workflow:
+
+1. **List zips on the phone.** Conventional spot the
+   operator picks is the Documents tree:
 
    ```sh
-   adb shell 'ls /sdcard/Documents/bris-debug-*.zip 2>/dev/null'
+   adb shell 'ls /sdcard/Documents/bris-session-*.zip 2>/dev/null'
    ```
 
 2. **For each zip: dedupe by filename before pulling.** If
-   `bris-exports/<zip-stem>/` (the extracted directory) or
    `bris-exports/incoming/<zip-name>` already exists, skip
-   that zip — it has already been ingested. Do not
-   re-extract; do not re-pull; do not delete on-device just
-   because the local dir is present (the operator may have
-   deleted the extracted dir intentionally).
+   that zip — already ingested. Do not re-pull; do not
+   delete on-device just because the local copy is present
+   (the operator may have deleted the extracted dir
+   intentionally).
 
 3. **Pull new zips into `bris-exports/incoming/`.**
 
    ```sh
    mkdir -p bris-exports/incoming
-   adb pull /sdcard/Documents/bris-debug-<ulid>.zip bris-exports/incoming/
+   adb pull /sdcard/Documents/bris-session-<UUID>-cap-<id>.zip bris-exports/incoming/
    ```
 
-4. **Extract into `bris-exports/<zip-stem>/`.** The zip's
-   internal layout already nests under `bris-debug-<ulid>/`
-   (frames/ + index.jsonl + pbris.log), so unzip into the
-   `<zip-stem>` parent and the natural nesting falls out.
+4. **Extract directly into the corpus root.** The zip's
+   internal layout is canonical (`sessions/<UUID>/{session.json,
+   captures/<id>/...}`), so `unzip -n` drops everything
+   into place:
 
    ```sh
-   unzip -q -o bris-exports/incoming/bris-debug-<ulid>.zip \
-     -d bris-exports/bris-debug-<ulid>/
+   unzip -n bris-exports/incoming/bris-session-<UUID>-cap-<id>.zip \
+     -d <corpus-root>/
    ```
 
+   `-n` (never overwrite) is load-bearing: re-pulling and
+   re-extracting an already-imported capture is idempotent
+   and prints "file exists" warnings, which is the
+   expected success signal.
+
 5. **Delete the on-device zip *only after* the extracted
-   directory is verified non-empty.** Storage on the phone
-   is precious; leaving stale zips around accumulates
+   capture is verified non-empty.** Storage on the phone is
+   precious; leaving stale zips around accumulates
    gigabytes.
 
    ```sh
-   # sanity-check before delete
-   test -s bris-exports/bris-debug-<ulid>/bris-debug-<ulid>/index.jsonl \
-     && adb shell rm /sdcard/Documents/bris-debug-<ulid>.zip
+   # sanity-check before delete: confirm bundle.json exists
+   test -s <corpus-root>/sessions/<UUID>/captures/<id>/bundle.json \
+     && adb shell rm /sdcard/Documents/bris-session-<UUID>-cap-<id>.zip
    ```
 
 6. **The local `bris-exports/incoming/<zip>` may be kept**
@@ -554,18 +578,17 @@ use this workflow:
 
 Notes:
 
-- These zips include `bundle.json` (the
-  `bris_bundle::BundleManifest`) as of commit a9fd8ea
-  ("bris-android: write bundle.json on debug-buffer save").
-  Older captures predating that commit don't — for those,
-  use `scripts/synthesize_bundle_json.py` to fabricate one
-  before feeding the bundle to `bris replay --bundle`.
+- Pre-refactor zips (named `bris-debug-<ulid>.zip`, flat
+  layout) require the manual fixup documented in
+  `scripts/synthesize_bundle_json.py`. New captures all
+  use the canonical layout.
 - Never bulk-delete on-device zips without confirming the
-  extracted directory landed locally. An interrupted `adb
-  pull` (USB unplug, phone screen-off-suspend) can produce
-  a truncated local file that *looks* present but isn't
-  the full payload — always verify with `unzip -t` or a
-  non-empty-index check before deleting the source.
+  extracted bundle.json landed locally. An interrupted
+  `adb pull` (USB unplug, phone screen-off-suspend) can
+  produce a truncated local file that *looks* present but
+  isn't the full payload — always verify with `unzip -t`
+  or a `test -s` on the extracted `bundle.json` before
+  deleting the source.
 
 ## Cave worktree hygiene
 

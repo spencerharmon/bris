@@ -29,80 +29,121 @@ already exists; this subsystem is the on-ramp.
 ## Operator surface
 
 There is **one** UI control: a single boolean **Debug mode**
-toggle in app settings. When off, no diagnostic-collection UI
-appears anywhere in the app. When on, three contextual actions
-appear:
+toggle in app settings. When OFF, the engine runs normally,
+publishes fixes, the operator sees the live overlay, and
+the app persists the *operator-meaningful* artifacts of
+each capture (sight-log manifest, replay-bundle manifest,
+$PBRIS log, and the small set of fix-frame pixels that
+backed any published fix). When ON, the analyzer
+additionally streams every analyzer frame to disk,
+marked as Debug-only retention.
 
-- **Debug capture.** A persistent toggle, visible during a live
-  session. When enabled, the app retains *every* frame the
-  streaming engine processes, plus the engine's per-frame
-  diagnostic snapshot and tracing log, in a rolling on-device
-  buffer (capped by disk usage, not by time). Without this
-  toggle, the on-device retention is the same as normal
-  operation: only frames whose body or horizon record landed in
-  the published fix are kept.
+Debug mode gates exactly two things:
 
-- **Send fix.** Surfaced from the fix-detail view. Uploads
-  exactly the data the device retains for that fix in *normal*
-  operation: the frames that contributed body or horizon
-  records to the published sight window, plus the `$PBRIS`
-  sentence window covering the fix, plus the engine config and
-  versions. No additional capture beyond what was already on
-  disk.
+1. **Per-frame disk writes for non-fix frames.** With
+   Debug ON, the `CaptureRecorder` taps every analyzer
+   frame during Start→Stop into the capture's `frames/`
+   directory with sidecar `retention: "debug"`. With
+   Debug OFF the tap is inert.
+2. **GPS-truth attachment.** Bundles emitted with Debug
+   ON include the device's coarse last-known location as
+   `bundle.gps_truth` (when permission is granted).
 
-- **Send calibration.** Surfaced from the calibration screen.
-  Uploads the full calibration session: every input frame,
-  the detected corners, the per-frame reprojection residuals,
-  the persisted intrinsics TOML, and the calibration doctor
-  output.
+Fix-frame pixels (the 1–3 frames that contributed to a
+published fix) are always written to the same
+`captures/<cap-id>/frames/` directory, with sidecar
+`retention: "fix_frame"`. This happens regardless of
+Debug mode — the operator gets the contributing pixels
+for a published fix without having to opt into bulk frame
+archival. With Debug ON a fix frame is first written as
+`"debug"` (by the analyzer tap) and promoted to
+`"fix_frame"` at finalize when its frame ID is in the
+published fix's contributing list; no file copy.
 
-Every send action navigates to a **single-screen pre-upload
-review** that lists exactly what is about to leave the device:
-
-- Media items (thumbnail + filename + size).
-- Metadata fields (timestamps, GPS if present, app + core +
-  data versions, device model, OS version).
-- Free-text note (optional, operator-supplied).
-
-Two buttons: **Send** and **Cancel**. There is no per-field
-opt-out — debug-mode-on is the consent. Operators who don't
-want to send something disable debug mode or cancel the review.
-
-## Versioning in every submission
-
-Every manifest carries four version fields:
-
-- `app_version` — the Android app's version (e.g. `0.1.3`).
-- `bris_core_version` — the version string returned by
-  `bris_ffi::version()`, which reads it from `bris-core`'s
-  `CARGO_PKG_VERSION` at FFI build time.
-- `bris_data_version` — the version of the OTA `bris-data`
-  payload (almanac coefficients, leap-second table, star catalog,
-  segmentation model). `None` if no payload has been applied
-  since install.
-- `submission_schema_version` — the version of the manifest
-  schema itself. Incremented when fields change incompatibly so
-  the collector can reject (or accept-with-fallback) old
-  clients.
+There is **no** rolling debug buffer, **no** separate
+"Save buffer" button, **no** parallel `bris-exports/`
+tree, **no** in-app submission upload. Off-device
+transfer is operator-driven via a single Settings
+**Share sessions** action that SAF-zips the entire
+`<external-files>/sessions/` tree (or `adb pull` directly).
+The collector service (`crates/bris-collector`) remains
+in the repo for future use but the Android-side
+`Submitter` and submission-review UI are not part of
+this surface.
 
 ## On-device storage
 
-Normal operation (debug mode off): the streaming engine retains
-only the frames whose detection records are currently in the
-body or horizon queue, plus the raw-frame ring buffer for the
-stitching window (see `frame_scheduling.md`). When a fix
-publishes, the frames that contributed are also retained until
-the fix ages out of the sight window.
+One tree:
 
-Debug capture (toggle on): the app retains *every* processed
-frame, plus the per-frame `DiagnosticSnapshot`, plus the
-tracing log, in a rolling on-device buffer under
-`<app-files>/debug-capture/`. The buffer is capped by total disk
-usage (default 1 GB, configurable in settings); oldest frames
-evict first. The capture toggle stops adding new entries when
-turned off, but does not delete existing ones — those persist
-until the operator either uploads them or explicitly clears the
-buffer from settings.
+```
+<external-files>/sessions/<UUID>/
+  session.json                 # operator-edited; SessionManifest
+  engine-store/
+    sights/current.log         # bris_streaming::SightStore
+    fixes/current.log          # 96-byte binary records,
+                               # session-scoped via path,
+                               # crate format unchanged
+  captures/<cap-id>/
+    manifest.json              # always-on; sight-log entry
+                               #   for SightLogScreen review
+    bundle.json                # always-on; replay manifest
+                               #   (bris_bundle::BundleManifest)
+                               #   bris replay --bundle consumes
+    pbris.log                  # always-on; $PBRIS narrative
+    index.jsonl                # Debug ON only; frame catalog
+    frames/
+      NNNNNNNN.pgm             # frame pixels (P5 grayscale)
+      NNNNNNNN.json            # sidecar with retention class
+
+<external-files>/calibration/<calibration-UUID>/
+  calibration.json
+  frames/                      # checkerboard inputs
+```
+
+Frame retention classes (sidecar `retention` field):
+
+- `"fix_frame"` — contributed to a published fix. Kept
+  through any future debug-data purge.
+- `"debug"` — captured because Debug mode was ON at write
+  time. Eligible for future purge (deletion semantics
+  deferred to keep this refactor scoped).
+
+Disk cost:
+- Debug OFF capture: KB for manifests + a few PGMs (only
+  the fix-frames).
+- Debug ON capture: ~4 MB × fps × duration (every frame
+  persists). A 30-second capture at 4032×3024 / 30 fps
+  is ~3.6 GB. Operator-aware: enable Debug only when you
+  intend to share or analyze.
+
+### Engine persistence is per-session
+
+`bris_streaming::SightStore` (96-byte binary log,
+append-only, rotated hourly + at 8 MiB, 7-day retention)
+is instantiated once per active session at
+`<external-files>/sessions/<UUID>/engine-store/`. The
+store's record format is session-blind; session-awareness
+lives purely in the path the caller picks. Sights from
+session A never bleed into session B's hydrated pool on
+restart because they are different files.
+
+The Android `SessionHolder` rebuilds the engine instance
+when the active session changes — dropping the old
+`Arc<Engine>` and constructing a new one against the new
+`data_root`. On Linux, `bris replay --session <UUID>` and
+the future `bris capture --session <UUID>` derive
+`data_root` the same way from
+`<corpus>/sessions/<UUID>/engine-store/`. The 96-byte
+record schema (`bris_streaming::store`) is unchanged by
+this arrangement; per-session isolation is purely a
+filesystem property.
+
+No-active-session fallback (orphan capture): the store
+opens at `<external-files>/sessions/orphan/engine-store/`.
+When the operator subsequently creates and selects a real
+session, the orphan engine is dropped; orphan sights stay
+on disk for inspection but no longer hydrate the live
+engine pool.
 
 ## CameraX backpressure
 
@@ -155,7 +196,18 @@ semver-major. Track this when updating either side.
 
 ## Submission wire format
 
-HTTPS POST `multipart/form-data` to
+**Status (as of the storage-paths refactor):** the in-app
+upload path was removed. There is no Android `Submitter`, no
+submission-review screen, no per-submission HTTPS POST. The
+subsystem below describes the **server-side** ingest contract
+that will be re-attached when a future PR rebuilds an upload
+path — either as a separate `bris-uploader` companion tool
+that targets share-capture zips, or as an in-app action built
+on top of the canonical capture layout. The collector crate
+(`crates/bris-collector`) remains in the workspace.
+
+When reintroduced, submissions will be HTTPS POST
+`multipart/form-data` to
 `{collector_base}/v1/submissions`. Bearer token in
 `Authorization: Bearer <token>`. Token comes from a config
 field built into the APK (spike-grade; see Security below).
