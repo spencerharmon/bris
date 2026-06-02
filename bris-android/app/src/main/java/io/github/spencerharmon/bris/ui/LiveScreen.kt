@@ -202,13 +202,18 @@ fun LiveScreen(
     }
 
     val engineScope = remember { CoroutineScope(SupervisorJob()) }
-    val engine = remember(context) {
+    val engine = remember(context, activeSessionUuid) {
         SessionHolder.acquire(
             context = context,
-            configFactory = {
+            activeSessionId = activeSessionUuid,
+            configFactory = { storeRoot ->
                 val hemi = runBlocking { prefs.coarseHemisphereFlow.first() }
                 val s = activeSessionUuid?.let { sessionStore.loadOrNull(it) }
-                defaultEngineConfig(coarseHemisphere = hemi, session = s)
+                defaultEngineConfig(
+                    coarseHemisphere = hemi,
+                    session = s,
+                    storeDataRoot = storeRoot,
+                )
             },
             pbrisSink = { line ->
                 if (debugCaptureEnabled) debugBuffer.appendPbris(line)
@@ -853,6 +858,7 @@ private fun placeholderIntrinsicsFor(width: Int, height: Int): FfiIntrinsics {
 private fun defaultEngineConfig(
     coarseHemisphere: String? = null,
     session: io.github.spencerharmon.bris.engine.Session? = null,
+    storeDataRoot: String? = null,
 ): FfiEngineConfig = FfiEngineConfig(
     observer = FfiObserver(
         latitudeDeg = session?.apSeed?.latDeg ?: 0.0,
@@ -876,6 +882,7 @@ private fun defaultEngineConfig(
             is io.github.spencerharmon.bris.engine.Session.Kinematics.MaxSpeedKn -> it.kn
         }
     },
+    storeDataRoot = storeDataRoot,
 )
 
 /**

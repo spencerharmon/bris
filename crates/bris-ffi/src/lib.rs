@@ -306,6 +306,24 @@ pub struct FfiEngineConfig {
     /// inflation when the operator's session declares a
     /// non-zero kinematics bound.
     pub assumed_max_speed_kn: Option<f64>,
+
+    /// Optional override for
+    /// [`bris_streaming::StoreConfig::data_root`]. The Rust
+    /// crate writes its `sights/current.log` and
+    /// `fixes/current.log` under this path. `None` preserves
+    /// the core default (`PathBuf::from(".")`), which on
+    /// Android resolves to a non-writable cwd — effectively
+    /// disabling cross-restart persistence. Callers that want
+    /// per-session engine state must set this to a
+    /// session-scoped path, e.g.
+    /// `<external-files>/sessions/<UUID>/engine-store/`.
+    ///
+    /// The store crate is session-blind — session awareness
+    /// lives purely in which path the caller picks. Each
+    /// distinct `data_root` is an isolated append-log; sights
+    /// from session A never hydrate into session B's engine
+    /// pool because the files are different.
+    pub store_data_root: Option<String>,
 }
 
 impl FfiEngineConfig {
@@ -359,6 +377,14 @@ impl FfiEngineConfig {
                 });
             }
             cfg.publication_gate.assumed_max_speed_kn = kn;
+        }
+        if let Some(root) = self.store_data_root {
+            if root.is_empty() {
+                return Err(FfiError::InvalidArgument {
+                    detail: "store_data_root must be a non-empty path".to_owned(),
+                });
+            }
+            cfg.store.data_root = std::path::PathBuf::from(root);
         }
         Ok(cfg)
     }
@@ -1898,6 +1924,7 @@ mod kinematics_overlay_tests {
             horizon_analysis_max_long_edge_px: None,
             cold_start_coarse_hemisphere: None,
             assumed_max_speed_kn: None,
+            store_data_root: None,
         }
     }
 
@@ -1946,5 +1973,30 @@ mod kinematics_overlay_tests {
         c.assumed_max_speed_kn = Some(0.0);
         let cfg = c.into_core().unwrap();
         assert!((cfg.publication_gate.assumed_max_speed_kn - 0.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn store_data_root_none_preserves_default() {
+        let cfg = base_cfg().into_core().unwrap();
+        assert_eq!(cfg.store.data_root, std::path::PathBuf::from("."));
+    }
+
+    #[test]
+    fn store_data_root_some_overrides() {
+        let mut c = base_cfg();
+        c.store_data_root = Some("/tmp/bris-test".into());
+        let cfg = c.into_core().unwrap();
+        assert_eq!(
+            cfg.store.data_root,
+            std::path::PathBuf::from("/tmp/bris-test")
+        );
+    }
+
+    #[test]
+    fn store_data_root_empty_rejected() {
+        let mut c = base_cfg();
+        c.store_data_root = Some(String::new());
+        let err = c.into_core().unwrap_err();
+        assert!(matches!(err, FfiError::InvalidArgument { .. }));
     }
 }
