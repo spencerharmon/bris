@@ -26,27 +26,21 @@ import java.util.concurrent.atomic.AtomicLong
  * to its u16 internal representation on the Rust side. We pass
  * [`FfiPixelFormat.GRAY8`] to declare the format honestly.
  *
- * Debug-capture: when [`debugCaptureProvider`] returns true, the
- * frame is also persisted to the [`DebugCaptureBuffer`] *after*
- * the engine push, with the engine's just-taken
- * [`DiagnosticSnapshot`]. Snapshot is taken at frame-push time
- * (not capture time) because the operator-meaningful "what did
- * the engine think when it saw this frame" is the post-push
- * state, not the pre-push state.
+ * Per-frame capture tap: when [`captureFrameTap`] is non-null
+ * the analyzer forwards each constructed `FfiFrame` to it
+ * after the engine push. `CaptureRecorder.onAnalyzerFrame`
+ * uses this to stream frames into `<capture-dir>/frames/`
+ * during a Start→Stop window (Debug mode gates whether the
+ * write actually happens; the tap fires unconditionally and
+ * the recorder no-ops with Debug OFF).
  */
 class FrameAnalyzer(
     private val engine: EngineWrapper,
     private val intrinsicsProvider: () -> FfiIntrinsics,
-    private val debugCaptureProvider: () -> Boolean = { false },
-    private val debugBuffer: DebugCaptureBuffer? = null,
     /**
      * Per-frame callback fired after the analyzer has
      * constructed the [`FfiFrame`] and pushed it to the
      * engine. `null` when no active capture is recording.
-     * Used by `CaptureRecorder` to tap every analyzer frame
-     * into the capture directory's `frames/` subtree so
-     * Start→Stop recording captures *every* frame, not just
-     * the contributing-frame bytes of a fix.
      */
     private val captureFrameTap: ((FfiFrame) -> Unit)? = null,
     /**
@@ -103,15 +97,6 @@ class FrameAnalyzer(
             engine.pushFrame(ffiFrame)
             frameCount.incrementAndGet()
             captureFrameTap?.invoke(ffiFrame)
-            if (debugCaptureProvider() && debugBuffer != null) {
-                val snap = engine.snapshot.value
-                debugBuffer.appendFrame(
-                    ffiFrame,
-                    snap,
-                    exposureUs = ffiFrame.exposureUs,
-                    sensorGainEPerAdu = ffiFrame.gainEPerAdu,
-                )
-            }
         } catch (t: Throwable) {
             // CameraX runs the analyzer on a background thread.
             // An uncaught exception here would propagate up

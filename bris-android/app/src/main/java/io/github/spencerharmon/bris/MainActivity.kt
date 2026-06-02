@@ -8,34 +8,36 @@ import androidx.compose.material3.Surface
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Modifier
-import androidx.lifecycle.lifecycleScope
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
+import io.github.spencerharmon.bris.engine.LensCatalog
 import io.github.spencerharmon.bris.ui.CalibrationScreen
 import io.github.spencerharmon.bris.ui.LiveScreen
-import io.github.spencerharmon.bris.ui.PreUploadReviewScreen
 import io.github.spencerharmon.bris.ui.SessionEditScreen
 import io.github.spencerharmon.bris.ui.SessionPickerScreen
 import io.github.spencerharmon.bris.ui.SettingsScreen
 import io.github.spencerharmon.bris.ui.SightLogDetailScreen
 import io.github.spencerharmon.bris.ui.SightLogScreen
-import io.github.spencerharmon.bris.engine.LensCatalog
 import java.net.URLDecoder
 import java.net.URLEncoder
 
 /**
- * Single-activity entry point. Compose nav-graph holds the four
+ * Single-activity entry point. Compose nav-graph holds the
  * screens that exist in the spike:
  *
  *  - "live"  — camera preview + diagnostic overlay.
- *  - "calibration" — capture checkerboard frames + run calibration.
- *  - "settings" — operator preferences. Debug-mode toggle lives here.
- *  - "review" — pre-upload review screen for any of the three
- *    "send" actions (fix / calibration / debug capture).
+ *  - "calibration" — capture checkerboard frames + run
+ *    calibration.
+ *  - "settings" — operator preferences (lens, hemisphere,
+ *    Debug mode, Share sessions).
+ *  - "sessions" / "sessions/edit/{uuid}" — session picker
+ *    and editor.
+ *  - "sight-log" / "sight-log/{dir}" — captured-fix log
+ *    list and detail.
  *
- * Debug-mode-aware affordances throughout the app are gated on
- * `Prefs.debugMode`; this activity only routes between screens.
+ * Debug-mode gates per-frame disk writes and GPS-truth
+ * attachment; this activity only routes between screens.
  */
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -49,11 +51,6 @@ class MainActivity : ComponentActivity() {
                     val debugMode by prefs.debugModeFlow.collectAsState(initial = false)
                     val selectedLensId by prefs.selectedLensIdFlow.collectAsState(initial = null)
                     val context = androidx.compose.ui.platform.LocalContext.current
-                    // Resolve the effective lens id once per recomposition: the
-                    // operator's saved choice if present, otherwise CameraX's
-                    // default-back-camera id, otherwise the catalog fallback
-                    // sentinel. This keeps the calibration-storage key stable
-                    // even before the operator visits Settings.
                     val defaultBackId = androidx.compose.runtime.remember(context) {
                         LensCatalog.defaultBackCameraId(context) ?: LensCatalog.FALLBACK_LENS_ID
                     }
@@ -64,7 +61,6 @@ class MainActivity : ComponentActivity() {
                             LiveScreen(
                                 debugMode = debugMode,
                                 onOpenSettings = { nav.navigate("settings") },
-                                onSendFix = { nav.navigate("review/fix") },
                                 onOpenCalibration = { nav.navigate("calibration") },
                                 onOpenSightLog = { nav.navigate("sight-log") },
                                 onOpenSessions = { nav.navigate("sessions") },
@@ -98,21 +94,6 @@ class MainActivity : ComponentActivity() {
                                 debugMode = debugMode,
                                 lensId = effectiveLensId,
                                 onBack = { nav.popBackStack() },
-                                onSendCalibration = { nav.navigate("review/calibration") },
-                            )
-                        }
-                        composable("review/{kind}") { backStack ->
-                            val kind = backStack.arguments?.getString("kind") ?: "fix"
-                            PreUploadReviewScreen(
-                                kind = kind,
-                                onBack = { nav.popBackStack() },
-                                onSend = {
-                                    // Submission orchestration is wired in
-                                    // io.github.spencerharmon.bris.upload.Submitter once
-                                    // an end-to-end test exists; the spike
-                                    // currently logs and dismisses.
-                                    nav.popBackStack()
-                                },
                             )
                         }
                         composable("sight-log") {

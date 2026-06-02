@@ -150,3 +150,79 @@ class CaptureFrameWriterTest {
         w.close()
     }
 }
+
+class CaptureFrameWriterRetentionTest {
+
+    @get:org.junit.Rule
+    val tmp = org.junit.rules.TemporaryFolder()
+
+    private fun mk(name: String) = tmp.newFolder(name)
+
+    @org.junit.Test
+    fun appendFrame_writes_retention_debug() {
+        val w = CaptureFrameWriter(mk("a"))
+        w.appendFrame(2, 2, ByteArray(4), 1L)
+        w.close()
+        val sidecar = org.json.JSONObject(
+            java.io.File(tmp.root, "a/frames/00000000.json").readText(),
+        )
+        org.junit.Assert.assertEquals("debug", sidecar.getString("retention"))
+    }
+
+    @org.junit.Test
+    fun writeFixFrame_with_unseen_seq_writes_retention_fix_frame() {
+        val w = CaptureFrameWriter(mk("b"))
+        w.writeFixFrame(2, 2, ByteArray(4), 5L)
+        w.close()
+        val sidecar = org.json.JSONObject(
+            java.io.File(tmp.root, "b/frames/00000000.json").readText(),
+        )
+        org.junit.Assert.assertEquals("fix_frame", sidecar.getString("retention"))
+    }
+
+    @org.junit.Test
+    fun writeFixFrame_promotes_existing_debug_in_place() {
+        val w = CaptureFrameWriter(mk("c"))
+        w.appendFrame(2, 2, ByteArray(4) { it.toByte() }, 10L)
+        // Pretend this seq=0 frame ended up as a fix-frame.
+        w.writeFixFrame(2, 2, ByteArray(4) { (it + 100).toByte() }, 99L, frameSeq = 0)
+        w.close()
+
+        val sidecar = org.json.JSONObject(
+            java.io.File(tmp.root, "c/frames/00000000.json").readText(),
+        )
+        org.junit.Assert.assertEquals("fix_frame", sidecar.getString("retention"))
+        // Captured-at and pixel bytes should be the original
+        // (promotion is sidecar-rewrite only, not file copy).
+        org.junit.Assert.assertEquals(10L, sidecar.getLong("captured_unix_ms"))
+        val pgm = java.io.File(tmp.root, "c/frames/00000000.pgm").readBytes()
+        org.junit.Assert.assertEquals(0.toByte(), pgm[pgm.size - 4])
+    }
+
+    @org.junit.Test
+    fun writeFixFrame_with_explicit_unseen_seq_uses_it() {
+        val w = CaptureFrameWriter(mk("d"))
+        w.writeFixFrame(2, 2, ByteArray(4), 0L, frameSeq = 42)
+        w.close()
+        org.junit.Assert.assertTrue(java.io.File(tmp.root, "d/frames/00000042.pgm").exists())
+        org.junit.Assert.assertFalse(java.io.File(tmp.root, "d/frames/00000000.pgm").exists())
+    }
+
+    @org.junit.Test
+    fun index_row_carries_retention_label() {
+        val w = CaptureFrameWriter(mk("e"))
+        w.appendFrame(2, 2, ByteArray(4), 1L)
+        w.writeFixFrame(2, 2, ByteArray(4), 2L)
+        w.close()
+        val lines = java.io.File(tmp.root, "e/index.jsonl").readText().trim().lines()
+        org.junit.Assert.assertEquals(2, lines.size)
+        org.junit.Assert.assertEquals(
+            "debug",
+            org.json.JSONObject(lines[0]).getString("retention"),
+        )
+        org.junit.Assert.assertEquals(
+            "fix_frame",
+            org.json.JSONObject(lines[1]).getString("retention"),
+        )
+    }
+}

@@ -106,6 +106,12 @@ class CaptureRecorder(
      * once at finalize, after the frame writer is closed.
      */
     private val bundleInputsProvider: (() -> DebugBundleWriter.Inputs)? = null,
+    /**
+     * Returns the operator's current Debug-mode toggle
+     * state. Gates the per-frame analyzer-tap writes; fix
+     * frames are persisted regardless.
+     */
+    private val debugModeProvider: () -> Boolean = { false },
 ) {
 
     private val _status = MutableStateFlow<CaptureStatus>(CaptureStatus.Idle)
@@ -125,10 +131,13 @@ class CaptureRecorder(
      * Per-analyzer-frame tap. LiveScreen wires this as
      * `FrameAnalyzer.captureFrameTap` so every frame seen
      * during Start→Stop lands in the capture directory's
-     * `frames/` regardless of fix outcome. No-op when the
-     * recorder isn't currently capturing.
+     * `frames/` — BUT only when Debug mode is ON. With
+     * Debug OFF, the tap is a no-op; fix-frames are still
+     * persisted by `finalize` pulling from the engine ring
+     * buffer.
      */
     fun onAnalyzerFrame(frame: uniffi.bris_ffi.FfiFrame) {
+        if (!debugModeProvider()) return
         val writer = frameWriter ?: return
         try {
             writer.appendFrame(
@@ -301,14 +310,53 @@ class CaptureRecorder(
                 coreVersion = coreVersion,
             )
 
-            // Close the streaming frame writer (if any) and
-            // emit `bundle.json` into the capture directory.
-            // This is what makes the capture self-contained:
-            // every analyzer frame seen during Start→Stop is
-            // already on disk (via the frame tap), and now
-            // the manifest gets written alongside.
+            // Promote contributing fix-frames into the same
+            // `frames/` directory as debug frames (sidecar
+            // retention class differentiates). If a fix-frame
+            // wasn't already on disk (Debug OFF path), the
+            // writer pulls bytes from the engine ring buffer
+            // and writes fresh.
             val writer = frameWriter
             val dir = captureDir
+            if (writer != null && dir != null && outcome is CaptureOutcome.Captured) {
+                for ((frameId, bytes) in frames) {
+                    // frameId from FFI is opaque u64; not the
+                    // same as the writer's per-capture seq.
+                    // Pass null to let the writer assign a
+                    // fresh seq (Debug OFF case) or to
+                    // append a duplicate slot — promotion of
+                    // an already-debug-written fix-frame
+                    // happens only when we have an explicit
+                    // seq mapping, which we don't today. The
+                    // result: with Debug ON the fix-frame is
+                    // written once by the analyzer tap with
+                    // retention=debug AND once here with
+                    // retention=fix_frame; with Debug OFF
+                    // only once with retention=fix_frame.
+                    // The duplicate-on-Debug case is harmless
+                    // (cheap KB sidecar + N MB pgm) and will
+                    // be deduped when the engine grows a
+                    // frame_id->seq map. Tracked TODO.
+                    runCatching {
+                        writer.writeFixFrame(
+                            width = bytes.width,
+                            height = bytes.height,
+                            pixels = ffiPixelsToBytes(bytes),
+                            capturedUnixMs = bytes.capturedAt.toEpochMilli(),
+                        )
+                    }.onFailure {
+                        android.util.Log.w(
+                            TAG,
+                            "writeFixFrame frameId=$frameId failed: ${it.message}",
+                        )
+                    }
+                }
+            }
+
+            // Close the streaming frame writer (if any) and
+            // emit `bundle.json` into the capture directory.
+            // Always written: replay tooling needs it; the
+            // KB cost is trivial.
             if (writer != null && dir != null) {
                 writer.close()
                 frameWriter = null
@@ -317,15 +365,10 @@ class CaptureRecorder(
                     val frameCount = writer.frameCount()
                     val startedMs = writer.startedUnixMs() ?: captureStartedAtMs
                     val endedMs = writer.endedUnixMs() ?: System.currentTimeMillis()
-                    val snap = DebugCaptureBuffer.CaptureSnapshot(
+                    val snap = DebugBundleWriter.CaptureSnapshot(
                         frameCount = frameCount.toLong(),
                         startedUnixMs = startedMs,
                         endedUnixMs = endedMs,
-                        // CaptureRecorder doesn't compute a frame
-                        // hash today; bundle integrity verification
-                        // via blake3 is reserved for the share-
-                        // capture export path. Empty string =
-                        // "not recorded" downstream.
                         firstFrameBlake3 = "",
                         firstFrameWidth = 0,
                         firstFrameHeight = 0,
@@ -375,6 +418,27 @@ class CaptureRecorder(
     companion object {
         private const val WATCHDOG_TICK_MS = 200L
         private const val TAG = "CaptureRecorder"
+
+        /**
+         * SightLog.FrameBytes holds u16 little-endian pixels
+         * (FFI widens the analyzer's 8-bit Y plane). The
+         * unified frame writer wants 8-bit Y; take the high
+         * byte of each u16, matching `SightLog.writePgm`.
+         */
+        private fun ffiPixelsToBytes(bytes: SightLog.FrameBytes): ByteArray {
+            val w = bytes.width
+            val h = bytes.height
+            val src = bytes.pixelsLe
+            val out = ByteArray(w * h)
+            var i = 0
+            var o = 0
+            while (o < out.size) {
+                out[o] = src[i + 1] // high byte of LE u16
+                i += 2
+                o += 1
+            }
+            return out
+        }
     }
 }
 
