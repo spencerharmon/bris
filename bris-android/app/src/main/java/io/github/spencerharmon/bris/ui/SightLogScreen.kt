@@ -22,7 +22,6 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import io.github.spencerharmon.bris.engine.BodyLabel
 import io.github.spencerharmon.bris.engine.EngineWrapper
-import io.github.spencerharmon.bris.engine.Exporter
 import io.github.spencerharmon.bris.engine.CaptureCatalog
 import io.github.spencerharmon.bris.engine.SightLog
 import kotlinx.coroutines.Dispatchers
@@ -215,7 +214,6 @@ fun SightLogDetailScreen(
 ) {
     val context = LocalContext.current
     val sightLog = remember(context) { SightLog.forApp(context) }
-    val exporter = remember(context) { Exporter.forApp(context) }
     val scope = androidx.compose.runtime.rememberCoroutineScope()
     val sessionDir = remember(context, dirName) { File(sightLog.list().firstOrNull { it.name == dirName }?.absolutePath ?: "/dev/null") }
     var manifestJson by remember { mutableStateOf<String?>(null) }
@@ -273,22 +271,11 @@ fun SightLogDetailScreen(
             modifier = Modifier.padding(top = 16.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            Button(onClick = {
-                // Mirror the entry into <external-files>/exports/
-                // for adb-pull / MTP transfer. The original
-                // <external-files>/sights/<id>/ directory is also
-                // pullable, but the exports/ tree groups every
-                // kind (fix, calibration, debug capture) under a
-                // single directory the operator can sync wholesale.
-                scope.launch {
-                    val dest = withContext(Dispatchers.IO) {
-                        exporter.exportSightEntry(sessionDir)
-                    }
-                    statusText = "Saved bundle to ${dest.absolutePath}"
-                }
-            }) {
-                Text("Save bundle for transfer")
-            }
+            // The capture's contents (manifest.json + frames/)
+            // are already at the canonical session path; no
+            // separate "save" or "send" action remains. The
+            // Settings "Share sessions" action exports the
+            // entire tree.
             OutlinedButton(onClick = {
                 val n = sightLog.deleteImages(sessionDir)
                 statusText = "Deleted $n image file(s); manifest + diagnostics retained."
