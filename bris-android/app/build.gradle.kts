@@ -79,10 +79,11 @@ android {
         // bundle.json's `build` block; see plan.org Phase 8.5.
         buildConfigField("String", "BRIS_APP_VERSION", "\"$gitDescribe\"")
         buildConfigField("int", "BRIS_VERSION_CODE", "$gitCommitCount")
-        // Diagnostic-collection upload is a spike, not a
-        // production surface. Hard-coded false so a developer
-        // building locally can't silently enable remote submit
-        // without editing source (visible in code review).
+        // Diagnostic-collection upload was a spike that was
+        // removed when the on-device save paths were unified;
+        // the in-app submission UI is gone. This flag is no
+        // longer referenced and is kept only as a stub for
+        // any future re-attachment of an upload path.
         buildConfigField("boolean", "ENABLE_REMOTE_SUBMIT", "false")
     }
 
@@ -158,8 +159,8 @@ dependencies {
     // crashing CameraX's bindToLifecycle on real devices).
     implementation("androidx.lifecycle:lifecycle-runtime-compose:2.8.7")
     implementation("androidx.datastore:datastore-preferences:1.1.1")
-    // SAF helpers (DocumentFile) for the operator-chosen
-    // "Save buffer" destination in debug-mode.
+    // SAF helpers (DocumentFile) for the Settings
+    // "Share sessions" tree-uri destination picker.
     implementation("androidx.documentfile:documentfile:1.0.1")
 
     // CameraX

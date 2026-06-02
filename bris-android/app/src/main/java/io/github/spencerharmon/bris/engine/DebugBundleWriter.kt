@@ -56,6 +56,21 @@ object DebugBundleWriter {
         val eyeHeightM: Double,
     )
 
+    /**
+     * Capture-window summary used to populate
+     * `bris_bundle::CaptureInfo`. Previously lived on
+     * `DebugCaptureBuffer`; relocated here when the
+     * rolling-buffer path was deleted.
+     */
+    data class CaptureSnapshot(
+        val frameCount: Long,
+        val startedUnixMs: Long,
+        val endedUnixMs: Long,
+        val firstFrameBlake3: String,
+        val firstFrameWidth: Int,
+        val firstFrameHeight: Int,
+    )
+
     /** Inputs the caller pulls together before invoking [write]. */
     data class Inputs(
         /** Operator-entered AP fed to the engine, or `null` for cold-start. */
@@ -89,7 +104,7 @@ object DebugBundleWriter {
     fun write(
         bundleDir: java.io.File,
         bundleId: String,
-        snapshot: DebugCaptureBuffer.CaptureSnapshot,
+        snapshot: CaptureSnapshot,
         inputs: Inputs,
     ): Boolean {
         val manifest = buildManifestJson(bundleId, snapshot, inputs)
@@ -108,7 +123,7 @@ object DebugBundleWriter {
 
     internal fun buildManifestJson(
         bundleId: String,
-        snapshot: DebugCaptureBuffer.CaptureSnapshot,
+        snapshot: CaptureSnapshot,
         inputs: Inputs,
     ): JSONObject {
         val device = JSONObject()

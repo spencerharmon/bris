@@ -43,11 +43,6 @@ import uniffi.bris_ffi.FfiCalibrationResult
  * Sessions are append-only; the current session for a given
  * `(lens, resolution)` is "the most recently created", which
  * sorts correctly because session ids are time-prefixed.
- *
- * Submission flow: `PreUploadReviewScreen` reads the latest
- * session's frames + intrinsics, includes them as media in the
- * `submission_kind = "calibration"` manifest, posts to the
- * collector.
  */
 class CalibrationStore(private val rootDir: File) {
 

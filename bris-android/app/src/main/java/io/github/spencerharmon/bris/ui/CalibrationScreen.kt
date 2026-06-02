@@ -47,7 +47,6 @@ import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import io.github.spencerharmon.bris.engine.CalibrationStore
 import io.github.spencerharmon.bris.engine.CameraConstants
-import io.github.spencerharmon.bris.engine.Exporter
 import io.github.spencerharmon.bris.engine.LensCatalog
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -114,13 +113,11 @@ fun CalibrationScreen(
     debugMode: Boolean,
     lensId: String,
     onBack: () -> Unit,
-    onSendCalibration: () -> Unit,
 ) {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
     val scope = rememberCoroutineScope()
     val store = remember(context) { CalibrationStore.forApp(context) }
-    val exporter = remember(context) { Exporter.forApp(context) }
     // Calibrate at the same resolution the live engine
     // captures at: the chosen lens's native maximum
     // (CameraConstants.maxOutputSizeFor). Calibrating at a
@@ -373,30 +370,10 @@ fun CalibrationScreen(
                 ) { Text("New session") }
                 OutlinedButton(modifier = Modifier.weight(1f), onClick = onBack) { Text("Back") }
             }
-            // Save / send (always available; the data is
-            // operator-owned, sits in app-local external-files,
-            // and can be transferred via adb pull regardless
-            // of debug mode). The collector POST stays
-            // debug-mode-gated because it leaves the device.
-            Button(
-                modifier = Modifier.fillMaxWidth(),
-                enabled = tally.value.good > 0,
-                onClick = {
-                    scope.launch {
-                        val dest = withContext(Dispatchers.IO) {
-                            exporter.exportCalibrationSession(sessionDir)
-                        }
-                        status = "Saved to ${dest.absolutePath}"
-                    }
-                },
-            ) { Text("Save calibration to phone") }
-            if (debugMode && io.github.spencerharmon.bris.BuildConfig.ENABLE_REMOTE_SUBMIT) {
-                Button(
-                    modifier = Modifier.fillMaxWidth(),
-                    enabled = tally.value.good > 0,
-                    onClick = onSendCalibration,
-                ) { Text("Send calibration to collector (debug)") }
-            }
+            // Calibration is persisted in place by
+            // CalibrationStore as frames are captured;
+            // intrinsics are written at finalize. No
+            // explicit "save" or "send" action remains here.
         }
     }
 

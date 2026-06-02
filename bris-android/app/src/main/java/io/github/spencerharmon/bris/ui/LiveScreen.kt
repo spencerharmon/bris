@@ -58,7 +58,6 @@ import io.github.spencerharmon.bris.Prefs
 import io.github.spencerharmon.bris.engine.CalibrationSource
 import io.github.spencerharmon.bris.engine.CalibrationStore
 import io.github.spencerharmon.bris.engine.CameraConstants
-import io.github.spencerharmon.bris.engine.DebugCaptureBuffer
 import io.github.spencerharmon.bris.engine.EngineWrapper
 import io.github.spencerharmon.bris.engine.FixVerdict
 import io.github.spencerharmon.bris.engine.FrameAnalyzer
@@ -118,7 +117,6 @@ import java.util.concurrent.Executors
 fun LiveScreen(
     debugMode: Boolean,
     onOpenSettings: () -> Unit,
-    onSendFix: () -> Unit,
     onOpenCalibration: () -> Unit,
     onOpenSightLog: () -> Unit,
     onOpenSessions: () -> Unit,
@@ -153,7 +151,6 @@ fun LiveScreen(
     }
 
     val prefs = remember(context) { Prefs(context) }
-    val debugCaptureEnabled by prefs.debugCaptureFlow.collectAsState(initial = false)
     val selectedLensId by prefs.selectedLensIdFlow.collectAsState(initial = null)
     val defaultBackId = remember(context) {
         LensCatalog.defaultBackCameraId(context) ?: LensCatalog.FALLBACK_LENS_ID
@@ -173,7 +170,6 @@ fun LiveScreen(
         CameraConstants.maxOutputSizeFor(context, effectiveLensId)
             ?: android.util.Size(1280, 720)
     }
-    val debugBuffer = remember(context) { DebugCaptureBuffer.forApp(context) }
     val calStore = remember(context) { CalibrationStore.forApp(context) }
     val calibration = remember(context, effectiveLensId, captureSize) {
         resolveCalibration(
@@ -215,16 +211,13 @@ fun LiveScreen(
                     storeDataRoot = storeRoot,
                 )
             },
-            pbrisSink = { line ->
-                if (debugCaptureEnabled) debugBuffer.appendPbris(line)
-            },
+            pbrisSink = null,
         )
     }
-    // Shared bundle.json inputs builder. Used by both the
-    // streaming capture-recorder write at Stop and the
-    // (now-legacy) DebugBuffer "Save buffer" path. Capturing
-    // the same inputs at both call sites keeps the two
-    // writers honest against each other.
+    // Bundle.json inputs builder. Used by CaptureRecorder
+    // to construct the schema-versioned manifest at
+    // finalize. Always written (KB cost); replay tooling
+    // consumes it.
     val bundleInputsBuilder: () -> io.github.spencerharmon.bris.engine.DebugBundleWriter.Inputs = {
         io.github.spencerharmon.bris.engine.DebugBundleWriter.Inputs(
             observer = io.github.spencerharmon.bris.engine.DebugBundleWriter.ObserverFix(
@@ -277,6 +270,7 @@ fun LiveScreen(
                 java.io.File(capturesRoot, capId)
             },
             bundleInputsProvider = bundleInputsBuilder,
+            debugModeProvider = { debugMode },
         )
     }
     val snapshot by engine.snapshot.collectAsState()
@@ -322,14 +316,7 @@ fun LiveScreen(
     }
     val captureActive = captureStatus is CaptureStatus.Capturing ||
         captureStatus is CaptureStatus.Saving
-    val bufferState by debugBuffer.stateFlow.collectAsState()
     val snackbarHost = remember { SnackbarHostState() }
-    val saveAction = rememberDebugSaveAction(
-        buffer = debugBuffer,
-        prefs = prefs,
-        snackbarHost = snackbarHost,
-        bundleInputsProvider = bundleInputsBuilder,
-    )
 
     Box(modifier = Modifier.fillMaxSize()) {
         // Top-right confidence-ellipse HUD. Sits above the
@@ -350,8 +337,6 @@ fun LiveScreen(
             captureActive = captureActive,
             engine = engine,
             persistedIntrinsics = persistedIntrinsicsFor(calibration),
-            debugCaptureEnabled = debugCaptureEnabled,
-            debugBuffer = debugBuffer,
             lensId = effectiveLensId,
             captureSize = captureSize,
             captureFrameTap = recorder::onAnalyzerFrame,
@@ -376,9 +361,8 @@ fun LiveScreen(
                 calibrationSource = calibration,
                 lensLabel = lensLabelFor(context, effectiveLensId),
                 captureSize = captureSize,
-                debugCaptureEnabled = debugCaptureEnabled,
+                debugMode = debugMode,
                 captureActive = captureActive,
-                bufferState = bufferState,
             )
             RecoveredFixBanner(visible = showRecoveredBanner, fix = recoveredFix)
             PoolSummaryChip(sights = poolSights)
@@ -430,12 +414,6 @@ fun LiveScreen(
                 OutlinedButton(onClick = onOpenCalibration) { Text("Calibration") }
                 OutlinedButton(onClick = onOpenSessions) { Text("Sessions") }
             }
-            if (debugMode) {
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Button(onClick = onSendFix) { Text("Send fix (debug)") }
-                    OutlinedButton(onClick = saveAction) { Text("Save buffer") }
-                }
-            }
         }
 
         SnackbarHost(
@@ -464,8 +442,6 @@ private fun CameraSurface(
     captureActive: Boolean,
     engine: EngineWrapper,
     persistedIntrinsics: CalibrationStore.PersistedIntrinsics?,
-    debugCaptureEnabled: Boolean,
-    debugBuffer: DebugCaptureBuffer,
     lensId: String,
     captureSize: android.util.Size,
     captureFrameTap: ((uniffi.bris_ffi.FfiFrame) -> Unit)? = null,
@@ -547,8 +523,6 @@ private fun CameraSurface(
                             targetHeight = captureSize.height,
                         )
                     },
-                    debugCaptureProvider = { debugCaptureEnabled },
-                    debugBuffer = debugBuffer,
                     captureFrameTap = captureFrameTap,
                 ),
             )
@@ -581,65 +555,6 @@ private fun CameraSurface(
     )
 }
 
-/**
- * Inline HUD chip explaining the debug-capture state.
- *
- * Shown only when Debug capture is enabled. While the session
- * is idle (toggle on but Start capture not yet pressed) the
- * chip reads "Debug armed" to make the toggle/capture
- * relationship obvious; while capturing it shows a pulsing
- * red `REC` dot plus frame count + on-disk size; while paused
- * after a recent append the dot is static grey.
- */
-@Composable
-private fun DebugBufferChip(
-    bufferState: DebugCaptureBuffer.BufferState,
-    captureActive: Boolean,
-) {
-    val context = LocalContext.current
-    if (!captureActive) {
-        Text(
-            "Debug armed \u2014 press Start capture to record",
-            color = Color(0xFFB0B0B0),
-        )
-        return
-    }
-    val recentMs = bufferState.lastAppendUnixMs ?: 0L
-    val isLive = System.currentTimeMillis() - recentMs < 1500L
-    // Only pulse when actively recording; the static grey
-    // dot for the "paused but armed" state is intentionally
-    // not animated (drawing attention to it would mislead).
-    val dotAlpha = if (isLive) {
-        val transition = rememberInfiniteTransition(label = "rec-dot")
-        transition.animateFloat(
-            initialValue = 1.0f,
-            targetValue = 0.3f,
-            animationSpec = infiniteRepeatable(
-                animation = tween(durationMillis = 700, easing = LinearEasing),
-                repeatMode = RepeatMode.Reverse,
-            ),
-            label = "rec-dot-alpha",
-        ).value
-    } else {
-        1.0f
-    }
-    val dotColor = if (isLive) Color(0xFFE53935) else Color(0xFF808080)
-    Row(
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(6.dp),
-    ) {
-        Box(
-            modifier = Modifier
-                .size(10.dp)
-                .background(dotColor.copy(alpha = dotAlpha), CircleShape),
-        )
-        val size = Formatter.formatShortFileSize(context, bufferState.totalBytes)
-        Text(
-            "REC  ${bufferState.frameCount} frames \u00b7 $size",
-            color = Color.White,
-        )
-    }
-}
 
 /**
  * Top-of-screen translucent panel with the engine + session
@@ -664,9 +579,8 @@ private fun DiagnosticOverlay(
     calibrationSource: CalibrationSource,
     lensLabel: String,
     captureSize: android.util.Size,
-    debugCaptureEnabled: Boolean,
+    debugMode: Boolean,
     captureActive: Boolean,
-    bufferState: DebugCaptureBuffer.BufferState,
 ) {
     // Provenance-honest calibration label. Operator-run
     // sessions are the gold standard; factory profiles are
@@ -695,10 +609,10 @@ private fun DiagnosticOverlay(
             .padding(8.dp),
         verticalArrangement = Arrangement.spacedBy(2.dp),
     ) {
-        if (debugCaptureEnabled) {
-            DebugBufferChip(
-                bufferState = bufferState,
-                captureActive = captureActive,
+        if (debugMode && captureActive) {
+            Text(
+                "DEBUG · frames archived to capture dir",
+                color = Color(0xFFFFC107),
             )
         }
         Text(calibLabel, color = Color.White)

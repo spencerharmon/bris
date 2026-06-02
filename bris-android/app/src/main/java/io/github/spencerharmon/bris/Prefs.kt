@@ -15,55 +15,30 @@ private val Context.dataStore by preferencesDataStore(name = "bris_prefs")
 /**
  * Operator-facing preferences.
  *
- * The single load-bearing key is `debug_mode`: when off, no
- * diagnostic-collection UI is visible anywhere in the app. The
- * three contextual actions (debug capture, send fix, send
- * calibration) all gate on `debug_mode = true`.
+ * `debug_mode` gates per-frame disk writes for non-fix frames
+ * during a capture, plus GPS-truth attachment to `bundle.json`.
+ * See `docs/design/diagnostic_collection.md` for the full
+ * contract.
  *
  * `device_uuid` is a stable per-install identifier generated on
- * first access. It is included in every diagnostic submission's
- * manifest. The collector logs it hashed-truncated; the raw
- * value never leaves the device except in submission manifests.
+ * first access. Included in capture manifests.
  */
 class Prefs(private val context: Context) {
 
     val debugModeFlow: Flow<Boolean> = context.dataStore.data.map { it[KEY_DEBUG_MODE] ?: false }
-    val debugCaptureFlow: Flow<Boolean> = context.dataStore.data.map { it[KEY_DEBUG_CAPTURE] ?: false }
-    val collectorBaseFlow: Flow<String> = context.dataStore.data.map { it[KEY_COLLECTOR_BASE] ?: "" }
-
-    /**
-     * Operator-chosen Storage Access Framework tree URI for
-     * "Save buffer" exports, or `null` if not yet picked. Stored
-     * as the URI string; the caller resolves it via
-     * `Uri.parse(...)`. First save without this prompts the
-     * system tree picker; subsequent saves go directly to the
-     * stored location.
-     */
-    val debugSaveLocationFlow: Flow<String?> = context.dataStore.data.map { it[KEY_DEBUG_SAVE_URI] }
 
     /**
      * Operator-selected physical-camera lens id, or `null` if
      * the operator has not chosen one yet (in which case
      * callers fall back to a heuristic default).
-     *
-     * The id is the underlying Camera2 `cameraId` string
-     * surfaced by [`io.github.spencerharmon.bris.engine.LensCatalog`]; it is
-     * stable across app launches on a given device but is
-     * device-specific. Calibration intrinsics are keyed by
-     * this id so a wide-lens calibration never silently
-     * applies to the telephoto.
      */
     val selectedLensIdFlow: Flow<String?> = context.dataStore.data.map { it[KEY_SELECTED_LENS_ID] }
 
     /**
-     * Operator-supplied coarse hemisphere hint ("N", "S", or
-     * `null` = unset) for the cold-start CoP solver. Maps to
-     * `EngineConfig::cold_start.coarse_hemisphere` once the
-     * FFI surfaces that field; currently scaffolded so the UI
-     * has somewhere to write to.
-     *
-     * TODO(cold-start): wire to FFI once the cold-start
-     * fallback PR adds the field.
+     * Coarse hemisphere hint ("N", "S", or `null` = unset) for
+     * the cold-start CoP solver. Wires through to
+     * `FfiEngineConfig.cold_start_coarse_hemisphere`. Applied
+     * at next engine construction.
      */
     val coarseHemisphereFlow: Flow<String?> = context.dataStore.data.map { it[KEY_COARSE_HEMISPHERE] }
 
@@ -71,33 +46,13 @@ class Prefs(private val context: Context) {
      * Operator-selected active session id (UUIDv4 string), or
      * `null` if no session is currently selected. New captures
      * land under `<external-files>/sessions/<uuid>/captures/`
-     * when set; the LiveScreen offers "create session" /
-     * "resume session" entry points to populate it.
-     *
-     * When `null` at first-capture press, a default session
-     * named `"Untitled <date>"` is auto-created and made active
-     * so captures are never orphans on disk.
+     * when set; the LiveScreen auto-creates an `Untitled <date>`
+     * session at first-capture press otherwise.
      */
     val activeSessionIdFlow: Flow<String?> = context.dataStore.data.map { it[KEY_ACTIVE_SESSION_ID] }
 
     suspend fun setDebugMode(enabled: Boolean) {
         context.dataStore.edit { it[KEY_DEBUG_MODE] = enabled }
-    }
-
-    suspend fun setDebugCapture(enabled: Boolean) {
-        context.dataStore.edit { it[KEY_DEBUG_CAPTURE] = enabled }
-    }
-
-    suspend fun setCollectorBase(url: String) {
-        context.dataStore.edit { it[KEY_COLLECTOR_BASE] = url }
-    }
-
-    /** Persist (or clear, with `null`) the SAF tree URI used
-     *  by "Save buffer" for debug exports. */
-    suspend fun setDebugSaveLocation(uri: String?) {
-        context.dataStore.edit {
-            if (uri == null) it.remove(KEY_DEBUG_SAVE_URI) else it[KEY_DEBUG_SAVE_URI] = uri
-        }
     }
 
     /** Persist the operator's lens selection. */
@@ -132,11 +87,8 @@ class Prefs(private val context: Context) {
 
     companion object {
         private val KEY_DEBUG_MODE = booleanPreferencesKey("debug_mode")
-        private val KEY_DEBUG_CAPTURE = booleanPreferencesKey("debug_capture")
-        private val KEY_COLLECTOR_BASE = stringPreferencesKey("collector_base")
         private val KEY_DEVICE_UUID = stringPreferencesKey("device_uuid")
         private val KEY_SELECTED_LENS_ID = stringPreferencesKey("selected_lens_id")
-        private val KEY_DEBUG_SAVE_URI = stringPreferencesKey("debug_save_uri")
         private val KEY_COARSE_HEMISPHERE = stringPreferencesKey("coarse_hemisphere")
         private val KEY_ACTIVE_SESSION_ID = stringPreferencesKey("active_session_id")
     }
