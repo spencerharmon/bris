@@ -230,17 +230,10 @@ object DebugBundleWriter {
         val sourceObj = when (source) {
             is CalibrationSource.Operator ->
                 JSONObject().put("kind", "user_calibration")
-                    // The on-device `CalibrationSource.Operator`
-                    // doesn't carry the underlying session
-                    // ULID; synthesise a stable id from the
-                    // calibrated resolution so replay tooling
-                    // can at least correlate two bundles that
-                    // ran against the same calibration.
-                    .put(
-                        "calibration_id",
-                        "operator-${source.intrinsics.width}x${source.intrinsics.height}",
-                    )
-            is CalibrationSource.Factory -> JSONObject().put("kind", "factory")
+                    .put("calibration_id", source.calibrationId)
+            is CalibrationSource.Factory ->
+                JSONObject().put("kind", "factory")
+                    .put("calibration_id", source.calibrationId)
             CalibrationSource.Placeholder -> JSONObject().put("kind", "placeholder")
         }
         // Brown-Conrady is the only model the on-device path

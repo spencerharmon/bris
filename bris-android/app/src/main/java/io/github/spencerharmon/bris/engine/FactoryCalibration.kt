@@ -57,6 +57,15 @@ object FactoryCalibration {
     data class Profile(
         /** `Build.MODEL` strings this profile applies to. */
         val models: List<String>,
+        /**
+         * Stable UUID for this factory profile. Baked into
+         * the source so captures running against this
+         * profile can stamp `bundle.intrinsics.source.
+         * calibration_id` with a well-known back-reference
+         * that downstream tooling can resolve to the same
+         * intrinsics + diagnosis data.
+         */
+        val calibrationId: java.util.UUID,
         /** Lens id as enumerated by `LensCatalog.enumerate`. */
         val lensId: String,
         /** Capture width in pixels the intrinsics were solved at. */
@@ -148,6 +157,13 @@ object FactoryCalibration {
         // ─────────────────────────────────────────────────────
         Profile(
             models = listOf("S62", "S62 Pro", "S62Pro"),
+            // Stable v4 UUID for the Cat S62 Pro main rear
+            // camera at 4032×3024. Bake-in: never
+            // regenerate or this back-reference breaks for
+            // every capture that already stamped it.
+            calibrationId = java.util.UUID.fromString(
+                "f15e1aa1-5ca7-4c62-b62f-cab1a1bca1ed",
+            ),
             lensId = "0",
             width = 4032,
             height = 3024,

@@ -14,7 +14,17 @@ package io.github.spencerharmon.bris.engine
  */
 sealed class CalibrationSource {
     /** Operator ran the in-app calibration workflow. Most trustworthy. */
-    data class Operator(val intrinsics: CalibrationStore.PersistedIntrinsics) : CalibrationSource()
+    data class Operator(
+        val intrinsics: CalibrationStore.PersistedIntrinsics,
+        /**
+         * UUID of the calibration session that produced
+         * these intrinsics. Stamped into
+         * `bundle.intrinsics.source.calibration_id` so
+         * captures can be traced back to their calibration
+         * for debugging.
+         */
+        val calibrationId: String,
+    ) : CalibrationSource()
 
     /**
      * A shipped factory profile matched the device + lens +
@@ -24,6 +34,8 @@ sealed class CalibrationSource {
     data class Factory(
         val intrinsics: CalibrationStore.PersistedIntrinsics,
         val label: String,
+        /** Stable baked-in UUID of the factory profile. */
+        val calibrationId: String,
     ) : CalibrationSource()
 
     /**
@@ -55,11 +67,16 @@ fun resolveCalibration(
     width: Int,
     height: Int,
 ): CalibrationSource {
-    store.latestIntrinsicsFor(lensId, width, height)?.let {
-        return CalibrationSource.Operator(it)
+    store.latestIntrinsicsFor(lensId, width, height)?.let { intr ->
+        val id = store.latestCalibrationIdFor(lensId, width, height) ?: "unknown"
+        return CalibrationSource.Operator(intrinsics = intr, calibrationId = id)
     }
     FactoryCalibration.lookup(lensId, width, height)?.let { profile ->
-        return CalibrationSource.Factory(profile.intrinsics, profile.label)
+        return CalibrationSource.Factory(
+            intrinsics = profile.intrinsics,
+            label = profile.label,
+            calibrationId = profile.calibrationId.toString(),
+        )
     }
     return CalibrationSource.Placeholder
 }
