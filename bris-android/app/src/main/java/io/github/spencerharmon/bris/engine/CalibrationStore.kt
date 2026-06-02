@@ -2,82 +2,70 @@ package io.github.spencerharmon.bris.engine
 
 import android.content.Context
 import org.json.JSONObject
-import java.io.File
 import uniffi.bris_ffi.FfiCalibrationResult
+import java.io.File
+import java.util.UUID
 
 /**
  * On-device calibration session storage.
  *
- * One session = one camera + one resolution + N captured
- * checkerboard frames + (after solve) the intrinsics + the
- * solver diagnostics.
+ * Layout (unified, 2026-06):
  *
- * **Lens-aware layout** (current):
+ *   <external-files>/calibration/<calibration-UUID>/
+ *     calibration.json          # intrinsics + lens id + WxH
+ *     frames/
+ *       frame_NNNN.jpg          # checkerboard inputs
+ *       rejected/
+ *         frame_NNNN_<reason>.jpg
+ *     target.json               # checkerboard description
  *
- * ```
- * <app-files>/calibration/<lens-id>/<width>x<height>/<session-ulid>/
- *   frames/<seq>.jpg
- *   intrinsics.json
- *   target.json
- * ```
+ * One UUID v4 per calibration session. Lens id and capture
+ * resolution live as JSON fields inside `calibration.json`,
+ * not as path components. The on-disk hierarchy is flat;
+ * lookup by `(lensId, width, height)` walks every directory
+ * and inspects the manifest.
  *
- * Calibration intrinsics depend on the *physical* lens and on
- * the pixel grid they were solved against. A wide-lens
- * calibration applied to telephoto frames produces silently
- * wrong altitudes; a 1280×720 calibration applied to 1920×1080
- * frames does the same. Keying the on-disk layout by both
- * dimensions makes the right thing happen by construction:
- * `latestIntrinsicsFor(lensId, w, h)` returns either an
- * exact match or `null`, and the caller falls back to
- * placeholder intrinsics with the diagnostic overlay flagging
- * "calib: PLACEHOLDER (run calibration)".
+ * Legacy hierarchy (`<files>/calibration/<lensId>/<WxH>/<ulid>/`)
+ * is supported read-only via a fallback resolver so existing
+ * on-device calibrations from prior builds keep working.
  *
- * **Legacy layout.** Pre-lens-selection sessions live directly
- * at `<root>/<session-ulid>/` without a lens prefix. They are
- * still listable via [`latestSession`] and readable via
- * [`latestIntrinsics`] for debug/inspection, but
- * [`latestIntrinsicsFor`] (the lens-aware lookup the live
- * pipeline uses) ignores them. Operators with legacy data
- * simply re-run calibration once.
- *
- * Sessions are append-only; the current session for a given
- * `(lens, resolution)` is "the most recently created", which
- * sorts correctly because session ids are time-prefixed.
+ * Built-in factory intrinsics for known device-lens-resolution
+ * combinations are exposed by [`KnownIntrinsics`] and carry
+ * stable UUIDs baked into the source. Captures that ran
+ * against factory intrinsics stamp the corresponding factory
+ * UUID in `bundle.intrinsics.source.calibration_id`.
  */
-class CalibrationStore(private val rootDir: File) {
+class CalibrationStore(
+    private val externalRoot: File,
+    private val legacyInternalRoot: File,
+) {
 
     init {
-        rootDir.mkdirs()
+        externalRoot.mkdirs()
     }
 
     /**
-     * Begin a new lens-aware session for the given lens id and
-     * pixel grid. Returns the session directory; the caller
-     * passes this into [`writeFrame`], [`writeTarget`], and
-     * [`writeIntrinsics`].
-     *
-     * The directory layout encodes lens + resolution into the
-     * path so accidentally cross-applying intrinsics is
-     * impossible — there is no shared "latest" pointer that a
-     * future load can resolve to the wrong key.
+     * Begin a new calibration session. Generates a fresh
+     * UUID v4 and returns the session directory.
      */
     fun newSession(lensId: String, width: Int, height: Int): File {
-        val id = ulid()
-        val dir = File(lensDir(lensId, width, height), id).apply { mkdirs() }
-        File(dir, "frames").mkdirs()
+        val id = UUID.randomUUID()
+        val dir = File(externalRoot, id.toString()).apply { mkdirs() }
         File(dir, "frames/rejected").mkdirs()
+        // Stamp the lens+resolution in advance so a partial
+        // session is identifiable before writeIntrinsics
+        // finalizes the manifest.
+        val stub = JSONObject()
+            .put("calibration_id", id.toString())
+            .put("lens_id", lensId)
+            .put("width", width)
+            .put("height", height)
+            .put("status", "in_progress")
+        File(dir, "calibration.json").writeText(stub.toString())
         return dir
     }
 
-    /**
-     * Legacy entry point (no lens id, no resolution). Kept
-     * only so callers that haven't yet been updated continue
-     * to compile; new code should use the lens-aware overload.
-     */
-    @Deprecated("Use newSession(lensId, width, height)")
-    fun newSession(): File = newSession(LensCatalog.FALLBACK_LENS_ID, 0, 0)
-
-    /** Write one captured frame as JPEG. Returns the file. */
+    /** Write one captured frame as JPEG. */
     fun writeFrame(sessionDir: File, seq: Int, jpegBytes: ByteArray): File {
         val name = "frame_${"%04d".format(seq)}.jpg"
         val f = File(sessionDir, "frames/$name")
@@ -88,18 +76,6 @@ class CalibrationStore(private val rootDir: File) {
     /**
      * Move a captured frame into the per-session
      * `frames/rejected/` subdir.
-     *
-     * Used when per-capture detection reports an outcome
-     * the operator chooses to discard ("no board found",
-     * "wrong grid size", or any other case the operator
-     * doesn't want to feed to the solver). The file is
-     * preserved (not deleted) so the session remains
-     * forensically reproducible — `bris-collector`
-     * submissions of a calibration session can include
-     * the `rejected/` directory if the operator opts in.
-     *
-     * Returns the new path of the moved file, or `null` if
-     * the source didn't exist.
      */
     fun rejectFrame(sessionDir: File, seq: Int, reasonCode: String): File? {
         val name = "frame_${"%04d".format(seq)}.jpg"
@@ -108,11 +84,6 @@ class CalibrationStore(private val rootDir: File) {
         val dstName = "frame_${"%04d".format(seq)}_${reasonCode}.jpg"
         val dst = File(sessionDir, "frames/rejected/$dstName")
         dst.parentFile?.mkdirs()
-        // File.renameTo can fail across mount points; on
-        // Android internal storage that's not a concern, but
-        // we fall back to a copy+delete just in case the
-        // session was moved to external storage by the
-        // operator.
         if (!src.renameTo(dst)) {
             src.copyTo(dst, overwrite = true)
             src.delete()
@@ -120,7 +91,7 @@ class CalibrationStore(private val rootDir: File) {
         return dst
     }
 
-    /** Persist the checkerboard target description for the session. */
+    /** Persist the checkerboard target description. */
     fun writeTarget(sessionDir: File, rows: Int, cols: Int, squareSizeMm: Double) {
         val obj = JSONObject()
             .put("rows", rows)
@@ -129,8 +100,20 @@ class CalibrationStore(private val rootDir: File) {
         File(sessionDir, "target.json").writeText(obj.toString())
     }
 
-    /** Persist the solver result. */
+    /**
+     * Persist the solver result, rewriting `calibration.json`
+     * with the full manifest (intrinsics + stats + per-view
+     * residuals + diagnosis). Preserves the `calibration_id`
+     * and lens/resolution stamped at `newSession`.
+     */
     fun writeIntrinsics(sessionDir: File, result: FfiCalibrationResult) {
+        val existing = File(sessionDir, "calibration.json").let { f ->
+            if (f.isFile) runCatching { JSONObject(f.readText()) }.getOrNull() else null
+        }
+        val calibrationId = existing?.optString("calibration_id")
+            ?.takeIf { it.isNotEmpty() }
+            ?: sessionDir.name
+        val lensId = existing?.optString("lens_id") ?: ""
         val intr = JSONObject()
             .put("fx", result.intrinsics.fx)
             .put("fy", result.intrinsics.fy)
@@ -167,6 +150,9 @@ class CalibrationStore(private val rootDir: File) {
             )
         }
         val obj = JSONObject()
+            .put("calibration_id", calibrationId)
+            .put("lens_id", lensId)
+            .put("status", "complete")
             .put("intrinsics", intr)
             .put("width", result.width.toLong())
             .put("height", result.height.toLong())
@@ -177,33 +163,30 @@ class CalibrationStore(private val rootDir: File) {
             .put("diagnosis_overall", result.diagnosisOverall.name)
             .put("diagnosis_issues", issues)
             .put("per_view_residuals", perView)
-        File(sessionDir, "intrinsics.json").writeText(obj.toString())
+        File(sessionDir, "calibration.json").writeText(obj.toString())
     }
 
     /**
-     * Most recent session directory across the entire store
-     * (any lens, any resolution, including legacy). Used by
-     * inspection / submission flows that don't care about the
-     * lens key.
-     */
-    fun latestSession(): File? = allSessionDirs().maxByOrNull { it.name }
-
-    /**
      * Most recent session for the given `(lensId, width,
-     * height)` triple, or `null` if no calibration exists for
-     * that combination. This is the lookup the live pipeline
-     * uses to decide whether to apply persisted intrinsics or
-     * fall back to placeholders.
+     * height)` triple across both the new flat external layout
+     * AND the legacy internal hierarchy. Returns `null` if no
+     * match. The live pipeline uses this to decide whether
+     * to apply persisted intrinsics or fall back to a factory
+     * profile / placeholder.
      */
     fun latestSessionFor(lensId: String, width: Int, height: Int): File? {
-        val dir = lensDir(lensId, width, height)
-        if (!dir.isDirectory) return null
-        return dir.listFiles()
+        val external = externalSessionsMatching(lensId, width, height)
+            .maxByOrNull { it.lastModified() }
+        if (external != null) return external
+        // Legacy fallback.
+        val legacyDir = File(legacyInternalRoot, "$lensId/${width}x${height}")
+        if (!legacyDir.isDirectory) return null
+        return legacyDir.listFiles()
             ?.filter { it.isDirectory }
             ?.maxByOrNull { it.name }
     }
 
-    /** Frames in the given session, sorted by name. */
+    /** Frames in the given session. */
     fun framesIn(sessionDir: File): List<File> =
         File(sessionDir, "frames").listFiles()
             ?.filter { it.isFile && it.name.endsWith(".jpg") }
@@ -211,97 +194,84 @@ class CalibrationStore(private val rootDir: File) {
             ?: emptyList()
 
     /**
-     * Load the persisted intrinsics from the latest session
-     * (across all lenses), or `null` if none exists or the
-     * file is malformed. Inspection-only — the live pipeline
-     * uses [`latestIntrinsicsFor`] instead so it can enforce
-     * the lens + resolution match.
-     */
-    fun latestIntrinsics(): PersistedIntrinsics? =
-        latestSession()?.let(::readIntrinsics)
-
-    /**
      * Load the persisted intrinsics for a specific lens +
      * resolution, or `null` if none exists.
-     *
-     * Calibration data is keyed by `(lensId, width, height)`.
-     * A mismatch in either component returns `null`; the
-     * caller is expected to degrade to placeholder intrinsics
-     * and surface the mismatch in the diagnostic overlay.
      */
     fun latestIntrinsicsFor(lensId: String, width: Int, height: Int): PersistedIntrinsics? =
         latestSessionFor(lensId, width, height)?.let(::readIntrinsics)
 
-    private fun readIntrinsics(sessionDir: File): PersistedIntrinsics? {
-        val f = File(sessionDir, "intrinsics.json")
-        if (!f.exists()) return null
-        return try {
-            val obj = JSONObject(f.readText())
-            val intr = obj.getJSONObject("intrinsics")
-            PersistedIntrinsics(
-                fx = intr.getDouble("fx"),
-                fy = intr.getDouble("fy"),
-                cx = intr.getDouble("cx"),
-                cy = intr.getDouble("cy"),
-                k1 = intr.optDouble("k1", 0.0),
-                k2 = intr.optDouble("k2", 0.0),
-                k3 = intr.optDouble("k3", 0.0),
-                p1 = intr.optDouble("p1", 0.0),
-                p2 = intr.optDouble("p2", 0.0),
-                width = obj.getInt("width"),
-                height = obj.getInt("height"),
-                rmsPx = obj.optDouble("rms_px", Double.NaN),
-            )
-        } catch (_: Exception) {
-            null
-        }
-    }
-
-    private fun lensDir(lensId: String, width: Int, height: Int): File =
-        File(rootDir, "$lensId/${width}x${height}").apply { mkdirs() }
-
     /**
-     * Best-effort enumeration of every session directory under
-     * the store, including legacy sessions (no lens prefix).
-     * A session is identified as "any directory containing a
-     * `frames/` subdirectory or an `intrinsics.json` file"; we
-     * walk at most three levels deep
-     * (`<lens-id>/<resolution>/<session>/`) so this stays
-     * O(N sessions).
+     * Extract the calibration_id for the latest session
+     * matching this lens+resolution, or null if there isn't
+     * one (in which case the caller falls back to factory
+     * UUID lookup via [`KnownIntrinsics`]).
      */
-    private fun allSessionDirs(): List<File> {
-        val out = mutableListOf<File>()
-        val top = rootDir.listFiles() ?: return emptyList()
-        for (entry in top) {
-            if (!entry.isDirectory) continue
-            if (looksLikeSession(entry)) {
-                out += entry
-                continue
-            }
-            // lens-id directory; recurse into <resolution>/<session>.
-            val resDirs = entry.listFiles() ?: continue
-            for (resDir in resDirs) {
-                if (!resDir.isDirectory) continue
-                val sessions = resDir.listFiles() ?: continue
-                for (s in sessions) if (s.isDirectory && looksLikeSession(s)) out += s
-            }
+    fun latestCalibrationIdFor(lensId: String, width: Int, height: Int): String? {
+        val dir = latestSessionFor(lensId, width, height) ?: return null
+        val manifest = File(dir, "calibration.json")
+        if (manifest.isFile) {
+            val obj = runCatching { JSONObject(manifest.readText()) }.getOrNull()
+            val id = obj?.optString("calibration_id")
+            if (!id.isNullOrEmpty()) return id
         }
-        return out
+        // Legacy: the directory name is the ULID. Best
+        // effort, not a v4 UUID, but stable enough to
+        // back-reference.
+        return dir.name
     }
 
-    private fun looksLikeSession(dir: File): Boolean =
-        File(dir, "frames").isDirectory || File(dir, "intrinsics.json").isFile
+    private fun externalSessionsMatching(
+        lensId: String,
+        width: Int,
+        height: Int,
+    ): List<File> {
+        val dirs = externalRoot.listFiles { f -> f.isDirectory } ?: return emptyList()
+        return dirs.mapNotNull { d ->
+            val manifest = File(d, "calibration.json")
+            if (!manifest.isFile) return@mapNotNull null
+            val obj = runCatching { JSONObject(manifest.readText()) }.getOrNull()
+                ?: return@mapNotNull null
+            val mLens = obj.optString("lens_id")
+            val mW = obj.optInt("width")
+            val mH = obj.optInt("height")
+            if (mLens == lensId && mW == width && mH == height) d else null
+        }
+    }
+
+    private fun readIntrinsics(sessionDir: File): PersistedIntrinsics? {
+        // New layout: calibration.json
+        val newPath = File(sessionDir, "calibration.json")
+        if (newPath.isFile) {
+            return runCatching { decode(JSONObject(newPath.readText())) }.getOrNull()
+        }
+        // Legacy: intrinsics.json
+        val legacyPath = File(sessionDir, "intrinsics.json")
+        if (legacyPath.isFile) {
+            return runCatching { decode(JSONObject(legacyPath.readText())) }.getOrNull()
+        }
+        return null
+    }
+
+    private fun decode(obj: JSONObject): PersistedIntrinsics? {
+        val intr = obj.optJSONObject("intrinsics") ?: return null
+        return PersistedIntrinsics(
+            fx = intr.getDouble("fx"),
+            fy = intr.getDouble("fy"),
+            cx = intr.getDouble("cx"),
+            cy = intr.getDouble("cy"),
+            k1 = intr.optDouble("k1", 0.0),
+            k2 = intr.optDouble("k2", 0.0),
+            k3 = intr.optDouble("k3", 0.0),
+            p1 = intr.optDouble("p1", 0.0),
+            p2 = intr.optDouble("p2", 0.0),
+            width = obj.getInt("width"),
+            height = obj.getInt("height"),
+            rmsPx = obj.optDouble("rms_px", Double.NaN),
+        )
+    }
 
     /**
      * Persisted calibration as loaded back from disk.
-     *
-     * The same nine intrinsics fields the Rust core takes plus
-     * the resolution they were calibrated at and the solve RMS.
-     * Mismatched resolution at apply time is the caller's
-     * responsibility to detect (the Rust core's
-     * `bris_calibrate::persist` does so for the CLI; the
-     * Android side should match before constructing an
-     * `FfiIntrinsics` from this).
      */
     data class PersistedIntrinsics(
         val fx: Double,
@@ -319,20 +289,17 @@ class CalibrationStore(private val rootDir: File) {
     )
 
     companion object {
-        /** Construct rooted at `<app-files>/calibration/`. */
-        fun forApp(context: Context): CalibrationStore =
-            CalibrationStore(File(context.filesDir, "calibration"))
+        /**
+         * Mount with the new external-files root for writes,
+         * and the legacy internal root as a read-through
+         * fallback for older calibrations.
+         */
+        fun forApp(context: Context): CalibrationStore {
+            val external = context.getExternalFilesDir(null) ?: context.filesDir
+            return CalibrationStore(
+                externalRoot = File(external, "calibration"),
+                legacyInternalRoot = File(context.filesDir, "calibration"),
+            )
+        }
     }
-}
-
-/**
- * Tiny self-contained ULID generator. Not as rigorous as the
- * proper Crockford-base32 spec — uses lexicographically-
- * sortable hex with millisecond precision, which is good
- * enough for naming session directories.
- */
-private fun ulid(): String {
-    val ms = System.currentTimeMillis()
-    val r = java.util.UUID.randomUUID().leastSignificantBits
-    return "%013x%016x".format(ms, r)
 }
