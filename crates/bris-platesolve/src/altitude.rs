@@ -51,9 +51,18 @@ pub struct StarAltitude {
 /// against the supplied horizon line.
 ///
 /// `per_star_sigma` is a 1σ angular uncertainty (radians) added in
-/// quadrature to the horizon-fit σ for each star. Reasonable values
-/// come from the plate-solve refinement RMS (typically a few
-/// arcseconds with calibrated intrinsics).
+/// quadrature to the horizon-fit σ and to the lens-model-propagated
+/// per-star plate-solve residual for each star. It captures sources
+/// the plate solver doesn't know about (refraction-model residual,
+/// star-catalog position σ, etc.).
+///
+/// The per-star plate-solve refinement residual (stored on each
+/// [`IdentifiedStar::pixel_residual`]) is propagated through the
+/// lens model into an angular σ contribution ∂alt/∂pixel · `σ_pixel`
+/// ≈ `σ_pixel` / fy, then combined in quadrature with the other
+/// terms. This is the same Jacobian path that
+/// [`bris_vision::measure_altitude`] uses for the body-centroid
+/// σ contribution.
 ///
 /// Stars that fall below the horizon under the recovered attitude
 /// are skipped silently (they don't contribute observations); other
@@ -114,7 +123,25 @@ pub fn star_altitude(
     } else {
         return Err(MeasurementError::NonFinite);
     };
-    let altitude = measure_altitude_from_ray(intrinsics, horizon, body_ray, per_star_sigma)?;
+    // Propagate the per-star plate-solve refinement residual through
+    // the lens model into an angular σ contribution. The Jacobian
+    // ∂alt/∂pixel ≈ 1/fy is the same one bris-vision uses to convert
+    // a centroid position σ (pixels) into a ray-angle σ (radians);
+    // see `bris_vision::measure_altitude`. Combine in quadrature
+    // with the caller-supplied per-star σ (which captures sources
+    // the plate solver doesn't know about).
+    //
+    // Defensive: a NaN/non-finite residual (e.g. a behind-camera
+    // projection at refinement time) propagates to a non-finite
+    // body_ray_sigma rather than being silently treated as zero.
+    let lens_sigma_value = if star.pixel_residual.is_finite() {
+        star.pixel_residual / intrinsics.fy
+    } else {
+        return Err(MeasurementError::NonFinite);
+    };
+    let lens_sigma = Sigma::new(lens_sigma_value).map_err(|_| MeasurementError::NonFinite)?;
+    let body_ray_sigma = per_star_sigma.combine(lens_sigma);
+    let altitude = measure_altitude_from_ray(intrinsics, horizon, body_ray, body_ray_sigma)?;
     Ok(StarAltitude {
         hr: star.hr,
         ra_rad: star.ra_rad,
@@ -169,6 +196,7 @@ mod tests {
             ra_rad: ra,
             dec_rad: dec,
             vmag: 0.0,
+            pixel_residual: 0.0,
         };
         let alt = star_altitude(
             &star,
@@ -203,6 +231,7 @@ mod tests {
             ra_rad: ra_above,
             dec_rad: dec_above,
             vmag: 0.0,
+            pixel_residual: 0.0,
         };
         // Below: ray (0, +0.5, 0.866) → image y = 240 + 577 ≈ 817
         // (off-frame downward, but well below horizon).
@@ -215,6 +244,7 @@ mod tests {
             ra_rad: ra_below,
             dec_rad: dec_below,
             vmag: 0.0,
+            pixel_residual: 0.0,
         };
         let result = PlateSolveResult {
             attitude: Attitude {
@@ -256,6 +286,7 @@ mod tests {
             ra_rad: ra,
             dec_rad: dec,
             vmag: 0.0,
+            pixel_residual: 0.0,
         };
         let horizon_sigma = 2e-4;
         let per_star_sigma = 1e-4;
@@ -271,12 +302,109 @@ mod tests {
             Sigma::new(per_star_sigma).unwrap(),
         )
         .unwrap();
-        // Combined sigma should be sqrt(horizon^2 + per_star^2).
+        // Combined sigma should be sqrt(horizon^2 + per_star^2) when
+        // the per-star pixel residual is zero (no lens-model term).
         let expected = (horizon_sigma.powi(2) + per_star_sigma.powi(2)).sqrt();
         let got = alt.altitude.sigma.value();
         assert!(
             (got - expected).abs() < 1e-12,
             "expected combined sigma {expected}, got {got}",
+        );
+    }
+
+    /// Helper: build an above-horizon identified star with a chosen
+    /// per-star plate-solve pixel residual.
+    fn star_with_residual(pixel_residual: f64) -> IdentifiedStar {
+        let dec = 0.9798_f64.asin();
+        let ra = (-0.2_f64).atan2(0.0);
+        IdentifiedStar {
+            pixel_x: 320.0,
+            pixel_y: 36.0,
+            hr: 0,
+            ra_rad: ra,
+            dec_rad: dec,
+            vmag: 0.0,
+            pixel_residual,
+        }
+    }
+
+    fn altitude_sigma_with(
+        intrinsics: Intrinsics,
+        pixel_residual: f64,
+        caller_sigma: f64,
+        horizon_sigma: f64,
+    ) -> f64 {
+        let horizon = HorizonLine {
+            altitude_sigma: Sigma::new(horizon_sigma).unwrap(),
+            ..level_horizon()
+        };
+        let alt = star_altitude(
+            &star_with_residual(pixel_residual),
+            &identity_attitude(),
+            intrinsics,
+            horizon,
+            Sigma::new(caller_sigma).unwrap(),
+        )
+        .unwrap();
+        alt.altitude.sigma.value()
+    }
+
+    /// Doubling the focal length halves the angular contribution of a
+    /// per-star pixel residual through the lens-model Jacobian
+    /// (∂alt/∂pixel ≈ 1/fy). With horizon σ and caller σ both zero,
+    /// the altitude σ is purely that lens-model term, so the σ ratio
+    /// equals 1/2.
+    #[test]
+    fn doubling_focal_length_halves_per_star_sigma_contribution() {
+        let base = Intrinsics::placeholder(640, 480);
+        let mut doubled = base;
+        doubled.fx *= 2.0;
+        doubled.fy *= 2.0;
+
+        let pixel_residual = 0.5;
+        let sigma_base = altitude_sigma_with(base, pixel_residual, 0.0, 0.0);
+        let sigma_doubled = altitude_sigma_with(doubled, pixel_residual, 0.0, 0.0);
+
+        assert!(sigma_base > 0.0, "baseline lens-model sigma must be > 0");
+        let ratio = sigma_doubled / sigma_base;
+        assert!(
+            (ratio - 0.5).abs() < 1e-6,
+            "expected sigma to halve when focal length doubles: ratio = {ratio}",
+        );
+    }
+
+    /// Doubling the per-star pixel residual doubles the lens-model
+    /// σ contribution.
+    #[test]
+    fn doubling_pixel_residual_doubles_per_star_sigma_contribution() {
+        let intrinsics = Intrinsics::placeholder(640, 480);
+        let sigma_small = altitude_sigma_with(intrinsics, 0.5, 0.0, 0.0);
+        let sigma_large = altitude_sigma_with(intrinsics, 1.0, 0.0, 0.0);
+        assert!(sigma_small > 0.0);
+        let ratio = sigma_large / sigma_small;
+        assert!(
+            (ratio - 2.0).abs() < 1e-6,
+            "expected sigma to double when pixel residual doubles: ratio = {ratio}",
+        );
+    }
+
+    /// Regression sanity: with typical placeholder intrinsics
+    /// (fy = 1000) and a small per-star pixel residual (0.05 px)
+    /// added on top of typical horizon and caller sigmas, the total
+    /// σ stays within ±10% of the pre-fix value (which was just
+    /// sqrt(horizon² + caller²)). The lens-model term is small at
+    /// this residual (5e-5 rad), so the bound is comfortable.
+    #[test]
+    fn typical_residual_within_ten_percent_of_pre_fix_sigma() {
+        let intrinsics = Intrinsics::placeholder(640, 480);
+        let horizon_sigma = 2e-4_f64;
+        let caller_sigma = 1e-4_f64;
+        let pre_fix = (horizon_sigma.powi(2) + caller_sigma.powi(2)).sqrt();
+        let got = altitude_sigma_with(intrinsics, 0.05, caller_sigma, horizon_sigma);
+        let drift = (got - pre_fix).abs() / pre_fix;
+        assert!(
+            drift < 0.10,
+            "expected sigma within ±10% of pre-fix value (pre = {pre_fix}, got = {got}, drift = {drift})",
         );
     }
 }
