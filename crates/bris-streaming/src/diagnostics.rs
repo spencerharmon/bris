@@ -264,6 +264,14 @@ pub struct EngineDiagnostics {
     /// the executed Kabsch RMS residual, not the cheap
     /// time-gap estimate used during pair selection.
     pub cross_frame_sights_emitted: u64,
+
+    /// Cumulative count of sights that the pre-fix screener
+    /// ([`bris_nav::screen_sights`]) rejected as blunders
+    /// across all Stage E publication attempts. Increments per
+    /// rejected sight. Rejected sights are logged via tracing
+    /// (`info!`) with their source frame id and rejection
+    /// reason at the point of rejection.
+    pub sights_rejected_by_screener: u64,
 }
 
 /// Per-stage processing statistics.

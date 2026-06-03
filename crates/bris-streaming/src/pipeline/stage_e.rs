@@ -120,8 +120,8 @@ use bris_almanac::{
 use bris_core::time::Tt;
 use bris_core::{Sigma, Uncertain};
 use bris_nav::{
-    cold_start_fix, line_of_position, multi_sight_fix, CircleOfPosition, ColdStartConfig,
-    ColdStartError, ColdStartResult, FixError, LineOfPosition,
+    cold_start_fix, line_of_position, multi_sight_fix, screen_sights, CircleOfPosition,
+    ColdStartConfig, ColdStartError, ColdStartResult, FixError, LineOfPosition, ScreeningConfig,
 };
 use bris_vision::{
     measure_altitude, panorama_altitude_for_pair, Centroid, HorizonLine, PanoramaError, TrackConfig,
@@ -209,6 +209,11 @@ pub(crate) struct StageEOutcome {
     /// the engine-level counter
     /// [`crate::EngineDiagnostics::cross_frame_sights_emitted`].
     pub cross_frame_sights_emitted: u64,
+    /// Number of sights the pre-fix screener
+    /// ([`bris_nav::screen_sights`]) rejected as blunders this
+    /// run. Counted only when Stage E reached `try_publish`
+    /// (i.e. `publish_attempted == true`); otherwise zero.
+    pub sights_rejected_by_screener: u64,
 }
 
 /// Identifier for the body that produced a sight.
@@ -820,7 +825,49 @@ fn try_publish(
     out: &mut StageEOutcome,
 ) {
     out.publish_attempted = true;
-    let lops: Vec<LineOfPosition> = window.iter().map(|s| s.lop).collect();
+    // Screen LOPs for obvious blunders before handing them to
+    // the fix solver. Rejected sights are logged with their
+    // source frame id + reason; the kept LOPs proceed through
+    // the Saint-Hilaire and cold-start paths. See
+    // `plan.org` L1776 "Sanity checks".
+    let sights: Vec<&Sight> = window.iter().collect();
+    let all_lops: Vec<LineOfPosition> = sights.iter().map(|s| s.lop).collect();
+    // Stage E screener config: disables the absolute-intercept
+    // gate because Bris already handles that case via the
+    // stale-prior cold-start trigger below (a successful SH fix
+    // with max |intercept| > threshold reruns through
+    // cold-start, which doesn't linearize about AP and so
+    // tolerates the large offset). Keeping the absolute gate
+    // here would screen those sights out before SH ran, masking
+    // the bad-AP signal that the stale-prior pathway needs.
+    // The azimuth-disagreement and consensus-outlier gates ARE
+    // applied: those catch true blunders (single bad sight)
+    // independent of AP quality.
+    let screen_cfg = ScreeningConfig {
+        max_abs_intercept_nm: f64::INFINITY,
+        ..ScreeningConfig::default()
+    };
+    let screening = screen_sights(&all_lops, screen_cfg);
+    let rejected_positions: std::collections::BTreeSet<usize> =
+        screening.rejected.iter().map(|(i, _, _)| *i).collect();
+    for (idx, _lop, reason) in &screening.rejected {
+        let src = sights[*idx].source_frame_id.0;
+        let horizon_frame = sights[*idx].horizon_frame_id.0;
+        info!(
+            source_frame_id = src,
+            horizon_frame_id = horizon_frame,
+            reason = %reason,
+            "Stage E: sight rejected by pre-fix screener",
+        );
+    }
+    out.sights_rejected_by_screener = screening.rejected.len() as u64;
+    let lops = screening.kept;
+    let kept_sights: Vec<&Sight> = sights
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| !rejected_positions.contains(i))
+        .map(|(_, s)| *s)
+        .collect();
     let saint_hilaire_err = match multi_sight_fix(&lops) {
         Ok(sh_fix) => {
             // Stale-prior trigger: a successful SH fix whose max
@@ -830,9 +877,9 @@ fn try_publish(
             // as a comparison; prefer it iff it converges with a
             // tighter sigma_major_nm. See
             // `docs/design/circle_of_position.md` "Engine integration".
-            let max_intercept_nm = window
+            let max_intercept_nm = lops
                 .iter()
-                .map(|s| s.lop.intercept_nm.abs())
+                .map(|l| l.intercept_nm.abs())
                 .fold(0.0_f64, f64::max);
             // Track the stale-prior trigger condition
             // independently of whether the lock suppresses
@@ -849,7 +896,8 @@ fn try_publish(
                     if let Some((cs_fix, cs_provenance)) = solve_cold_start(&circles, cfg, out) {
                         if cs_fix.sigma_major_nm < sh_fix.sigma_major_nm {
                             out.cold_start_preferred_over_stale_sh = true;
-                            if apply_gate(out, cs_fix, window, now_tt, cfg, cs_provenance) {
+                            let cs_sights: Vec<&Sight> = window.iter().collect();
+                            if apply_gate(out, cs_fix, &cs_sights, now_tt, cfg, cs_provenance) {
                                 out.cold_start_published = true;
                             }
                             return;
@@ -860,7 +908,7 @@ fn try_publish(
             apply_gate(
                 out,
                 sh_fix,
-                window,
+                &kept_sights,
                 now_tt,
                 cfg,
                 FixProvenance::SaintHilaire,
@@ -904,7 +952,8 @@ fn try_publish(
         return;
     }
     if let Some((fix, provenance)) = solve_cold_start(&circles, cfg, out) {
-        if apply_gate(out, fix, window, now_tt, cfg, provenance) {
+        let cs_sights: Vec<&Sight> = window.iter().collect();
+        if apply_gate(out, fix, &cs_sights, now_tt, cfg, provenance) {
             out.cold_start_published = true;
         }
     }
@@ -994,14 +1043,14 @@ fn solve_cold_start(
 fn apply_gate(
     out: &mut StageEOutcome,
     fix: bris_nav::Fix,
-    window: &SightWindow,
+    sights: &[&Sight],
     now_tt: Option<Tt>,
     cfg: &EngineConfig,
     provenance: FixProvenance,
 ) -> bool {
-    let azimuth_spread_rad = azimuth_spread(window);
+    let azimuth_spread_rad = azimuth_spread_of(sights);
     let anchor = now_tt.unwrap_or_else(|| Tt::from_julian_date(bris_core::time::JD_J2000));
-    let oldest_age = window
+    let oldest_age = sights
         .iter()
         .map(|s| time_gap_seconds(anchor, s.anchor_tt))
         .fold(0.0_f64, f64::max);
@@ -1034,7 +1083,7 @@ fn apply_gate(
     }
     out.published = Some(build_published_inner(
         fix,
-        window,
+        sights,
         anchor,
         azimuth_spread_rad,
         oldest_age,
@@ -1045,7 +1094,7 @@ fn apply_gate(
 
 fn build_published_inner(
     fix: bris_nav::Fix,
-    window: &SightWindow,
+    sights: &[&Sight],
     anchor: Tt,
     azimuth_spread_rad: f64,
     oldest_age: f64,
@@ -1059,8 +1108,8 @@ fn build_published_inner(
     // the first occurrence so the foreign caller sees a stable
     // frame ordering across publications.
     let mut seen = std::collections::BTreeSet::new();
-    let mut contributing_frame_ids: Vec<u64> = Vec::with_capacity(window.len() * 2);
-    for s in window.iter() {
+    let mut contributing_frame_ids: Vec<u64> = Vec::with_capacity(sights.len() * 2);
+    for s in sights {
         if seen.insert(s.source_frame_id) {
             contributing_frame_ids.push(s.source_frame_id.0);
         }
@@ -1070,7 +1119,7 @@ fn build_published_inner(
     }
     PublishedFix {
         fix,
-        n_sights: window.len(),
+        n_sights: sights.len(),
         azimuth_spread_rad,
         oldest_sight_age_seconds: oldest_age,
         dominant_source: DominantSource::None,
@@ -1090,8 +1139,17 @@ fn build_published_inner(
 /// assumed position. This is exact — it inverts the intercept
 /// computation in [`line_of_position`].
 fn circles_from_sights(window: &SightWindow, observer: Observer) -> Vec<CircleOfPosition> {
-    let mut out = Vec::with_capacity(window.len());
-    for s in window.iter() {
+    let sights: Vec<&Sight> = window.iter().collect();
+    circles_from_kept(&sights, observer)
+}
+
+/// Build [`CircleOfPosition`] records from a slice of kept
+/// sights. Used by Stage E after the pre-fix screener has
+/// pruned blunders. See [`circles_from_sights`] for the
+/// derivation of GP + observed altitude.
+fn circles_from_kept(sights: &[&Sight], observer: Observer) -> Vec<CircleOfPosition> {
+    let mut out = Vec::with_capacity(sights.len());
+    for s in sights {
         let jd_ut1 = s.anchor_tt.julian_date();
         // Body GP from the *geocentric* apparent place: latitude =
         // declination, longitude = -GHA. Running the full
@@ -1185,10 +1243,19 @@ fn body_geographic_position(body: SightBody, tt: Tt, jd_ut1: f64) -> Option<(f64
 /// for the [0, 2π) wrap. Returns 0 for windows with < 2 sights.
 fn azimuth_spread(window: &SightWindow) -> f64 {
     let azimuths: Vec<f64> = window.iter().map(|s| s.azimuth_rad).collect();
+    azimuth_spread_inner(&azimuths)
+}
+
+fn azimuth_spread_of(sights: &[&Sight]) -> f64 {
+    let azimuths: Vec<f64> = sights.iter().map(|s| s.azimuth_rad).collect();
+    azimuth_spread_inner(&azimuths)
+}
+
+fn azimuth_spread_inner(azimuths: &[f64]) -> f64 {
     if azimuths.len() < 2 {
         return 0.0;
     }
-    let mut sorted = azimuths.clone();
+    let mut sorted = azimuths.to_vec();
     sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
     // The minimum gap when "wrapping around" 2π: insert the
     // [0, 2π] boundary as a virtual point and find the largest
@@ -1725,7 +1792,6 @@ mod tests {
         assert!(out.published.is_none(), "motion-stale fix must be gated");
         assert!(out.publication_gate_rejection);
     }
-
     #[test]
     fn try_publish_accepts_when_all_gates_pass() {
         let mut w = SightWindow::default();
@@ -1744,6 +1810,65 @@ mod tests {
         assert!(out.publish_attempted);
         assert!(!out.publication_gate_rejection);
         assert!(!out.singular_geometry_rejection);
+    }
+
+    #[test]
+    fn screener_rejects_azimuth_disagreeing_blunder_and_publishes_remainder() {
+        // Two sights pointing the same way (azimuths 0° and
+        // 3°) with opposite-sign intercepts: blunder. A third
+        // sight at 90° gives geometric diversity. The screener
+        // must drop the larger-magnitude offender and publish a
+        // fix from the remaining two.
+        fn sight_with(intercept_nm: f64, az_rad: f64, frame: u64) -> Sight {
+            Sight {
+                lop: LineOfPosition {
+                    assumed_lat: bris_core::Latitude::from_degrees(0.0).unwrap(),
+                    assumed_lon: bris_core::Longitude::from_degrees(0.0).unwrap(),
+                    azimuth_rad: az_rad,
+                    intercept_nm,
+                    intercept_sigma_nm: Sigma::new(0.1).unwrap(),
+                },
+                anchor_tt: Tt::from_julian_date(JD_J2000),
+                altitude_sigma_rad: 0.001,
+                body: SightBody::SolarSystem(SolarSystemBody::Sun),
+                azimuth_rad: az_rad,
+                source_frame_id: FrameId(frame),
+                horizon_frame_id: FrameId(frame),
+            }
+        }
+        let mut w = SightWindow::default();
+        w.try_insert(sight_with(1.0, 0.0, 1), 5);
+        w.try_insert(sight_with(-5.0, 3.0_f64.to_radians(), 2), 5);
+        w.try_insert(sight_with(0.5, std::f64::consts::FRAC_PI_2, 3), 5);
+        let cfg = EngineConfig::new(Observer::default_dev());
+        let mut out = StageEOutcome::default();
+        try_publish(
+            &w,
+            Some(Tt::from_julian_date(JD_J2000)),
+            &cfg,
+            true,
+            &mut out,
+        );
+        assert_eq!(
+            out.sights_rejected_by_screener, 1,
+            "screener must drop the azimuth-disagreement blunder"
+        );
+        let p = out
+            .published
+            .expect("fix must publish from the surviving two sights");
+        assert_eq!(
+            p.n_sights, 2,
+            "published fix must reflect screened sight count"
+        );
+        // The rejected sight (frame 2, intercept -5 nm) must
+        // NOT appear in the published frame ids.
+        assert!(
+            !p.contributing_frame_ids.contains(&2),
+            "rejected sight's frame id must not contribute to published fix; got {:?}",
+            p.contributing_frame_ids
+        );
+        assert!(p.contributing_frame_ids.contains(&1));
+        assert!(p.contributing_frame_ids.contains(&3));
     }
 
     /// Build a Sun sight whose Ho is computed at
