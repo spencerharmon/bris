@@ -993,6 +993,7 @@ fn solve_cold_start(
                 sigma_minor_nm: cand.sigma_minor_nm.value(),
                 orientation_rad: cand.orientation_rad,
                 sight_count: u32::try_from(cand.sight_count).unwrap_or(u32::MAX),
+                chi_square: None,
             },
             FixProvenance::ColdStart,
         )),
@@ -1028,6 +1029,7 @@ fn solve_cold_start(
                     sigma_minor_nm: chosen.sigma_minor_nm.value(),
                     orientation_rad: chosen.orientation_rad,
                     sight_count: u32::try_from(chosen.sight_count).unwrap_or(u32::MAX),
+                    chi_square: None,
                 },
                 FixProvenance::ColdStartAmbiguous,
             ))
