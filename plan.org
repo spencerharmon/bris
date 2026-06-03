@@ -173,6 +173,18 @@ references to the regression tests that pin the behavior. See
    ~bris-cli~ and ~bris-capture~ (~ci.yml:88-99~). Three of six spec'd
    targets are not actually built. Action: re-promote to PARTIAL or
    add the missing jobs.
+   *Update 2026-06-03 (PR #65, #66):* aarch64-linux-gnu cross-build
+   re-included ~bris-cli~ and ~bris-capture~ (both build cleanly with
+   gcc-aarch64-linux-gnu installed). macOS targets attempted but
+   ~v4l2-sys-mit~ (transitive dep of ~bris-capture~) requires
+   ~<linux/videodev2.h>~ and ~--exclude bris-capture~ does not skip
+   dep-tree resolution at the workspace virtual-manifest level. Two
+   options exist: (a) move ~bris-capture~ to a separate workspace,
+   or (b) feature-gate the ~v4l2-sys-mit~ dependency behind a
+   ~linux-capture~ cargo feature. Operator decision needed. macOS
+   targets remain deferred until then. ~aarch64-linux-android~ and
+   ~aarch64-apple-ios~ also still deferred per AGENTS.md
+   tooling-footprint rule.
 ** DONE License, contributing guide, code of conduct
    *Audit 2026-06-03 — shortcut:* no ~CODE_OF_CONDUCT.md~ in repo;
    spec lists it explicitly. ~CONTRIBUTING.md~ is minimal (points
