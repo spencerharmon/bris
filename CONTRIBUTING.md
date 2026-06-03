@@ -16,6 +16,11 @@ cargo deny check
 CI runs the same checks plus a cross-build for `aarch64-unknown-linux-gnu`
 (Pi Zero 2W class). All four must pass.
 
+## Code of conduct
+
+This project follows the [Contributor Covenant 2.1](CODE_OF_CONDUCT.md).
+By participating you agree to abide by its terms.
+
 ## License
 
 Contributions are accepted under GPL-3.0-or-later (the project license).
