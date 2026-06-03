@@ -68,6 +68,7 @@ pub struct StarAltitude {
 pub fn star_altitudes(
     result: &PlateSolveResult,
     intrinsics: Intrinsics,
+    image_width: u32,
     horizon: HorizonLine,
     per_star_sigma: Sigma,
 ) -> Result<Vec<StarAltitude>, MeasurementError> {
@@ -77,6 +78,7 @@ pub fn star_altitudes(
             ident,
             &result.attitude.matrix,
             intrinsics,
+            image_width,
             horizon,
             per_star_sigma,
         ) {
@@ -100,6 +102,7 @@ pub fn star_altitude(
     star: &IdentifiedStar,
     attitude: &[f64; 9],
     intrinsics: Intrinsics,
+    image_width: u32,
     horizon: HorizonLine,
     per_star_sigma: Sigma,
 ) -> Result<StarAltitude, MeasurementError> {
@@ -114,7 +117,8 @@ pub fn star_altitude(
     } else {
         return Err(MeasurementError::NonFinite);
     };
-    let altitude = measure_altitude_from_ray(intrinsics, horizon, body_ray, per_star_sigma)?;
+    let altitude =
+        measure_altitude_from_ray(intrinsics, image_width, horizon, body_ray, per_star_sigma)?;
     Ok(StarAltitude {
         hr: star.hr,
         ra_rad: star.ra_rad,
@@ -174,6 +178,7 @@ mod tests {
             &star,
             &identity_attitude(),
             intrinsics,
+            640,
             level_horizon(),
             Sigma::new(1e-5).unwrap_or(Sigma::ZERO),
         )
@@ -225,6 +230,7 @@ mod tests {
         let alts = star_altitudes(
             &result,
             intrinsics,
+            640,
             level_horizon(),
             Sigma::new(1e-5).unwrap_or(Sigma::ZERO),
         )
@@ -267,6 +273,7 @@ mod tests {
             &star,
             &identity_attitude(),
             intrinsics,
+            640,
             horizon,
             Sigma::new(per_star_sigma).unwrap(),
         )

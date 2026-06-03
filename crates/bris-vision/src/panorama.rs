@@ -240,6 +240,12 @@ pub fn panorama_altitude(
 /// segmentation-model load failures alongside [`HorizonError`]).
 /// Failed-frame errors are logged and the frame is treated as having
 /// no horizon, so the error type only matters for log formatting.
+// Threading `image_width` through into `measure_altitude` (audit
+// 2026-06-03 fix) added bookkeeping that nudges this function
+// over the 100-line clippy ceiling. The function body is otherwise
+// linear and well-commented; splitting it just to placate the
+// lint would obscure the phase-by-phase structure.
+#[allow(clippy::too_many_lines)]
 pub fn panorama_altitude_with_detector<F, E>(
     frames: &[Frame],
     horizon_cfg: HorizonConfig,
@@ -362,7 +368,10 @@ where
         mean_intensity: 0.0,
         position_sigma_px: body_sigma,
     };
-    let altitude = measure_altitude(frames[horizon_idx].intrinsics, horizon_line, centroid)?;
+    let horizon_frame = &frames[horizon_idx];
+    let intr = horizon_frame.intrinsics;
+    let w = horizon_frame.width();
+    let altitude = measure_altitude(intr, w, horizon_line, centroid)?;
 
     Ok(altitude)
 }

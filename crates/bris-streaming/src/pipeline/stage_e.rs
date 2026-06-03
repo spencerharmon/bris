@@ -650,8 +650,13 @@ fn reduce_to_sight(
                 {
                     direct.observed_altitude
                 } else {
-                    measure_altitude(intrinsics, c.horizon.line, *centroid)
-                        .map_err(ReduceError::Measure)?
+                    measure_altitude(
+                        intrinsics,
+                        ring_frame.frame().width(),
+                        c.horizon.line,
+                        *centroid,
+                    )
+                    .map_err(ReduceError::Measure)?
                 }
             } else {
                 // Cross-frame: execute the panorama stitch +
@@ -704,6 +709,7 @@ fn reduce_to_sight(
                     ident,
                     &result.attitude.matrix,
                     intrinsics,
+                    ring_frame.frame().width(),
                     c.horizon.line,
                     c.body.frame_tt,
                     jd_ut1,
@@ -740,6 +746,7 @@ fn expand_identified_star(
     ident: &bris_platesolve::IdentifiedStar,
     attitude: &[f64; 9],
     intrinsics: bris_vision::Intrinsics,
+    image_width: u32,
     horizon: HorizonLine,
     frame_tt: Tt,
     jd_ut1: f64,
@@ -757,10 +764,16 @@ fn expand_identified_star(
     // Observed altitude via the platesolve crate's helper:
     // takes catalog vec → attitude-rotated camera ray →
     // horizon-relative altitude.
-    let observed_altitude =
-        bris_platesolve::star_altitude(ident, attitude, intrinsics, horizon, per_star_sigma)
-            .map_err(ReduceError::Measure)?
-            .altitude;
+    let observed_altitude = bris_platesolve::star_altitude(
+        ident,
+        attitude,
+        intrinsics,
+        image_width,
+        horizon,
+        per_star_sigma,
+    )
+    .map_err(ReduceError::Measure)?
+    .altitude;
 
     let computed = Uncertain::new(apparent.direction.altitude, apparent.altitude_sigma);
     let lop = line_of_position(
