@@ -301,6 +301,7 @@ mod tests {
             sigma_minor_nm: sigma_nm,
             orientation_rad: 0.0,
             sight_count: 3,
+            chi_square: None,
         }
     }
 

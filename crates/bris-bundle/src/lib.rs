@@ -820,8 +820,16 @@ pub fn verify_first_frame_checksum(
     manifest: &BundleManifest,
     bundle_dir: &Path,
 ) -> Result<(), BundleError> {
-    let Some(expected) = manifest.capture.first_frame_blake3.as_deref() else {
-        return Ok(());
+    // Treat both `None` and `Some("")` as "no checksum
+    // recorded". The schema (docs/design/debug_bundle_schema.md)
+    // says absent = no checksum, but the Android writer
+    // regression in e8a7211 shipped `""` instead of `null`,
+    // and every such bundle would otherwise abort at replay
+    // before the engine runs. Defensive on the verifier side
+    // so existing on-disk corpora remain replayable.
+    let expected = match manifest.capture.first_frame_blake3.as_deref() {
+        Some(s) if !s.is_empty() => s,
+        _ => return Ok(()),
     };
     let pairs = enumerate_frames(bundle_dir)?;
     let Some(first) = pairs.first() else {
@@ -1165,6 +1173,36 @@ mod tests {
         write_sidecar(&frames.join("000000000000.json"), 0, 100);
         let pairs = enumerate_frames(dir.path()).unwrap();
         assert_eq!(pairs.len(), 1);
+    }
+
+    #[test]
+    fn checksum_empty_string_treated_as_absent() {
+        // Defensive against the Android writer regression in
+        // e8a7211 that shipped `Some("")` instead of `None`.
+        let dir = tempdir().unwrap();
+        let media = dir.path().join("media");
+        std::fs::create_dir_all(&media).unwrap();
+        std::fs::write(media.join("000000000000.pgm"), b"frame-bytes").unwrap();
+        write_sidecar(&media.join("000000000000.json"), 0, 100);
+        let mut m = full_manifest();
+        m.capture.first_frame_blake3 = Some(String::new());
+        verify_first_frame_checksum(&m, dir.path()).unwrap();
+    }
+
+    #[test]
+    fn checksum_nonempty_mismatch_still_errors() {
+        // Positive control: a non-empty wrong hash must still
+        // produce ChecksumMismatch (i.e. the empty-string
+        // carve-out does not over-broaden).
+        let dir = tempdir().unwrap();
+        let media = dir.path().join("media");
+        std::fs::create_dir_all(&media).unwrap();
+        std::fs::write(media.join("000000000000.pgm"), b"frame-bytes").unwrap();
+        write_sidecar(&media.join("000000000000.json"), 0, 100);
+        let mut m = full_manifest();
+        m.capture.first_frame_blake3 = Some("deadbeef".into());
+        let err = verify_first_frame_checksum(&m, dir.path()).unwrap_err();
+        assert!(matches!(err, BundleError::ChecksumMismatch { .. }));
     }
 
     #[test]

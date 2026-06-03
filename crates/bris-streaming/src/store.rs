@@ -727,6 +727,7 @@ fn decode_fix(buf: &[u8; RECORD_SIZE]) -> Option<PublishedFix> {
         sigma_minor_nm,
         orientation_rad,
         sight_count,
+        chi_square: None,
     };
     Some(PublishedFix {
         fix,
@@ -887,6 +888,7 @@ mod tests {
                 sigma_minor_nm: 0.5,
                 orientation_rad: 0.0,
                 sight_count: 3,
+                chi_square: None,
             },
             n_sights: 3,
             azimuth_spread_rad: 1.0,

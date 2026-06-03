@@ -67,6 +67,12 @@ pub struct Fix {
     pub orientation_rad: f64,
     /// Number of sights used.
     pub sight_count: u32,
+    /// Reduced chi-square of the weighted LSQ residuals
+    /// (rᵀ W r / DOF, where DOF = `n_sights` − 2). `None` for
+    /// exactly-determined geometry (`n_sights` == 2) where the
+    /// statistic is undefined; a value near 1.0 indicates the
+    /// per-sight σ budget matches the observed scatter.
+    pub chi_square: Option<f64>,
 }
 
 impl Fix {
@@ -110,6 +116,39 @@ const EARTH_RADIUS_M: f64 = 6_371_008.8;
 /// singular (all sights at nearly the same azimuth), or if
 /// arithmetic produced non-finite values.
 pub fn multi_sight_fix(lops: &[LineOfPosition]) -> Result<Fix, FixError> {
+    multi_sight_fix_with_time_sigma(lops, None)
+}
+
+/// Time-uncertainty rate: one second of clock error projects onto
+/// approximately 15 arcminutes of longitude at the equator (Earth
+/// rotates 360°/86 400 s ≈ 15′/s in the navigator's convention used
+/// by `plan.org` Phase 4 "Multi-sight fix with full covariance";
+/// the exact sidereal rate of ~15.04″/s would change this term by
+/// less than 0.3 %, well below the dominant sight-σ budget).
+///
+/// At latitude φ, the east-west position uncertainty is multiplied
+/// by cos φ because a meridian-aligned arcminute of longitude
+/// shrinks toward the poles.
+const LONGITUDE_NM_PER_SECOND_AT_EQUATOR: f64 = 15.0;
+
+/// Compute a multi-sight weighted-least-squares fix with optional
+/// time-uncertainty inflation.
+///
+/// `time_sigma_seconds` is the 1σ clock-vs-UTC uncertainty (in
+/// seconds) at the sight epoch. When `Some`, it contributes a 1-D
+/// longitude variance term `(15′/s × σ_t × cos φ)²` to the [1][1]
+/// (east) diagonal of the returned covariance. `None` (and
+/// `Some(Sigma::ZERO)`) yield no inflation — identical to
+/// [`multi_sight_fix`] for callers that haven't yet plumbed a
+/// time-σ source.
+///
+/// # Errors
+///
+/// Same conditions as [`multi_sight_fix`].
+pub fn multi_sight_fix_with_time_sigma(
+    lops: &[LineOfPosition],
+    time_sigma_seconds: Option<Sigma>,
+) -> Result<Fix, FixError> {
     if lops.len() < 2 {
         return Err(FixError::InsufficientSights(lops.len()));
     }
@@ -122,7 +161,6 @@ pub fn multi_sight_fix(lops: &[LineOfPosition]) -> Result<Fix, FixError> {
     // Build A, W, b for the normal equations.
     let mut ata = [[0.0_f64; 2]; 2];
     let mut atb = [0.0_f64; 2];
-    let mut total_weight = 0.0;
     for lop in lops {
         let cos_z = lop.azimuth_rad.cos();
         let sin_z = lop.azimuth_rad.sin();
@@ -134,9 +172,7 @@ pub fn multi_sight_fix(lops: &[LineOfPosition]) -> Result<Fix, FixError> {
         ata[1][1] += w * sin_z * sin_z;
         atb[0] += w * cos_z * lop.intercept_nm;
         atb[1] += w * sin_z * lop.intercept_nm;
-        total_weight += w;
     }
-    let _ = total_weight; // reserved for future use (chi-square diagnostic)
 
     // Solve the 2×2 normal equations.
     let det = ata[0][0] * ata[1][1] - ata[0][1] * ata[1][0];
@@ -167,11 +203,45 @@ pub fn multi_sight_fix(lops: &[LineOfPosition]) -> Result<Fix, FixError> {
         Longitude::from_radians(lon0.radians() + dlon_rad).map_err(|_| FixError::NonFinite)?;
     let new_lat = Latitude::from_radians(new_lat_rad).map_err(|_| FixError::NonFinite)?;
 
-    // Position covariance is the inverse of A^T W A, in nm².
-    let covariance_nm2 = inv;
+    // Position covariance is the inverse of A^T W A, in nm² —
+    // then add the 1-D time-σ → longitude-variance term on the
+    // east diagonal at the new latitude.
+    let mut covariance_nm2 = inv;
+    let time_sigma_s = time_sigma_seconds.map_or(0.0, Sigma::value);
+    if time_sigma_s > 0.0 {
+        let cos_lat_new = new_lat.radians().cos().max(0.0);
+        let lon_sigma_nm = LONGITUDE_NM_PER_SECOND_AT_EQUATOR * time_sigma_s * cos_lat_new;
+        covariance_nm2[1][1] += lon_sigma_nm * lon_sigma_nm;
+    }
 
     // Decompose the 2×2 covariance into ellipse axes and orientation.
     let (sigma_major_nm, sigma_minor_nm, orientation_rad) = ellipse_from_covariance(covariance_nm2);
+
+    // Weighted residual chi-square: r_i = b_i − A_i·x, where
+    // A_i = (cos Zn_i, sin Zn_i), x = (dN, dE), W = diag(1/σ_i²).
+    // Reduced χ² = sum(w_i r_i²) / (n − 2). Undefined for n == 2.
+    let chi_square = if lops.len() > 2 {
+        let mut sum_wr2 = 0.0_f64;
+        for lop in lops {
+            let cos_z = lop.azimuth_rad.cos();
+            let sin_z = lop.azimuth_rad.sin();
+            let sigma = lop.intercept_sigma_nm.value().max(1e-9);
+            let w = 1.0 / (sigma * sigma);
+            let predicted = cos_z * dn_nm + sin_z * de_nm;
+            let r = lop.intercept_nm - predicted;
+            sum_wr2 += w * r * r;
+        }
+        #[allow(clippy::cast_precision_loss)]
+        let dof = (lops.len() - 2) as f64;
+        let chi2 = sum_wr2 / dof;
+        if chi2.is_finite() {
+            Some(chi2)
+        } else {
+            None
+        }
+    } else {
+        None
+    };
 
     let _ = EARTH_RADIUS_M; // kept for documentation; not used directly.
 
@@ -184,6 +254,7 @@ pub fn multi_sight_fix(lops: &[LineOfPosition]) -> Result<Fix, FixError> {
         orientation_rad,
         #[allow(clippy::cast_possible_truncation)]
         sight_count: lops.len() as u32,
+        chi_square,
     })
 }
 
@@ -318,6 +389,142 @@ mod tests {
         let lops = [lop(0.0, 0.0, 1.0), lop(20.0, 0.0, 1.0)];
         let fix = multi_sight_fix(&lops).unwrap();
         assert!(fix.sigma_major_nm > 1.5 * fix.sigma_minor_nm);
+    }
+
+    #[test]
+    fn time_sigma_inflates_longitude_variance_at_mid_latitude() {
+        // At lat=30°N with time_σ=1.0s, the [1][1] (east/longitude)
+        // variance entry should increase by approximately
+        // (15′ × 1.0s × cos(30°))² ≈ (15 × 0.8660)² ≈ 168.74 nm².
+        // Build two perpendicular σ=1 nm sights so the baseline
+        // covariance is the 2×2 identity (in nm²); the inflation
+        // term should dominate the east axis.
+        let lops = [
+            LineOfPosition {
+                assumed_lat: lat(30.0),
+                assumed_lon: lon(0.0),
+                azimuth_rad: 0.0,
+                intercept_nm: 0.0,
+                intercept_sigma_nm: Sigma::new(1.0).unwrap(),
+            },
+            LineOfPosition {
+                assumed_lat: lat(30.0),
+                assumed_lon: lon(0.0),
+                azimuth_rad: std::f64::consts::FRAC_PI_2,
+                intercept_nm: 0.0,
+                intercept_sigma_nm: Sigma::new(1.0).unwrap(),
+            },
+        ];
+        let fix_no_time = multi_sight_fix_with_time_sigma(&lops, None).unwrap();
+        let fix_t1 =
+            multi_sight_fix_with_time_sigma(&lops, Some(Sigma::new(1.0).unwrap())).unwrap();
+        let inflation = fix_t1.covariance_nm2[1][1] - fix_no_time.covariance_nm2[1][1];
+        let expected = (15.0_f64 * 1.0 * 30.0_f64.to_radians().cos()).powi(2);
+        assert_relative_eq!(inflation, expected, max_relative = 0.1);
+    }
+
+    #[test]
+    fn time_sigma_zero_matches_no_time_input() {
+        // Passing None and passing Some(Sigma::ZERO) (and the
+        // original signature) must all yield identical covariance.
+        let lops = [
+            LineOfPosition {
+                assumed_lat: lat(45.0),
+                assumed_lon: lon(0.0),
+                azimuth_rad: 0.0,
+                intercept_nm: 0.5,
+                intercept_sigma_nm: Sigma::new(1.0).unwrap(),
+            },
+            LineOfPosition {
+                assumed_lat: lat(45.0),
+                assumed_lon: lon(0.0),
+                azimuth_rad: std::f64::consts::FRAC_PI_2,
+                intercept_nm: 0.3,
+                intercept_sigma_nm: Sigma::new(1.0).unwrap(),
+            },
+        ];
+        let fix_legacy = multi_sight_fix(&lops).unwrap();
+        let fix_none = multi_sight_fix_with_time_sigma(&lops, None).unwrap();
+        let fix_zero = multi_sight_fix_with_time_sigma(&lops, Some(Sigma::ZERO)).unwrap();
+        for i in 0..2 {
+            for j in 0..2 {
+                assert_relative_eq!(
+                    fix_legacy.covariance_nm2[i][j],
+                    fix_none.covariance_nm2[i][j],
+                    epsilon = 1e-15
+                );
+                assert_relative_eq!(
+                    fix_legacy.covariance_nm2[i][j],
+                    fix_zero.covariance_nm2[i][j],
+                    epsilon = 1e-15
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn time_sigma_inflation_shrinks_with_cos_lat() {
+        // At lat=89° the cos(lat) factor reduces the inflation
+        // by ~57× relative to lat=30°.
+        let mk = |lat_deg: f64| {
+            [
+                LineOfPosition {
+                    assumed_lat: lat(lat_deg),
+                    assumed_lon: lon(0.0),
+                    azimuth_rad: 0.0,
+                    intercept_nm: 0.0,
+                    intercept_sigma_nm: Sigma::new(1.0).unwrap(),
+                },
+                LineOfPosition {
+                    assumed_lat: lat(lat_deg),
+                    assumed_lon: lon(0.0),
+                    azimuth_rad: std::f64::consts::FRAC_PI_2,
+                    intercept_nm: 0.0,
+                    intercept_sigma_nm: Sigma::new(1.0).unwrap(),
+                },
+            ]
+        };
+        let t = Some(Sigma::new(1.0).unwrap());
+        let lo = multi_sight_fix_with_time_sigma(&mk(89.0), t).unwrap();
+        let hi = multi_sight_fix_with_time_sigma(&mk(30.0), t).unwrap();
+        let lo_inflation =
+            lo.covariance_nm2[1][1] - multi_sight_fix(&mk(89.0)).unwrap().covariance_nm2[1][1];
+        let hi_inflation =
+            hi.covariance_nm2[1][1] - multi_sight_fix(&mk(30.0)).unwrap().covariance_nm2[1][1];
+        assert!(
+            lo_inflation < hi_inflation,
+            "cos(lat) factor must reduce inflation at high latitude: lo={lo_inflation}, hi={hi_inflation}"
+        );
+        // Specifically, the ratio should be (cos89/cos30)² within 10%.
+        let expected_ratio = (89.0_f64.to_radians().cos() / 30.0_f64.to_radians().cos()).powi(2);
+        assert_relative_eq!(
+            lo_inflation / hi_inflation,
+            expected_ratio,
+            max_relative = 0.1
+        );
+    }
+
+    #[test]
+    fn chi_square_populated_when_overdetermined() {
+        // Three sights with mutually inconsistent intercepts at
+        // azimuths spaced 120° apart: residuals are non-zero,
+        // DOF = 3 - 2 = 1, so reduced chi-square must be Some.
+        let lops = [
+            lop(0.0, 1.0, 1.0),
+            lop(120.0, 1.0, 1.0),
+            lop(240.0, 1.0, 1.0),
+        ];
+        let fix = multi_sight_fix(&lops).unwrap();
+        let chi2 = fix.chi_square.expect("chi_square must be Some for n=3");
+        assert!(chi2.is_finite() && chi2 > 0.0, "chi2 = {chi2}");
+    }
+
+    #[test]
+    fn chi_square_none_for_exactly_determined() {
+        // Two sights, two unknowns → DOF = 0 → chi-square undefined.
+        let lops = [lop(0.0, 3.0, 1.0), lop(90.0, 5.0, 1.0)];
+        let fix = multi_sight_fix(&lops).unwrap();
+        assert!(fix.chi_square.is_none());
     }
 
     #[test]
