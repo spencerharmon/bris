@@ -18,7 +18,7 @@ authoritative for field names and types.
   bundle.json                 # BundleManifest
   frames/NNNNNNNN.pgm         # frame payload (16-bit PGM)
   frames/NNNNNNNN.json        # FrameSidecar
-  index.jsonl                 # optional; not required for replay
+  index.jsonl                 # optional sidecar (see below)
 ```
 
 The legacy `bris-exports/...` captures used `media/` instead of
@@ -26,6 +26,37 @@ The legacy `bris-exports/...` captures used `media/` instead of
 Frames are always sorted by the sidecar's `captured_unix_ms`,
 never by filename, so out-of-order writes still replay
 correctly.
+
+### `index.jsonl` (optional)
+
+When the on-device `DebugCaptureBuffer` persists frames, it
+appends one JSON object per line to `index.jsonl` next to the
+`frames/` directory. The file is a **convenience catalog** for
+fast directory scans (no need to stat + parse N JSON sidecars
+to know what's on disk) and is **not required for replay** —
+replay enumerates the JSON sidecars directly.
+
+Each line is an `IndexEntry`:
+
+| field              | type   | source/meaning                                  |
+|--------------------|--------|-------------------------------------------------|
+| `seq`              | u32    | matches `FrameSidecar::seq` for this frame      |
+| `captured_unix_ms` | i64    | matches `FrameSidecar::captured_unix_ms`        |
+| `width`            | u32    | frame width in pixels                           |
+| `height`           | u32    | frame height in pixels                          |
+| `pgm_bytes`        | u64    | size of the PGM file on disk, in bytes          |
+| `json_bytes`       | u64    | size of the JSON sidecar on disk, in bytes      |
+| `retention`        | string | `"debug"`, `"fix_frame"`, ... (writer-defined)  |
+
+`pgm_bytes`, `json_bytes`, and `retention` are not duplicated
+in the per-frame sidecar; tooling that needs them (corpus-size
+reports, retention sweeps) reads `index.jsonl`. Tooling that
+only needs frame timestamps / dimensions reads the sidecars.
+
+Load with `bris_bundle::load_index_jsonl(bundle_dir)`, which
+returns `Ok(None)` when the file is absent and `Ok(Some(vec))`
+when present. Additive within `schema_version: 1` — new
+fields are appended and old readers ignore them.
 
 ## Three independent axes: AP, GPS-truth, derivation
 
