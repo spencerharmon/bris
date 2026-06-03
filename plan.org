@@ -167,8 +167,24 @@ references to the regression tests that pin the behavior. See
    (Pi Zero 2W), ~aarch64-linux-android~, ~aarch64-apple-ios~,
    ~x86_64-apple-darwin~, ~aarch64-apple-darwin~. Use ~cross~ or
    ~cargo-zigbuild~ for cross-compilation.
+   *Audit 2026-06-03 — shortcuts:* macOS targets commented out at
+   ~.github/workflows/ci.yml:48-55~; no ~aarch64-linux-android~ or
+   ~aarch64-apple-ios~ jobs; aarch64-linux-gnu cross-build excludes
+   ~bris-cli~ and ~bris-capture~ (~ci.yml:88-99~). Three of six spec'd
+   targets are not actually built. Action: re-promote to PARTIAL or
+   add the missing jobs.
 ** DONE License, contributing guide, code of conduct
+   *Audit 2026-06-03 — shortcut:* no ~CODE_OF_CONDUCT.md~ in repo;
+   spec lists it explicitly. ~CONTRIBUTING.md~ is minimal (points
+   at plan.org). Action: add CoC file.
 ** DONE Set up ~rustfmt~, ~clippy~ (deny warnings in CI), ~cargo-deny~
+   *Audit 2026-06-03 — shortcuts:* ~deny.toml:13-19~ ignores
+   ~RUSTSEC-2025-0141~ and ~RUSTSEC-2024-0436~ rather than fixing
+   them; ~Cargo.toml:46-49~ allows pedantic lints
+   ~module_name_repetitions~, ~must_use_candidate~,
+   ~missing_errors_doc~, ~missing_panics_doc~ (workspace-wide
+   pedantic weakening). Action: re-evaluate each ignored advisory
+   and re-tighten the lints once the noise is addressed.
 ** DONE Property-based test harness (proptest) wired up early
 ** DONE Vendored leap-second source + build-time regenerator
    Vendor an authoritative IERS leap-second source file (e.g. the
@@ -179,6 +195,12 @@ references to the regression tests that pin the behavior. See
    Rust source. The regenerator also produces the ~bris-data~ payload's
    leap-second portion, keeping in-binary defaults and OTA-update
    payloads in sync from one source.
+   *Audit 2026-06-03 — shortcut:* the ~bris-data~ payload portion of
+   the regenerator is not implemented; only the in-binary
+   ~LEAP_TABLE~ is regenerated. The "one source" invariant the spec
+   describes is half-met. Action: extend the regenerator to also
+   emit the bris-data payload portion (or downgrade scope and note
+   the deviation).
 ** DONE Vendored Yale BSC import + cross-check script
    The catalog parser and runtime API (in ~bris-almanac::catalog~) work
    from a vetted starter ~data/stars.tsv~ with ~10 entries. To go from
@@ -193,6 +215,18 @@ references to the regression tests that pin the behavior. See
    The runtime code path is unchanged; only the data file grows.
    Keep the script and its outputs reproducible by pinning VizieR
    query parameters and verifying record counts.
+   *Audit 2026-06-03 — shortcuts:* this should be PARTIAL, not DONE.
+   ~scripts/fetch_bsc.py~ does not exist; only ~scripts/import_bsc.py~
+   parses a manually-fetched BSC5 dump. ~NAVIGATIONAL_STARS_HR~ in
+   ~import_bsc.py:30-87~ contains admitted-wrong HR numbers with
+   inline "incorrect alias?" / "no - 337 is Diphda" comments and a
+   duplicate ~617~; author flags "cleaning this list is a follow-up"
+   at ~import_bsc.py:86-90~. No magnitude filter (≤6.5) is applied.
+   No Hipparcos cross-reference (~import_bsc.py:131~ writes ~hip: 0~
+   unconditionally). Starter ~data/stars.tsv~ ships placeholder
+   names ~HR1~, ~HR2~ rather than the 57 nav + ~1000 brightest. No
+   cross-check script exists. Action: re-mark PARTIAL and complete
+   the missing fetch + nav-list curation + Hipparcos cross-ref.
 
 * Phase 1: Almanac
 ** DONE Define coordinate types
@@ -202,22 +236,58 @@ references to the regression tests that pin the behavior. See
    Implement UTC ↔ TAI ↔ TT ↔ UT1 conversions. Bundle a leap second table
    with a build-time check that warns if the table is older than N months.
    Allow user override of ΔUT1 (default 0).
+   *Audit 2026-06-03 — shortcut:* the build-time staleness warning
+   the spec calls for is not implemented; ~bris-core/src/time.rs~
+   only exposes the constant ~LEAP_TABLE_UPDATED_AT_UNIX~. Action:
+   add the build-time staleness check (warn at N months, fail at
+   2N).
 ** DONE Precession / nutation
    IAU 2006/2000A model (or simplified IAU 1980 if size matters).
+   *Audit 2026-06-03 — deviation:* implementation is IAU 2006
+   precession + IAU 2000B nutation (77-term truncation,
+   ~bris-almanac/src/frame.rs:127~), not 2000A. Module docs
+   acknowledge the truncation. Spec permits either 2006/2000A or
+   simplified IAU 1980; 2000B is between the two and not the named
+   choice. Decide: accept 2000B and re-word the spec, or upgrade
+   to 2000A.
 ** DONE Solar System ephemeris
    Truncated VSOP87 for Sun + planets. Decide accuracy threshold
    (target: <1 arcsec for navigational use; 0.1 arcsec is overkill).
    Validate against JPL Horizons for a sampled set of dates.
+   *Audit 2026-06-03 — shortcuts:* Earth heliocentric position uses
+   the Earth-Moon barycenter (~bris-almanac/src/ephemeris.rs:87~)
+   with an admitted ≤6 arcsec error at lines 104-106 — spec target
+   <1 arcsec. No JPL Horizons validation in repo (no ~Horizons~
+   references in ~bris-almanac~) although spec explicitly requires
+   it. Action: replace EMB shortcut with true Earth heliocentric,
+   add Horizons validation harness.
 ** DONE Lunar ephemeris
    Truncated ELP2000-82B. Validate against Horizons.
+   *Audit 2026-06-03 — shortcut:* no JPL Horizons cross-validation;
+   ~bris-almanac/src/lunar.rs~ has only one inline tolerance test
+   at ~lunar.rs:403~ (10″ tol). Action: add Horizons-based
+   regression similar to what the spec demands.
 ** DONE Star catalog
    Embed the 57 standard navigational stars + ~1000 brightest from
    Hipparcos as a ~const~ table. Apply proper motion, precession,
    nutation, annual aberration, and atmospheric refraction at runtime.
+   *Audit 2026-06-03 — shortcuts:* starter ~data/stars.tsv~ contains
+   placeholder names ~HR1~, ~HR2~ rather than the 57 nav + 1000
+   brightest the spec calls for (~stars.tsv:21-22~); ~hip~ field is
+   always 0 (~scripts/import_bsc.py:131~) so the Hipparcos
+   cross-reference is decorative, not real. Apparent-place math is
+   in place; the data the math operates on is the issue. Action:
+   ship the real catalog (see L182 follow-up).
 ** DONE Refraction model
    Bennett or Sæmundsson formula; allow temperature/pressure overrides.
 ** DONE Almanac API surface
    ~body_position(BodyId, Instant, Observer) -> ApparentPosition~
+   *Audit 2026-06-03 — cosmetic deviation:* actual surface is
+   ~body_apparent_place(...) -> ApparentPlace~ and
+   ~body_geocentric_apparent(...)~ (~bris-almanac/src/apparent.rs:127,305~),
+   no ~BodyId~/~ApparentPosition~ types as named. Functionally
+   equivalent. Action: update spec text to match, or rename for
+   consistency.
 ** DONE Annual aberration (classical, Meeus Ch. 23)
    ~apply_annual_aberration~ in ~crates/bris-almanac/src/apparent.rs~.
    Earth heliocentric velocity from numerical derivative of VSOP87D over
@@ -562,9 +632,28 @@ references to the regression tests that pin the behavior. See
    the future streaming engine should pick the appropriate
    detector based on body type and frame conditions.
 ** DONE Sun/Moon centroiding
+   *Audit 2026-06-03 — shortcuts:* spec body says "ellipse fit,
+   sub-pixel refinement, account for partial occlusion by horizon
+   (limb correction)." Limb correction is explicitly deferred at
+   ~crates/bris-vision/src/centroid.rs:21-26~ ("For MVP we report
+   the centroid as-is and note the bias as a TODO contribution to
+   per-sight uncertainty"). No ellipse fit in code (grep
+   ~ellipse_fit~ empty); connected-component centroid +
+   subpixel only. Action: implement limb correction and ellipse
+   fit, or downgrade the spec.
    Threshold + connected components + ellipse fit, sub-pixel refinement.
    Account for partial occlusion by horizon (limb correction).
 ** DONE Multi-frame stitching
+   *Audit 2026-06-03 — shortcuts:* IMU/gyro prior not implemented
+   (acknowledged at ~crates/bris-vision/src/panorama.rs:33~).
+   Sidereal-motion correction between frames not implemented
+   (spec required; grep ~sidereal~ in panorama returns only docs).
+   Lens-distortion compensation across the chain is explicitly
+   approximate (~panorama.rs:39-43~) and not corrected for
+   fisheye. Uses Harris+NCC rather than ORB as spec named
+   (~track.rs:7-24~ acknowledges "not full ORB"). Action: ship
+   the sidereal correction and IMU prior; agree on Harris-vs-ORB
+   in the spec.
    *Required for any high-altitude or telephoto sight,* not optional.
    With a telephoto lens (which we need for sub-arcmin accuracy at
    the 0.5 nm target), the body and the horizon cannot fit in a single
@@ -594,6 +683,17 @@ references to the regression tests that pin the behavior. See
    distortion compensation across the chain is approximate (acceptable
    for non-fisheye lenses).
 ** DONE Angle measurement pipeline
+   *Audit 2026-06-03 — shortcuts:*
+   ~crates/bris-vision/src/measure.rs:71~ uses
+   ~Sigma::new(centroid_sigma_rad).unwrap_or(Sigma::ZERO)~ —
+   silently swallows non-finite σ to zero, producing a
+   spurious zero-uncertainty result instead of propagating the
+   failure. Violates the honest-uncertainty rule. Also,
+   horizon endpoint sample uses hardcoded ~x = 1000.0~
+   (~measure.rs:108~) with the comment "We don't actually know
+   the image width here"; should read intrinsics width.
+   Action: replace the ~unwrap_or~ with explicit error; thread
+   intrinsics width through.
    Given a stitched scene + horizon line + body centroid + camera
    intrinsics, output measured altitude with uncertainty.
 ** TODO Stitching/accuracy tradeoff knob
@@ -1259,6 +1359,15 @@ references to the regression tests that pin the behavior. See
    once.
 
 ** DONE Per-star altitude extraction
+   *Audit 2026-06-03 — shortcut + spec inconsistency:* plan bullet
+   body says "per-star σ propagation from the plate-solve
+   residuals through the lens model"; ~bris-platesolve/src/
+   altitude.rs:118~ just quadrature-combines a caller-supplied
+   scalar ~per_star_sigma~ with horizon σ — no lens-model
+   propagation. Also: the trailing "*Status:* unimplemented"
+   sub-block contradicts the DONE state; the code does exist.
+   Action: implement lens-model σ propagation; delete the
+   stale Status block.
    Implemented in ~bris-platesolve::altitude::star_altitudes~:
    convert each identified star from a ~PlateSolveResult~ into an
    altitude observation against an independently-measured horizon
@@ -1691,6 +1800,12 @@ references to the regression tests that pin the behavior. See
    Mark the IMU-prior TODO at plan.org line ~1062 PARTIAL once
    the provider trait carries the IMU implementation.
 ** DONE Phase 6: Multi-source fusion of HorizonProvider hypotheses
+   *Audit 2026-06-03 — minor spec drift:* spec says "Pairwise
+   concordance threshold"; implementation does greedy
+   cluster-mean concordance, not true pairwise
+   (~crates/bris-vision/src/horizon_providers/fusion.rs:172-209~).
+   Different rule, similar effect. Action: align spec text
+   with implementation or switch to true pairwise.
    Replaced winner-takes-best-σ dispatch with a weighted
    inverse-variance fusion of concordant hypotheses
    (`bris_vision::fuse_horizon_hypotheses`). Pairwise
@@ -1769,6 +1884,15 @@ references to the regression tests that pin the behavior. See
    altitude variances. Time uncertainty enters as a one-dimensional
    longitude variance (≈15′ per second × cos(lat)) added to the position
    covariance. Output: lat/lon + 2×2 position covariance.
+   *Audit 2026-06-03 — shortcuts:* the time-σ → longitude-variance
+   term the spec calls out is NOT implemented.
+   ~crates/bris-nav/src/fix.rs:112-189~ builds covariance purely
+   from per-LOP intercept σ; grep ~time_sigma~/~seconds_since_sync~
+   across ~bris-nav~ and ~bris-streaming~ returns no matches. Also
+   ~total_weight~ is computed then dropped with ~let _ =~ at
+   fix.rs:139 — the chi-square diagnostic is deferred without a
+   TODO. Action: add the time-σ inflation term; either populate
+   the chi-square diagnostic or remove the dead variable.
 ** TODO Running fix
    Advance earlier LOPs by DR (course/speed) before intersection.
    Course/speed input is optional; if absent, only simultaneous fixes
@@ -1777,7 +1901,17 @@ references to the regression tests that pin the behavior. See
    Reject obvious blunders (intercept > N nm, azimuth disagreement,
    per-sight residual > Kσ from the consensus, etc.) with clear
    diagnostics naming the rejected sight and reason.
-** TODO Dominant-source attribution
+   *Audit 2026-06-03 — load-bearing shortcuts:* this should be
+   PARTIAL. ~bris-nav/src/screen.rs:73~ ~screen_sights~ implements
+   intercept-magnitude + outlier-from-consensus but NOT the
+   azimuth-disagreement check the spec names. Worse, the screener
+   is never wired into Stage E (grep ~screen_sights~ in
+   ~crates/bris-streaming~ returns nothing); the pipeline ships
+   sights to the fix solver without invoking the sanity checks,
+   so the diagnostics-naming-the-rejected-sight requirement is
+   unmet end-to-end. Action: implement azimuth-disagreement
+   screen; wire ~screen_sights~ into Stage E with diagnostic
+   surface.** TODO Dominant-source attribution
    For each fix, identify which uncertainty source dominates (e.g.
    "horizon fit", "time", "refraction", "calibration", "stitching")
    and surface it in the ~$PBRIS~ sentence. This is what tells the
@@ -2337,6 +2471,17 @@ references to the regression tests that pin the behavior. See
    lands, it can grow `--session <UUID>` / `--new-session`
    flags reusing the same writer.
 ** DONE Android session UI + on-device session creation
+   *Audit 2026-06-03 — load-bearing shortcut:* the body says
+   the operator-entered AP (~ap_seed~) overlays onto the
+   observer fed into the engine and the bundle. The engine path
+   does read it (~bris-android/.../ui/LiveScreen.kt:780~), but
+   the bundle-writer path at
+   ~bris-android/.../ui/LiveScreen.kt:223-227~ hardcodes
+   ~ObserverFix(latitudeDeg=0.0, longitudeDeg=0.0,
+   eyeHeightM=2.0)~ for every capture. The two consumers
+   disagree about what the operator entered. This is the same
+   shortcut tracked in Phase 7.5. Action: thread the same
+   ~ap_seed~ value into both consumers (covered by Phase 7.5).
    Landed:
    - `Session` + `SessionStore` (Kotlin) write JSON identical
      to `bris_bundle::SessionManifest` (schema_version=1),
@@ -2661,6 +2806,14 @@ references to the regression tests that pin the behavior. See
    providers). Until then, advanced settings / CLI flags let
    the operator set the underlying parameters directly.
 ** DONE Lens selection (multi-camera Android devices)
+   *Audit 2026-06-03 — minor deviation:* spec body says identify
+   telephoto by "longest ~LENS_FOCAL_LENGTHS~ entry";
+   ~bris-android/.../engine/LensCatalog.kt~ instead labels role
+   by zoom relative to median focal length. Semantically close
+   but a different rule. Spec also lists a low-light heuristic
+   ("sensor area ≥ 1/3""); ~pickDefault~ only filters ultrawides,
+   no sensor-area check. Action: align spec text with code, or
+   add the sensor-area heuristic.
    Modern phones expose multiple physical cameras (ultrawide,
    wide, telephoto) through CameraX's logical-camera API. The
    wide lens is the default; the **telephoto** is what Bris
@@ -2775,6 +2928,109 @@ references to the regression tests that pin the behavior. See
 ** TODO Documented accuracy budget
    Per error source: timing, refraction, horizon dip, centroiding,
    calibration residual, almanac. Total expected fix uncertainty.
+
+* Phase 7.5: Debug bundle writer shortcut cleanup
+  Audit of the Android ~DebugBundleWriter~ + ~CaptureRecorder~ +
+  ~LiveScreen~ bundle-emission path against
+  [[file:docs/design/debug_bundle_schema.md][docs/design/debug_bundle_schema.md]] found eleven
+  shortcuts shipped under app version ~e8a7211~. Two are
+  load-bearing (block replay or silently break AP scoring);
+  the rest are honest-uncertainty / provenance gaps. Each
+  is a one-shot fix; group into a small stack of PRs.
+
+** TODO Compute ~first_frame_blake3~ instead of emitting ~""~
+   ~bris-android/app/src/main/java/io/github/spencerharmon/bris/engine/CaptureRecorder.kt:372~
+   hardcodes ~firstFrameBlake3 = ""~; ~DebugBundleWriter~
+   then serialises ~"first_frame_blake3": ""~ which the
+   Rust verifier (~bris-bundle/src/lib.rs:823~) treats as a
+   real checksum and fails against the actual hash. Fix:
+   capture the first written PGM's bytes in
+   ~DebugCaptureBuffer~, hash via ~bris-ffi~ ~blake3_hex~
+   (already exposed per the schema doc), populate the
+   snapshot. Verifier should *also* short-circuit on
+   ~Some("")~ defensively so already-captured bundles
+   replay without re-pulling.
+   **Load-bearing**: every ~e8a7211~ bundle currently
+   aborts at checksum verification before the engine runs.
+** TODO Replace placeholder observer in ~LiveScreen~ with operator-entered AP
+   ~bris-android/.../ui/LiveScreen.kt:223-227~ hardcodes
+   ~ObserverFix(latitudeDeg=0.0, longitudeDeg=0.0,
+   eyeHeightM=2.0)~ for every capture. ~ap_input~ ships as
+   Null Island for every bundle the writer has produced.
+   Replay scoring (~--ap-seed-truth~ etc.) is silently
+   broken because intercepts are referenced to (0,0).
+   Thread the same operator-entered value into both
+   ~EngineConfig~ and the manifest so ~ap_input~ honestly
+   reflects what the engine ran against. Already called
+   out as "outstanding follow-up" in
+   ~docs/design/debug_bundle_schema.md~ §"Android-side writer".
+   **Load-bearing**: silently corrupts the AP axis of
+   every debug bundle.
+** TODO Populate ~firstFrameWidth~ / ~firstFrameHeight~ in ~CaptureSnapshot~
+   ~CaptureRecorder.kt:373-374~ passes ~0, 0~. Fields are
+   not currently serialised but the data class lies about
+   what it carries; populate from the first written frame
+   so future consumers (e.g. "checksum is over a frame of
+   this size" sanity checks) have honest data.
+** TODO ~CalibrationSource.Operator~ carries real session ULID
+   ~CalibrationSource.Operator.calibrationId~ is the
+   synthesised ~operator-WxH~ placeholder, not the session
+   ULID. ~bundle.json:intrinsics.source.calibration_id~
+   provenance chain dead-ends. Already flagged in
+   ~docs/design/debug_bundle_schema.md~ §"Outstanding deferred
+   work".
+** TODO Populate ~ap_derivation_trace~ with real provenance fields
+   ~DebugBundleWriter.kt:172-175~ always writes
+   ~{"method": <provenance string>}~ and nothing else.
+   The schema reserves loose-trace fields
+   (stale-prior-age, prior-fix-σ, CoP-intersection-ref);
+   populate them when the corresponding AP-derivation path
+   fires. Blocked on the operator-AP UI landing first
+   (Phase 7 ~Operator-AP-from-map UI~).
+** TODO ~gps_truth.captured_unix_ms~ from the GPS fix, not ~System.currentTimeMillis()~
+   ~DebugBundleWriter.kt:191~ uses now-at-manifest-write
+   time instead of the ~Location.time~ of the actual fix.
+   Android Network provider fixes can be minutes to hours
+   old; that gap is silently ascribed to the capture
+   instant. ~CoarseLocation.getLastKnown~ already returns
+   the timestamp; thread it through.
+** TODO ~gps_truth~ per-axis σ when source provides distinct figures
+   ~DebugBundleWriter.kt:187-188~ projects a single
+   ~horizontalAccuracyM~ onto both ~lat_sigma_m~ and
+   ~lon_sigma_m~. Fine for Android Network; future GNSS
+   sources may have distinct semi-major / semi-minor
+   ellipse axes. Add a per-axis path; the equal-projection
+   fallback stays for sources that only report one number.
+** TODO Omit ~gps_truth~ entirely when accuracy unknown
+   ~DebugBundleWriter.kt:187~ silently substitutes ~100.0~
+   metres when ~horizontalAccuracyM <= 0~. Violates the
+   honest-uncertainty hard rule. If accuracy is unknown,
+   omit ~gps_truth~ from the manifest (or record
+   ~lat_sigma_m: null~ once the schema permits it). Never
+   invent a σ.
+** TODO Mark placeholder intrinsics as such, not as data
+   ~DebugBundleWriter.kt:248-251~ fills ~fx = fy =
+   width/1.1547~ (60° HFOV guess), ~cx,cy = center~,
+   ~distortion = "none"~ when ~CalibrationSource.Placeholder~
+   is in play. The values present as measured data; nothing
+   downstream can tell apart "this lens is exactly 60°"
+   from "nobody calibrated." Options: add a ~placeholder:
+   true~ marker on the intrinsics record, or have the
+   writer refuse to emit ~bundle.json~ when intrinsics are
+   placeholder (forcing a calibration step). Operator to
+   pick.
+** TODO ~BuildConfig.BRIS_VERSION_CODE~ actually increments
+   Every bundle observed carries ~android_version_code:
+   1~. Gradle never bumps it. Covered by Phase 8.5
+   ~Android versionCode derives from commit count~; cross-
+   reference here so it doesn't get lost in the bundle-
+   schema cleanup.
+** TODO Document ~index.jsonl~ in the schema or stop writing it
+   ~DebugCaptureBuffer~ emits ~index.jsonl~ next to each
+   capture; ~docs/design/debug_bundle_schema.md~ doesn't
+   mention it and replay ignores it. Either spec it as an
+   optional sidecar (schema doc + ~bris-bundle~ types) or
+   delete the writer call. Pure docs-drift today.
 
 * Phase 9: Stretch goals
 ** TODO NMEA 2000 output via external gateway, documented integrations.

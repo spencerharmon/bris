@@ -1,5 +1,134 @@
 # AGENTS.md
 
+## Rule zero: no shortcuts. Ever.
+
+**Implement the operator's plan as specified. In full. No
+exceptions.**
+
+If the spec says compute a checksum, compute the checksum.
+If the spec says thread the operator-entered AP, thread the
+operator-entered AP. If the spec says emit a per-axis σ,
+emit a per-axis σ. The cost of generating the correct code
+is the operator's to pay, not yours to optimise away.
+
+The following are **forbidden** and will be treated as
+bugs at review time:
+
+- Stubbing a required field with `""`, `0`, `null`, `0.0`,
+  `"unknown"`, `"TODO"`, or any other sentinel because the
+  real value is inconvenient to obtain.
+- Hardcoding a placeholder (e.g. `lat = 0.0, lon = 0.0`)
+  in a code path that is supposed to read from operator
+  input, sensor data, or upstream state.
+- Skipping a verification, validation, hash, signature,
+  or schema check "for now," "until later," or "as a
+  follow-up."
+- Inventing a default σ, default accuracy, default timeout,
+  or default any-measurement to dodge an unknown.
+- Catching an error and swallowing it so the caller sees
+  success.
+- Marking a task `DONE` when any sub-requirement is unmet.
+- Writing "this will be wired up in a follow-up PR" without
+  the follow-up PR being a hard blocker on merge.
+- Calling a function "working" when it returns plausible-
+  looking values that are not the real values.
+- Deleting or weakening a test to make a change pass.
+- Reaching for `unwrap()` / `expect()` / `.unwrap_or(<made-
+  up value>)` to avoid handling a case the spec covers.
+
+When a requirement genuinely cannot be implemented — see
+"Stopping is also a shortcut" below for the strict definition
+of *genuinely* — **stop and ask the operator.** Never "stub
+it and file a follow-up." Never "emit a placeholder and
+document it." But also: never stop just because the work is
+tedious or the design is ambiguous. The next section draws
+that line.
+
+## Stopping is also a shortcut
+
+The other failure mode of this rule is the inverse one:
+stopping to ask the operator about every minor tradeoff in
+order to avoid generating code. That is also forbidden.
+
+If there is a workable path forward — even one that
+involves a tradeoff, an extra refactor, a longer
+implementation, more test scaffolding, or a design choice
+you'd prefer the operator weigh in on — **take it.** Note
+the tradeoff in the PR description, keep moving. The
+operator is paying you to generate code, not to generate
+questions.
+
+The only legitimate reason to stop and ask is a **concrete
+blocker** with no workable path:
+
+- A required upstream API does not exist and cannot
+  reasonably be written in this PR.
+- A required piece of operator input (a real AP, a real
+  calibration, credentials, a hardware decision) is
+  genuinely unobtainable and no honest default exists.
+- Two valid implementations diverge on a *user-visible*
+  contract (wire format, on-disk schema, public API) and
+  picking wrong would force a later breaking change.
+- A spec is internally contradictory and you cannot tell
+  which side is authoritative.
+
+Things that are **not** blockers and must not become "stop
+and ask" moments:
+
+- A choice between two reasonable internal implementations
+  with no user-visible difference. Pick one, note it, move
+  on.
+- A refactor that would be cleaner if done a different
+  way. Do the refactor if it's in scope; defer it as a
+  follow-up if it isn't; either way, keep implementing.
+- An additional test that would be nice to have. Write it.
+- A naming preference. Pick one.
+- Uncertainty about whether the operator wants the
+  faster-but-uglier or slower-but-cleaner version. Pick
+  the cleaner one; note the tradeoff.
+- A dependency that *could* be added but isn't strictly
+  required. Don't add it; note the option.
+
+Note tradeoffs in the PR description under a "Tradeoffs"
+or "Choices" section. The operator reviews and corrects.
+That is cheaper than blocking on every fork in the road.
+
+The rule combines: **never ship a shortcut, never stop
+short of a real blocker.** If you find yourself drafting a
+question, ask whether it's a concrete blocker (above list)
+or a tradeoff (note it and continue). Default: continue.
+
+The rare deviation that the operator explicitly approves
+must be recorded in *all three* of:
+
+- **Code**: a `TODO(operator-approved):` comment that names
+  the unmet requirement, the reason, and the date of the
+  approval. Not `TODO:`. Not `// FIXME`. The exact prefix
+  so it greps cleanly.
+- **PR description**: a "Deviations from spec" section
+  enumerating every unmet requirement with the operator's
+  reason. No deviations section ⇒ no deviations claimed ⇒
+  any later-discovered deviation is a bug.
+- **`plan.org` / `progress.md`**: the task is `PARTIAL`,
+  never `DONE`, with a sub-bullet describing the gap and
+  linking the operator's approval.
+
+The canonical bug pattern this rule exists to prevent: the
+Android writer shipped `first_frame_blake3 = ""` because
+computing the checksum was inconvenient; the Rust verifier
+treated `Some("")` as a real checksum; every bundle produced
+over the following weeks failed replay verification before
+the engine even started, and nobody noticed until the
+operator pulled a capture off the phone. One silent
+shortcut, multiplied across every capture, ate the entire
+corpus until it was caught. That is the failure mode. It is
+not acceptable. It will not be acceptable next time either.
+
+This rule overrides convenience, schedule pressure, model
+uncertainty, context-window limits, and your own judgment
+about whether a shortcut is "obviously fine." It is not
+obviously fine. Generate the correct code.
+
 Guidance for AI coding agents working in this repository. Humans:
 read `readme.org`, `plan.org`, `progress.md`, and `CONTRIBUTING.md`
 first — those are the source of truth for project intent. This
