@@ -31,6 +31,17 @@ pub struct ScreeningConfig {
     /// applies; outlier rejection requires a meaningful consensus.
     /// Default 3.
     pub min_sights_for_outlier: usize,
+    /// Two sights whose azimuths are within this many radians of
+    /// each other are considered to look in the "same direction"
+    /// for the purposes of the azimuth-disagreement gate. When
+    /// such a pair disagrees in intercept sign (one says "toward
+    /// the body", the other says "away"), one of them is a
+    /// blunder. Default 5° in radians. The spec
+    /// (`plan.org` L1776) does not pin the value; 5° is the
+    /// smallest threshold that still tolerates honest azimuth
+    /// noise (~1° per-sight) without false-firing on near-
+    /// orthogonal sights.
+    pub same_look_direction_delta_rad: f64,
 }
 
 impl Default for ScreeningConfig {
@@ -39,6 +50,7 @@ impl Default for ScreeningConfig {
             max_abs_intercept_nm: 60.0,
             outlier_k_sigma: 5.0,
             min_sights_for_outlier: 3,
+            same_look_direction_delta_rad: 5.0_f64 * std::f64::consts::PI / 180.0,
         }
     }
 }
@@ -53,6 +65,17 @@ pub enum RejectionReason {
     /// remaining sights.
     #[error("intercept {0:.2} nm is {1:.1}σ from consensus {2:.2} nm")]
     OutlierIntercept(f64, f64, f64),
+    /// This sight shares a look-direction (azimuth within δ) with
+    /// another sight in the set, but their intercepts disagree in
+    /// sign. Two sights pointing the same way cannot honestly
+    /// disagree about which side of the assumed position the body
+    /// lies on; one of them is a blunder. Args: this sight's
+    /// intercept (nm), partner sight's intercept (nm), azimuth
+    /// separation (degrees).
+    #[error(
+        "intercept {0:.2} nm disagrees in sign with partner {1:.2} nm at {2:.2}° azimuth separation"
+    )]
+    AzimuthDisagreement(f64, f64, f64),
 }
 
 /// Result of screening one sight set.
@@ -89,7 +112,63 @@ pub fn screen_sights(lops: &[LineOfPosition], cfg: ScreeningConfig) -> Screening
         }
     });
 
-    // Pass 2: outlier-from-consensus screen, only with enough sights.
+    // Pass 2: azimuth-disagreement screen. Pairwise: if two
+    // sights look in nearly the same direction (azimuth within
+    // cfg.same_look_direction_delta_rad on the circle) but their
+    // intercepts have opposite signs, one of them is a blunder.
+    // Reject the one with the larger |intercept| (further from
+    // the assumed position is more likely the bad measurement).
+    // This fires *before* the consensus-outlier pass so the
+    // surviving sight can participate honestly in the median.
+    {
+        let mut to_drop_set: std::collections::BTreeSet<usize> =
+            std::collections::BTreeSet::new();
+        for a_pos in 0..kept_idx.len() {
+            for b_pos in (a_pos + 1)..kept_idx.len() {
+                let ia = kept_idx[a_pos];
+                let ib = kept_idx[b_pos];
+                if to_drop_set.contains(&a_pos) || to_drop_set.contains(&b_pos) {
+                    continue;
+                }
+                let a = lops[ia];
+                let b = lops[ib];
+                let az_delta = circular_delta_rad(a.azimuth_rad, b.azimuth_rad);
+                if az_delta > cfg.same_look_direction_delta_rad {
+                    continue;
+                }
+                if a.intercept_nm.signum() == b.intercept_nm.signum() {
+                    continue;
+                }
+                // Same look-direction, opposite-sign intercepts.
+                // Drop the larger-magnitude offender.
+                let (drop_pos, drop_idx, partner_intercept) =
+                    if a.intercept_nm.abs() >= b.intercept_nm.abs() {
+                        (a_pos, ia, b.intercept_nm)
+                    } else {
+                        (b_pos, ib, a.intercept_nm)
+                    };
+                let dropped = lops[drop_idx];
+                rejected.push((
+                    drop_idx,
+                    dropped,
+                    RejectionReason::AzimuthDisagreement(
+                        dropped.intercept_nm,
+                        partner_intercept,
+                        az_delta.to_degrees(),
+                    ),
+                ));
+                to_drop_set.insert(drop_pos);
+            }
+        }
+        if !to_drop_set.is_empty() {
+            let mut to_drop: Vec<usize> = to_drop_set.into_iter().collect();
+            for j in to_drop.drain(..).rev() {
+                kept_idx.remove(j);
+            }
+        }
+    }
+
+    // Pass 3: outlier-from-consensus screen, only with enough sights.
     if kept_idx.len() >= cfg.min_sights_for_outlier {
         // Take a leave-one-out median + MAD for robustness.
         let intercepts: Vec<f64> = kept_idx.iter().map(|&i| lops[i].intercept_nm).collect();
@@ -123,6 +202,17 @@ pub fn screen_sights(lops: &[LineOfPosition], cfg: ScreeningConfig) -> Screening
 
     let kept: Vec<LineOfPosition> = kept_idx.into_iter().map(|i| lops[i]).collect();
     ScreeningResult { kept, rejected }
+}
+
+/// Smallest absolute difference between two angles on the
+/// unit circle, in radians, in [0, π].
+fn circular_delta_rad(a: f64, b: f64) -> f64 {
+    let two_pi = std::f64::consts::TAU;
+    let mut d = (a - b).rem_euclid(two_pi);
+    if d > std::f64::consts::PI {
+        d = two_pi - d;
+    }
+    d
 }
 
 fn robust_median(values: &[f64]) -> f64 {
@@ -202,6 +292,47 @@ mod tests {
             r.rejected[0].2,
             RejectionReason::OutlierIntercept(_, _, _)
         ));
+    }
+
+    #[test]
+    fn azimuth_agreeing_same_sign_intercepts_keeps_both() {
+        // Two sights at nearly the same azimuth (within 5°) with
+        // intercepts of the same sign: no disagreement, both
+        // kept. Third sight at 90° to keep min_sights_for_outlier
+        // from kicking in unexpectedly.
+        let lops = [lop(0.0, 1.0, 0.5), lop(2.0, 1.2, 0.5), lop(90.0, 0.5, 0.5)];
+        let r = screen_sights(&lops, ScreeningConfig::default());
+        assert_eq!(r.kept.len(), 3, "same-sign within-δ sights must stay");
+        assert!(r.rejected.is_empty());
+    }
+
+    #[test]
+    fn azimuth_agreeing_opposite_sign_intercepts_rejects_one() {
+        // Two sights at nearly the same azimuth (within 5°) with
+        // opposite-sign intercepts: a blunder. Larger |intercept|
+        // gets dropped.
+        let lops = [lop(0.0, 1.0, 0.5), lop(3.0, -2.5, 0.5)];
+        let r = screen_sights(&lops, ScreeningConfig::default());
+        assert_eq!(r.kept.len(), 1);
+        assert_eq!(r.rejected.len(), 1);
+        assert!(matches!(
+            r.rejected[0].2,
+            RejectionReason::AzimuthDisagreement(_, _, _)
+        ));
+        // The larger-magnitude offender (-2.5 nm) is the one dropped.
+        assert!((r.rejected[0].1.intercept_nm - (-2.5)).abs() < 1e-9);
+    }
+
+    #[test]
+    fn azimuth_disagreeing_opposite_sign_intercepts_keeps_both() {
+        // Spec: the gate only fires when azimuths AGREE. Two
+        // sights at 0° and 90° pointing in very different
+        // directions can legitimately have opposite-sign
+        // intercepts; nothing to reject from this gate.
+        let lops = [lop(0.0, 1.0, 0.5), lop(90.0, -1.0, 0.5)];
+        let r = screen_sights(&lops, ScreeningConfig::default());
+        assert_eq!(r.kept.len(), 2);
+        assert!(r.rejected.is_empty());
     }
 
     #[test]
