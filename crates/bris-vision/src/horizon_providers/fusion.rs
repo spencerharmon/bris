@@ -169,47 +169,45 @@ pub fn fuse_horizon_hypotheses(
     if entries.len() < 2 {
         return singleton_outcome(FusionMode::Singleton);
     }
-    // Greedy cluster: sort by σ ascending, seed with the
-    // lowest-σ entry, accept any entry whose normal is
-    // concordant with the *current cluster mean*.
+    // Complete-link (true pairwise) cluster: sort by σ
+    // ascending, seed with the lowest-σ entry, accept an
+    // entry iff its angular distance to EVERY existing
+    // cluster member is ≤ k·√(σ_i² + σ_j²). This matches
+    // the spec text (plan.org Phase 6 / horizon fusion):
+    // "Pairwise concordance threshold defaults to k=3 on
+    // the angular distance between horizon-plane normals."
+    // Mean-link would drift the running mean toward later
+    // members and silently accept chained outliers.
     entries.sort_by(|a, b| a.sigma.total_cmp(&b.sigma));
     let mut cluster_idxs: Vec<usize> = vec![0];
-    let mut cluster_mean = entries[0].normal;
     for (i, entry) in entries.iter().enumerate().skip(1) {
-        let mean_sigma_sq: f64 = cluster_idxs
-            .iter()
-            .map(|&ci| entries[ci].sigma.powi(2))
-            .sum::<f64>()
-            / (cluster_idxs.len().max(1) as f64).powi(2);
-        let mean_sigma = mean_sigma_sq.sqrt();
-        let combined = (mean_sigma.powi(2) + entry.sigma.powi(2)).sqrt();
-        let ang = angle_between(&cluster_mean, &entry.normal);
-        if ang <= cfg.concordance_k * combined {
+        let concordant_with_all = cluster_idxs.iter().all(|&ci| {
+            let combined = (entries[ci].sigma.powi(2) + entry.sigma.powi(2)).sqrt();
+            angle_between(&entries[ci].normal, &entry.normal) <= cfg.concordance_k * combined
+        });
+        if concordant_with_all {
             cluster_idxs.push(i);
-            // Update running cluster mean (weighted by 1/σ²).
-            let mut sx = 0.0_f64;
-            let mut sy = 0.0_f64;
-            let mut sz = 0.0_f64;
-            for &ci in &cluster_idxs {
-                let w = 1.0 / entries[ci].sigma.powi(2);
-                sx += w * entries[ci].normal.x;
-                sy += w * entries[ci].normal.y;
-                sz += w * entries[ci].normal.z;
-            }
-            if let Some(n) = (CameraRay {
-                x: sx,
-                y: sy,
-                z: sz,
-            })
-            .normalize()
-            {
-                cluster_mean = n;
-            }
         }
     }
     if cluster_idxs.len() < 2 {
         return singleton_outcome(FusionMode::Discordant);
     }
+    // Inverse-variance weighted-mean cluster normal.
+    let (mut sx, mut sy, mut sz) = (0.0_f64, 0.0_f64, 0.0_f64);
+    for &ci in &cluster_idxs {
+        let w = 1.0 / entries[ci].sigma.powi(2);
+        sx += w * entries[ci].normal.x;
+        sy += w * entries[ci].normal.y;
+        sz += w * entries[ci].normal.z;
+    }
+    let Some(cluster_mean) = (CameraRay {
+        x: sx,
+        y: sy,
+        z: sz,
+    })
+    .normalize() else {
+        return singleton_outcome(FusionMode::Discordant);
+    };
     // Inverse-variance fused σ.
     let inv_var_sum: f64 = cluster_idxs
         .iter()
@@ -406,6 +404,50 @@ mod tests {
         let chosen = out.hypothesis.unwrap();
         assert!(matches!(chosen.provenance, HorizonProvenance::Optical(_)));
         assert!((chosen.line.altitude_sigma.value() - 1e-3).abs() < 1e-12);
+    }
+
+    #[test]
+    fn pairwise_rejects_chain_that_mean_link_would_accept() {
+        // Three hypotheses on a chain: A↔B and B↔C are within
+        // k·σ_pair, but A↔C is not. Under true pairwise
+        // (complete-link) concordance, C must NOT join the
+        // {A,B} cluster because A↔C exceeds the threshold.
+        // Under greedy mean-link, the running mean drifts
+        // toward B and accepts C — that's the spec drift this
+        // test exists to catch.
+        //
+        // Placeholder intrinsics: fy = 1000 px, so an intercept
+        // delta of Δy px ≈ Δy·1e-3 rad of horizon-normal tilt.
+        // σ = 1e-3 rad ⇒ pair threshold k·√(σ²+σ²) =
+        // 3·√2·1e-3 ≈ 4.243e-3 rad ≈ 4.243 px.
+        let sigma = 1e-3;
+        let h = vec![
+            hyp_at(400.0, sigma, false), // A
+            hyp_at(403.5, sigma, false), // B: 3.5 px from A ✓
+            hyp_at(405.0, sigma, false), // C: 5.0 px from A ✗, 1.5 px from B ✓
+        ];
+        let out = fuse_horizon_hypotheses(&h, &intr(), 1280, &HorizonFusionConfig::default());
+        assert_eq!(
+            out.cluster_size, 2,
+            "pairwise rule must keep cluster at {{A,B}}; A↔C exceeds k·σ_pair"
+        );
+        assert_eq!(out.mode, FusionMode::Clustered);
+    }
+
+    #[test]
+    fn pairwise_accepts_when_all_pairs_within_threshold() {
+        // Three mutually-concordant hypotheses: every pair is
+        // well within k·σ_pair. Both pairwise and mean-link
+        // produce the same {A,B,C} cluster.
+        let sigma = 1e-3;
+        let h = vec![
+            hyp_at(400.0, sigma, false),
+            hyp_at(400.5, sigma, false),
+            hyp_at(401.0, sigma, false),
+        ];
+        let out = fuse_horizon_hypotheses(&h, &intr(), 1280, &HorizonFusionConfig::default());
+        assert_eq!(out.cluster_size, 3);
+        assert_eq!(out.mode, FusionMode::Clustered);
     }
 
     #[test]
