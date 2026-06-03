@@ -244,6 +244,7 @@ mod tests {
                 orientation_rad: 0.0,
                 #[allow(clippy::cast_possible_truncation)]
                 sight_count: n_sights as u32,
+                chi_square: None,
             },
             n_sights,
             azimuth_spread_rad: 0.7,

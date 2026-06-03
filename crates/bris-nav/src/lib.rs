@@ -13,6 +13,6 @@ pub use circle_of_position::{
     cold_start_fix, CircleOfPosition, ColdStartConfig, ColdStartError, ColdStartResult,
     FixCandidate,
 };
-pub use fix::{multi_sight_fix, Fix, FixError};
+pub use fix::{multi_sight_fix, multi_sight_fix_with_time_sigma, Fix, FixError};
 pub use screen::{screen_sights, RejectionReason, ScreeningConfig, ScreeningResult};
 pub use sight::{line_of_position, LineOfPosition, LopError, NM_PER_ARCMIN};
