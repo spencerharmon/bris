@@ -121,8 +121,7 @@ pub fn screen_sights(lops: &[LineOfPosition], cfg: ScreeningConfig) -> Screening
     // This fires *before* the consensus-outlier pass so the
     // surviving sight can participate honestly in the median.
     {
-        let mut to_drop_set: std::collections::BTreeSet<usize> =
-            std::collections::BTreeSet::new();
+        let mut to_drop_set: std::collections::BTreeSet<usize> = std::collections::BTreeSet::new();
         for a_pos in 0..kept_idx.len() {
             for b_pos in (a_pos + 1)..kept_idx.len() {
                 let ia = kept_idx[a_pos];

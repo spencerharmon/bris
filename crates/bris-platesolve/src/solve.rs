@@ -95,6 +95,14 @@ pub struct IdentifiedStar {
     pub dec_rad: f64,
     /// Apparent V magnitude.
     pub vmag: f64,
+    /// Per-star plate-solve refinement residual, in pixels.
+    ///
+    /// Distance from this star's detected peak to where the refined
+    /// Kabsch attitude projects the catalog vector. This is the
+    /// per-star σ source that propagates through the lens model into
+    /// an angular σ contribution on the star's altitude (see
+    /// [`crate::altitude::star_altitude`]).
+    pub pixel_residual: f64,
 }
 
 /// Solved camera attitude: rotation matrix mapping a J2000 ICRS
@@ -205,6 +213,7 @@ pub fn plate_solve(
                             catalog_pattern,
                             db,
                             &cfg,
+                            intrinsics,
                         ) {
                             if n_verified > best_verifications {
                                 best_verifications = n_verified;
@@ -244,6 +253,7 @@ fn try_verify(
     catalog_pattern: &CatalogPattern,
     db: &StarHashDb,
     cfg: &PlateSolveConfig,
+    intrinsics: &Intrinsics,
 ) -> Option<(Attitude, Vec<IdentifiedStar>, usize)> {
     let catalog_vecs: [[f64; 3]; 4] = [
         db.star_vector(catalog_pattern.hr_ids[0])?,
@@ -336,6 +346,9 @@ fn try_verify(
                     ra_rad: star.ra_rad,
                     dec_rad: star.dec_rad,
                     vmag: star.vmag,
+                    // Filled in below after the refined rotation is
+                    // known.
+                    pixel_residual: 0.0,
                 });
             }
         }
@@ -395,6 +408,9 @@ fn try_verify(
                     ra_rad: catalog_star.ra_rad,
                     dec_rad: catalog_star.dec_rad,
                     vmag: catalog_star.vmag,
+                    // Filled in below after the refined rotation is
+                    // known.
+                    pixel_residual: 0.0,
                 });
             }
         }
@@ -454,6 +470,34 @@ fn try_verify(
         let refined_attitude = Attitude {
             matrix: refined_rot,
         };
+
+        // Fill in per-star pixel residuals under the refined
+        // rotation. The residual is the Euclidean pixel distance
+        // between each star's detected peak and where the refined
+        // attitude projects its catalog ray through the lens model.
+        // This is what downstream consumers propagate through the
+        // lens-model Jacobian into a per-star altitude σ (see
+        // `crate::altitude::star_altitude`).
+        for ident in &mut identified {
+            let cv = ra_dec_to_unit_vec(ident.ra_rad, ident.dec_rad);
+            let projected = rotate_vec(&refined_rot, cv);
+            if projected[2] <= 0.0 {
+                // Behind the camera under the refined attitude: the
+                // projection is ill-defined. Don't invent a finite
+                // value; mark with NaN so any consumer that uses it
+                // numerically blows up loudly instead of silently
+                // shrinking the per-star σ to zero.
+                ident.pixel_residual = f64::NAN;
+                continue;
+            }
+            let xn = projected[0] / projected[2];
+            let yn = projected[1] / projected[2];
+            let (xd, yd) = lens::distort_normalized(*intrinsics, xn, yn);
+            let (px, py) = lens::project_pinhole(*intrinsics, xd, yd);
+            let dx = px - ident.pixel_x;
+            let dy = py - ident.pixel_y;
+            ident.pixel_residual = (dx * dx + dy * dy).sqrt();
+        }
 
         if best.as_ref().is_none_or(|b| n_verified > b.2) {
             best = Some((refined_attitude, identified, n_verified));
