@@ -47,14 +47,10 @@ jobs:
         include:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
-          # macOS coverage is desirable for Phase 7's iOS shell
-          # but is currently broken (rustup proxy resolution
-          # picks up rustup-init instead of cargo on
-          # macos-15-arm64). Re-enable when the macOS shell work
-          # gets attention; the segmentation feature also needs
-          # ort macOS prebuilts validated then.
-          # - os: macos-latest
-          #   target: aarch64-apple-darwin
+          - os: macos-latest
+            target: aarch64-apple-darwin
+          - os: macos-13
+            target: x86_64-apple-darwin
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@master
@@ -85,16 +81,13 @@ jobs:
           [target.aarch64-unknown-linux-gnu]
           linker = "aarch64-linux-gnu-gcc"
           EOF
-      # Cross-build everything that doesn't currently link a
-      # native lib that has no aarch64-linux-gnu prebuilt. That
-      # excludes bris-cli (depends on segmentation -> ort), and
-      # bris-capture (Linux-only V4L2 + transitive on the
-      # streaming engine's segmentation feature). Everything
-      # else — including bris-ffi, bris-collector, and the
-      # streaming engine itself with default features — must
-      # cross-build cleanly so the Pi Zero 2W deployment story
-      # holds. ort/bris-cli's aarch64 story is tracked
-      # separately under Phase 6.
+      # Cross-build the full workspace. bris-cli and bris-capture
+      # (segmentation feature -> ort, plus bris-cli's blake3 C
+      # build) were previously excluded; both now build cleanly
+      # against the aarch64-linux-gnu cross toolchain installed
+      # above. ort fetches an aarch64 prebuilt at build time.
+      # bris-capture's V4L2 backend is Linux-only and so is
+      # valid here.
       - run: |
           cargo build --release --target aarch64-unknown-linux-gnu \
             -p bris-core \
@@ -104,7 +97,9 @@ jobs:
             -p bris-nav \
             -p bris-nmea \
             -p bris-streaming \
+            -p bris-capture \
             -p bris-calibrate \
+            -p bris-cli \
             -p bris-ffi \
             -p bris-collector
 
