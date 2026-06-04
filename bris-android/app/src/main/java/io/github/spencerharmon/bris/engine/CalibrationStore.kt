@@ -201,10 +201,34 @@ class CalibrationStore(
         latestSessionFor(lensId, width, height)?.let(::readIntrinsics)
 
     /**
-     * Extract the calibration_id for the latest session
-     * matching this lens+resolution, or null if there isn't
-     * one (in which case the caller falls back to factory
-     * UUID lookup via [`KnownIntrinsics`]).
+     * Extract the `calibration_id` for the latest session
+     * matching this lens+resolution, or `null` if there
+     * isn't one (in which case the caller falls back to
+     * factory UUID lookup via [`FactoryCalibration`]).
+     *
+     * Returns one of:
+     *
+     *  - A real `UUIDv4` string: the new-layout session's
+     *    recorded `calibration_id`. Stamped into
+     *    `bundle.intrinsics.source.calibration_id` so
+     *    captures back-reference the calibration that
+     *    produced their intrinsics.
+     *  - `"legacy:WxH"`: the on-disk calibration predates
+     *    the UUID-recording layout (either a pre-#58
+     *    `<files>/calibration/<lensId>/<WxH>/<ulid>/` tree
+     *    with `intrinsics.json`, or a hand-edited
+     *    `calibration.json` missing the `calibration_id`
+     *    field). The marker is **deliberately distinct**
+     *    from both a real UUID and from the synthesised
+     *    `operator-WxH` placeholder this codebase shipped
+     *    in earlier builds: consumers (`bris-cli replay`,
+     *    diagnostic overlays) can tell a legitimately
+     *    untraceable calibration apart from a buggy stub.
+     *    New calibrations always record the real UUID via
+     *    [`newSession`]; the marker is migration-only and
+     *    will fall out of the corpus once all pre-#58
+     *    on-device calibrations have been re-run.
+     *  - `null`: no matching session at all.
      */
     fun latestCalibrationIdFor(lensId: String, width: Int, height: Int): String? {
         val dir = latestSessionFor(lensId, width, height) ?: return null
@@ -214,10 +238,7 @@ class CalibrationStore(
             val id = obj?.optString("calibration_id")
             if (!id.isNullOrEmpty()) return id
         }
-        // Legacy: the directory name is the ULID. Best
-        // effort, not a v4 UUID, but stable enough to
-        // back-reference.
-        return dir.name
+        return "legacy:${width}x${height}"
     }
 
     private fun externalSessionsMatching(

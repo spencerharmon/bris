@@ -17,11 +17,21 @@ sealed class CalibrationSource {
     data class Operator(
         val intrinsics: CalibrationStore.PersistedIntrinsics,
         /**
-         * UUID of the calibration session that produced
-         * these intrinsics. Stamped into
+         * Identifier of the calibration session that
+         * produced these intrinsics. Stamped into
          * `bundle.intrinsics.source.calibration_id` so
          * captures can be traced back to their calibration
          * for debugging.
+         *
+         * One of:
+         *  - A real `UUIDv4` string for calibrations
+         *    captured by [`CalibrationStore.newSession`].
+         *  - `"legacy:WxH"` for pre-#58 on-disk
+         *    calibrations that have no recorded UUID;
+         *    deliberately distinct from a real UUID and
+         *    from the synthesised `operator-WxH`
+         *    placeholder earlier builds shipped so
+         *    downstream consumers can tell them apart.
          */
         val calibrationId: String,
     ) : CalibrationSource()
@@ -68,7 +78,17 @@ fun resolveCalibration(
     height: Int,
 ): CalibrationSource {
     store.latestIntrinsicsFor(lensId, width, height)?.let { intr ->
-        val id = store.latestCalibrationIdFor(lensId, width, height) ?: "unknown"
+        // `latestIntrinsicsFor` returning non-null guarantees
+        // a session directory exists for this (lens, w, h),
+        // so `latestCalibrationIdFor` is also non-null:
+        // either the recorded UUID (new layout) or the
+        // `legacy:WxH` migration marker (legacy layout /
+        // missing `calibration_id` field). The Elvis here
+        // is purely a static-types fallback that should be
+        // unreachable in practice; the marker is the
+        // honest answer for everything else.
+        val id = store.latestCalibrationIdFor(lensId, width, height)
+            ?: "legacy:${width}x${height}"
         return CalibrationSource.Operator(intrinsics = intr, calibrationId = id)
     }
     FactoryCalibration.lookup(lensId, width, height)?.let { profile ->

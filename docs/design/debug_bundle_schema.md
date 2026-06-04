@@ -168,8 +168,19 @@ Outstanding deferred work:
   operator-entered AP once that UI lands; thread the same
   value into both the `EngineConfig` and the manifest so
   `ap_input` stays honest about what the engine ran against.
-- Teach `CalibrationSource::Operator` to carry the
-  underlying session ULID so `IntrinsicsSource::
-  UserCalibration::session_id` reflects the real session
-  identifier rather than the synthesised `operator-WxH`
-  placeholder.
+
+Resolved:
+
+- `CalibrationSource::Operator` now carries the real
+  calibration session UUID. New calibrations recorded via
+  `CalibrationStore.newSession` stamp a `UUIDv4` into
+  `calibration.json` and `latestCalibrationIdFor` returns it
+  verbatim; `IntrinsicsSource::UserCalibration::session_id`
+  in the bundle therefore reflects the session that
+  produced the intrinsics. Pre-#58 on-disk calibrations
+  that have no recorded UUID surface as `"legacy:WxH"` so
+  consumers can tell a legitimately untraceable
+  calibration apart from a real UUID and from the
+  synthesised `operator-WxH` placeholder earlier builds
+  shipped. The marker is migration-only and falls out of
+  the corpus once those calibrations are re-run.

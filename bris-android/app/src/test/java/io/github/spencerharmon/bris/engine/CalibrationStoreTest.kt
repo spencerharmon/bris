@@ -93,6 +93,111 @@ class CalibrationStoreTest {
     }
 
     @Test
+    fun latestCalibrationIdFor_legacy_hierarchy_returns_legacy_marker() {
+        // A pre-refactor calibration laid down under the
+        // <files>/calibration/<lensId>/<WxH>/<ulid>/ tree with
+        // an `intrinsics.json` rather than `calibration.json`.
+        // We can't recover a real session UUID for these; they
+        // get a `legacy:WxH` marker so consumers can tell
+        // apart "legitimately untraceable" from the old
+        // synthesised `operator-WxH` placeholder.
+        val legacy = tmp.newFolder("legacy3")
+        val ext = tmp.newFolder("ext3")
+        val legacySession = File(legacy, "0/4032x3024/01HXYZABC123").apply { mkdirs() }
+        val intrJson = JSONObject()
+            .put(
+                "intrinsics",
+                JSONObject()
+                    .put("fx", 100.0).put("fy", 110.0)
+                    .put("cx", 50.0).put("cy", 60.0)
+                    .put("k1", 0.0).put("k2", 0.0).put("k3", 0.0)
+                    .put("p1", 0.0).put("p2", 0.0),
+            )
+            .put("width", 4032).put("height", 3024)
+            .put("rms_px", 0.5)
+        File(legacySession, "intrinsics.json").writeText(intrJson.toString())
+        val s = CalibrationStore(externalRoot = ext, legacyInternalRoot = legacy)
+        assertEquals("legacy:4032x3024", s.latestCalibrationIdFor("0", 4032, 3024))
+    }
+
+    @Test
+    fun latestCalibrationIdFor_new_layout_missing_id_field_returns_legacy_marker() {
+        // Defensive: a calibration.json without a
+        // calibration_id field (e.g. hand-edited or written
+        // by an even older build that predates the field)
+        // must NOT be silently treated as a real UUID. Mark
+        // it legacy.
+        val ext = tmp.newFolder("ext4")
+        val legacy = tmp.newFolder("legacy4")
+        val sessionDir = File(ext, java.util.UUID.randomUUID().toString())
+            .apply { mkdirs() }
+        val manifest = JSONObject()
+            .put(
+                "intrinsics",
+                JSONObject()
+                    .put("fx", 100.0).put("fy", 110.0)
+                    .put("cx", 50.0).put("cy", 60.0)
+                    .put("k1", 0.0).put("k2", 0.0).put("k3", 0.0)
+                    .put("p1", 0.0).put("p2", 0.0),
+            )
+            .put("lens_id", "0")
+            .put("width", 4032).put("height", 3024)
+            .put("rms_px", 0.5)
+        File(sessionDir, "calibration.json").writeText(manifest.toString())
+        val s = CalibrationStore(externalRoot = ext, legacyInternalRoot = legacy)
+        assertEquals("legacy:4032x3024", s.latestCalibrationIdFor("0", 4032, 3024))
+    }
+
+    @Test
+    fun resolveCalibration_operator_carries_real_uuid_for_new_session() {
+        val s = store()
+        val dir = s.newSession("0", 4032, 3024)
+        // Promote the in_progress stub to a complete
+        // manifest with intrinsics so latestIntrinsicsFor
+        // returns non-null.
+        val manifest = JSONObject(File(dir, "calibration.json").readText())
+            .put(
+                "intrinsics",
+                JSONObject()
+                    .put("fx", 100.0).put("fy", 110.0)
+                    .put("cx", 50.0).put("cy", 60.0)
+                    .put("k1", 0.0).put("k2", 0.0).put("k3", 0.0)
+                    .put("p1", 0.0).put("p2", 0.0),
+            )
+            .put("rms_px", 0.5)
+        File(dir, "calibration.json").writeText(manifest.toString())
+        val src = resolveCalibration(s, "0", 4032, 3024)
+        assertTrue(src is CalibrationSource.Operator)
+        assertEquals(dir.name, (src as CalibrationSource.Operator).calibrationId)
+    }
+
+    @Test
+    fun resolveCalibration_operator_carries_legacy_marker_for_legacy_calibration() {
+        val ext = tmp.newFolder("ext5")
+        val legacy = tmp.newFolder("legacy5")
+        val legacySession = File(legacy, "0/4032x3024/01HXYZABC123").apply { mkdirs() }
+        val intrJson = JSONObject()
+            .put(
+                "intrinsics",
+                JSONObject()
+                    .put("fx", 100.0).put("fy", 110.0)
+                    .put("cx", 50.0).put("cy", 60.0)
+                    .put("k1", 0.0).put("k2", 0.0).put("k3", 0.0)
+                    .put("p1", 0.0).put("p2", 0.0),
+            )
+            .put("width", 4032).put("height", 3024)
+            .put("rms_px", 0.5)
+        File(legacySession, "intrinsics.json").writeText(intrJson.toString())
+        val s = CalibrationStore(externalRoot = ext, legacyInternalRoot = legacy)
+        val src = resolveCalibration(s, "0", 4032, 3024)
+        assertTrue(src is CalibrationSource.Operator)
+        assertEquals(
+            "legacy:4032x3024",
+            (src as CalibrationSource.Operator).calibrationId,
+        )
+    }
+
+    @Test
     fun factory_profile_uuid_is_stable() {
         // The bake-in promise: re-fetching the profile gives
         // the same UUID, run after run. Catches accidental
