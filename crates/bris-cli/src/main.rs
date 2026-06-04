@@ -2192,6 +2192,7 @@ mod session_overlay_tests {
                 distortion: Distortion::None,
                 rms_px: None,
                 solved_at_unix_ms: None,
+                placeholder: Some(true),
             },
             ap_input: None,
             ap_derivation_trace: None,

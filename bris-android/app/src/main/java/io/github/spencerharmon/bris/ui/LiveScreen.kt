@@ -218,13 +218,27 @@ fun LiveScreen(
     // to construct the schema-versioned manifest at
     // finalize. Always written (KB cost); replay tooling
     // consumes it.
+    //
+    // `observer` mirrors the AP the engine actually ran
+    // against (per `defaultEngineConfig`): if the active
+    // session has an `apSeed`, the engine was bound with
+    // that lat/lon/eye_height, so the manifest stamps the
+    // same triple into `ap_input`. With no session apSeed,
+    // `defaultEngineConfig` cold-starts at (0,0,2.0) and
+    // `ap_input` is OMITTED from the manifest (per the
+    // schema's "never substitute (0,0)" rule). Cold-start
+    // captures legitimately have no operator-entered AP.
     val bundleInputsBuilder: () -> io.github.spencerharmon.bris.engine.DebugBundleWriter.Inputs = {
+        val session = activeSessionUuid?.let { sessionStore.loadOrNull(it) }
+        val seed = session?.apSeed
         io.github.spencerharmon.bris.engine.DebugBundleWriter.Inputs(
-            observer = io.github.spencerharmon.bris.engine.DebugBundleWriter.ObserverFix(
-                latitudeDeg = 0.0,
-                longitudeDeg = 0.0,
-                eyeHeightM = 2.0,
-            ),
+            observer = seed?.let {
+                io.github.spencerharmon.bris.engine.DebugBundleWriter.ObserverFix(
+                    latitudeDeg = it.latDeg,
+                    longitudeDeg = it.lonDeg,
+                    eyeHeightM = it.eyeHeightM,
+                )
+            },
             apProvenance = "operator_entered",
             lensId = effectiveLensId,
             captureWidth = captureSize.width,

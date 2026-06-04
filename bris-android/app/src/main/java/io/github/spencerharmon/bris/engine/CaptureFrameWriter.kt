@@ -35,6 +35,16 @@ import java.io.FileOutputStream
  */
 class CaptureFrameWriter(
     private val captureDir: File,
+    /**
+     * Hash function used to compute the
+     * `first_frame_blake3` recorded into
+     * `bundle.json`. Tests inject a deterministic hasher;
+     * production passes `uniffi.bris_ffi::blake3Hex` so the
+     * digest matches what
+     * `bris_bundle::verify_first_frame_checksum` recomputes
+     * at replay time.
+     */
+    private val blake3Hasher: (ByteArray) -> String = { uniffi.bris_ffi.blake3Hex(it) },
 ) {
 
     private val framesDir: File = File(captureDir, "frames").apply { mkdirs() }
@@ -43,6 +53,9 @@ class CaptureFrameWriter(
     private var seq: Int = 0
     private var firstUnixMs: Long? = null
     private var lastUnixMs: Long? = null
+    private var firstFrameBlake3: String? = null
+    private var firstFrameWidth: Int = 0
+    private var firstFrameHeight: Int = 0
     private var closed: Boolean = false
 
     /**
@@ -163,9 +176,37 @@ class CaptureFrameWriter(
 
         if (firstUnixMs == null) firstUnixMs = capturedUnixMs
         lastUnixMs = capturedUnixMs
+        if (firstFrameBlake3 == null) {
+            // Compute over the raw PGM file bytes, matching
+            // `bris_bundle::verify_first_frame_checksum`.
+            // The hasher may throw on JVM unit-test runs
+            // where the bris_ffi native library is not on
+            // the classpath; treat that as "no hash" rather
+            // than tearing down the writer.
+            firstFrameBlake3 = try {
+                blake3Hasher(pgmFile.readBytes())
+            } catch (t: Throwable) {
+                android.util.Log.w(
+                    "CaptureFrameWriter",
+                    "blake3 hash failed: ${t.javaClass.simpleName}: ${t.message ?: "?"}",
+                )
+                null
+            }
+            firstFrameWidth = width
+            firstFrameHeight = height
+        }
         if (explicitSeq == null) seq += 1
         return pgmFile
     }
+
+    /** BLAKE3 hex digest of the first PGM bytes ever written by this writer, or null. */
+    fun firstFrameBlake3(): String? = firstFrameBlake3
+
+    /** Width of the first frame ever written by this writer, or 0. */
+    fun firstFrameWidth(): Int = firstFrameWidth
+
+    /** Height of the first frame ever written by this writer, or 0. */
+    fun firstFrameHeight(): Int = firstFrameHeight
 
     /** Total frames written via [appendFrame] (assigned seqs). */
     fun frameCount(): Int = seq

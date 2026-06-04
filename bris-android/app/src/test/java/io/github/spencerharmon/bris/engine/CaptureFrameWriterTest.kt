@@ -149,6 +149,28 @@ class CaptureFrameWriterTest {
         assertTrue(pgm.name == "00000000.pgm")
         w.close()
     }
+
+    @Test
+    fun first_frame_blake3_records_hash_of_first_pgm_bytes() {
+        // Inject a deterministic hasher so this test does
+        // not load the bris_ffi native library (which is
+        // not packaged in the JVM test classpath).
+        val pix = ByteArray(2 * 2) { it.toByte() }
+        val sentinel = "abc-${pix.size}"
+        val w = CaptureFrameWriter(mkDir("cap-hash"), blake3Hasher = { _ -> sentinel })
+        org.junit.Assert.assertNull(w.firstFrameBlake3())
+        w.appendFrame(2, 2, pix, 100L)
+        // First-frame fields populated; width/height match.
+        org.junit.Assert.assertEquals(sentinel, w.firstFrameBlake3())
+        org.junit.Assert.assertEquals(2, w.firstFrameWidth())
+        org.junit.Assert.assertEquals(2, w.firstFrameHeight())
+        // Subsequent frames don't change it.
+        w.appendFrame(4, 4, ByteArray(16), 200L)
+        org.junit.Assert.assertEquals(sentinel, w.firstFrameBlake3())
+        org.junit.Assert.assertEquals(2, w.firstFrameWidth())
+        org.junit.Assert.assertEquals(2, w.firstFrameHeight())
+        w.close()
+    }
 }
 
 class CaptureFrameWriterRetentionTest {
