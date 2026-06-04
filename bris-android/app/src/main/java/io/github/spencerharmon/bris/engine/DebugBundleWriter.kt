@@ -66,7 +66,15 @@ object DebugBundleWriter {
         val frameCount: Long,
         val startedUnixMs: Long,
         val endedUnixMs: Long,
-        val firstFrameBlake3: String,
+        /**
+         * BLAKE3 hex of the first written PGM, or null if
+         * no frames were written (Debug OFF capture that
+         * never observed a fix-frame). Null is serialised
+         * by omitting `first_frame_blake3` from the
+         * manifest entirely — the Rust schema's
+         * `Option<String>` does the same.
+         */
+        val firstFrameBlake3: String?,
         val firstFrameWidth: Int,
         val firstFrameHeight: Int,
     )
@@ -150,7 +158,7 @@ object DebugBundleWriter {
             .put("frame_count", snapshot.frameCount)
             .put("started_unix_ms", snapshot.startedUnixMs)
             .put("ended_unix_ms", snapshot.endedUnixMs)
-            .put("first_frame_blake3", snapshot.firstFrameBlake3)
+        snapshot.firstFrameBlake3?.let { capture.put("first_frame_blake3", it) }
 
         val intrinsics = intrinsicsRecord(
             inputs.calibration,
@@ -183,19 +191,36 @@ object DebugBundleWriter {
             )
         }
 
-        if (inputs.gpsTruth != null) {
+        if (inputs.gpsTruth != null && inputs.gpsTruth.horizontalAccuracyM > 0.0) {
             val g = inputs.gpsTruth
             // Coarse Android last-known fixes carry a single
             // horizontal-accuracy figure; project it onto both
             // axes equally. Altitude/sat-count are not
             // available from `getLastKnownLocation`.
-            val accuracy = if (g.horizontalAccuracyM > 0.0) g.horizontalAccuracyM else 100.0
+            //
+            // TODO(operator-approved 2026-06-03): when a GNSS
+            // source provides per-axis (lat, lon) accuracy,
+            // bypass this equal-projection branch and emit
+            // the per-axis sigmas honestly. The `GpsInfo`
+            // and `GpsTruth` shapes are already per-axis on
+            // the bundle side, so plumbing a second accuracy
+            // figure through `GpsInfo` is the only blocker.
+            // Today's Android Network/GPS provider only
+            // exposes a single horizontal accuracy, so
+            // equal-projection is the honest fallback.
+            //
+            // Accuracy <= 0 means "unknown"; per the
+            // honest-uncertainty rule we OMIT `gps_truth`
+            // entirely rather than invent a sigma. The
+            // guard above and the upstream `CoarseLocation`
+            // filter both enforce this.
+            val accuracy = g.horizontalAccuracyM
             val truth = JSONObject()
                 .put("lat", g.latDeg)
                 .put("lon", g.lonDeg)
                 .put("lat_sigma_m", accuracy)
                 .put("lon_sigma_m", accuracy)
-                .put("captured_unix_ms", System.currentTimeMillis())
+                .put("captured_unix_ms", g.capturedUnixMs)
                 .put("source", "android_${g.source}")
             root.put("gps_truth", truth)
         }
@@ -257,6 +282,18 @@ object DebugBundleWriter {
             .put("cy", intr?.cy ?: (height / 2.0))
             .put("distortion", distortion)
         if (intr != null && intr.rmsPx.isFinite()) rec.put("rms_px", intr.rmsPx)
+        // Tradeoff (operator-approved 2026-06-03): rather than
+        // refusing to emit `bundle.json` when calibration is
+        // a placeholder — which would block operators from
+        // sharing un-calibrated debug bundles for triage —
+        // we emit the synthetic fx/fy/cx/cy and stamp
+        // `placeholder: true` so consumers can distinguish
+        // "measured at ~60° HFOV" from "no calibration
+        // loaded". `bris-bundle::IntrinsicsRecord.placeholder`
+        // is additive within `schema_version: 1`.
+        if (source is CalibrationSource.Placeholder) {
+            rec.put("placeholder", true)
+        }
         if (source is CalibrationSource.Factory) {
             rec.put(
                 "profile_key",

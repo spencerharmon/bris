@@ -170,4 +170,13 @@ data class GpsInfo(
     val lonDeg: Double,
     val horizontalAccuracyM: Double,
     val source: String,
+    /**
+     * Wall-clock time at which the underlying platform fix
+     * was captured, in Unix-ms. Threaded into
+     * `bundle.gps_truth.captured_unix_ms` so replay tooling
+     * sees the actual GPS timestamp, not the wall clock at
+     * manifest-write time. Sourced from
+     * `android.location.Location.getTime()`.
+     */
+    val capturedUnixMs: Long,
 )

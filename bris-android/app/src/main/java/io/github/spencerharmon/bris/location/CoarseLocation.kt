@@ -60,6 +60,11 @@ object CoarseLocation {
         return try {
             @Suppress("MissingPermission") // Caller checked above.
             val loc = lm.getLastKnownLocation(provider) ?: return null
+            // Per AGENTS.md honest-uncertainty rule: a fix
+            // without a real accuracy figure is not a usable
+            // ground-truth — drop it rather than invent a
+            // sigma downstream.
+            if (!loc.hasAccuracy() || loc.accuracy <= 0.0f) return null
             TimedLocation(loc, sourceLabel, loc.time)
         } catch (_: SecurityException) {
             null
@@ -74,8 +79,9 @@ object CoarseLocation {
         fun toGpsInfo(): GpsInfo = GpsInfo(
             latDeg = loc.latitude,
             lonDeg = loc.longitude,
-            horizontalAccuracyM = if (loc.hasAccuracy()) loc.accuracy.toDouble() else 0.0,
+            horizontalAccuracyM = loc.accuracy.toDouble(),
             source = source,
+            capturedUnixMs = loc.time,
         )
     }
 }

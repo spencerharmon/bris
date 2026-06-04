@@ -147,40 +147,94 @@ as part of the canonical "Save buffer" flow. Implemented via:
    round-tripped through `serde_json` against
    `bris_bundle::BundleManifest` so Kotlin schema drift fails
    at save time.
-2. `DebugCaptureBuffer` records the first-frame BLAKE3, session
-   start/end Unix-ms, and capture resolution to
-   `.bundle-meta.json`. Sidecar JSON carries optional
-   `exposure_us` / `sensor_gain`.
+2. `CaptureFrameWriter` records the first-frame BLAKE3 (over
+   the raw PGM bytes, computed via `bris_ffi.blake3Hex`),
+   session start/end Unix-ms, and the first frame's width and
+   height. `CaptureRecorder.finalize` reads these back and
+   stamps them into `CaptureSnapshot` for the manifest write.
+   When no frame ever lands (Debug OFF capture that observes
+   no fix-frame), `first_frame_blake3` is omitted from the
+   manifest entirely — the schema's `Option<String>` does the
+   same. Sidecar JSON carries optional `exposure_us` /
+   `sensor_gain`.
 3. `DebugBundleWriter` composes the manifest from the live
    `CalibrationSource` (operator / factory / placeholder),
-   the operator-entered observer (currently a placeholder —
-   the operator-entered AP UI is the outstanding follow-up),
-   and an optional `CoarseLocation` ground-truth GPS fix that
-   is **never** substituted for `ap_input`.
+   the operator-entered AP threaded from the active
+   `Session.apSeed` (`null` for cold-start captures, which
+   omit `ap_input` entirely), and an optional
+   `CoarseLocation` ground-truth GPS fix that is **never**
+   substituted for `ap_input`. `gps_truth.captured_unix_ms`
+   is the platform `Location.getTime()` of the underlying
+   fix, not the wall-clock at manifest-write time;
+   `gps_truth` is omitted when the platform reports an
+   unknown horizontal accuracy (`accuracy <= 0`), per the
+   honest-uncertainty rule.
 4. `DebugBufferActions.saveAll` takes a
    `prepareManifest(bundleDir, bundleId)` hook invoked before
    the export zip is enumerated, so the saved archive carries
    `bundle.json` at its root.
 
-Outstanding deferred work:
+### `IntrinsicsRecord.placeholder`
 
-- Replace the placeholder observer in `LiveScreen` with the
-  operator-entered AP once that UI lands; thread the same
-  value into both the `EngineConfig` and the manifest so
-  `ap_input` stays honest about what the engine ran against.
+Added in Phase 7.5: when `IntrinsicsSource::Placeholder`
+would otherwise emit synthetic identity-ish numerics that
+are easy to mistake for measured intrinsics, the writer
+additionally sets `intrinsics.placeholder = true`. Replay
+tooling uses this boolean to distinguish "measured at
+~60° HFOV" from "no calibration loaded" without having to
+re-pattern-match on `IntrinsicsSource::Placeholder` plus
+the specific fallback fx/fy formula. Additive within
+`schema_version: 1`; omitted for measured intrinsics
+(operator / factory / device-reported).
 
-Resolved:
+Tradeoff: the alternative — refusing to emit `bundle.json`
+at all when intrinsics are placeholder — would prevent
+operators from sharing un-calibrated debug bundles for
+triage. The boolean marker preserves operator ergonomics
+while keeping the data honest.
 
-- `CalibrationSource::Operator` now carries the real
-  calibration session UUID. New calibrations recorded via
-  `CalibrationStore.newSession` stamp a `UUIDv4` into
-  `calibration.json` and `latestCalibrationIdFor` returns it
-  verbatim; `IntrinsicsSource::UserCalibration::session_id`
-  in the bundle therefore reflects the session that
-  produced the intrinsics. Pre-#58 on-disk calibrations
-  that have no recorded UUID surface as `"legacy:WxH"` so
-  consumers can tell a legitimately untraceable
-  calibration apart from a real UUID and from the
-  synthesised `operator-WxH` placeholder earlier builds
-  shipped. The marker is migration-only and falls out of
-  the corpus once those calibrations are re-run.
+Resolved (Phase 7.5):
+
+- Operator AP is now threaded end-to-end from `Session.apSeed`
+  into both the engine (`defaultEngineConfig`) and the
+  manifest (`ap_input`). Cold-start captures legitimately
+  omit `ap_input` rather than substituting `(0, 0)`.
+- `eye_height_m` comes from `Session.apSeed.eyeHeightM`, not
+  the previously hard-coded `2.0`.
+- `gps_truth.captured_unix_ms` is the actual
+  `Location.getTime()` rather than `System.currentTimeMillis()`
+  at manifest-write time.
+- `gps_truth` is omitted when `horizontalAccuracyM <= 0`
+  rather than synthesising a `100.0 m` fallback sigma.
+- `first_frame_blake3` / `first_frame_width` /
+  `first_frame_height` are populated from the first written
+  PGM by `CaptureFrameWriter`, not stubbed `""` / `0`.
+- `IntrinsicsRecord.placeholder = true` differentiates
+  synthetic from measured intrinsics in the manifest.
+
+Known limitation (tracked):
+
+- Android Network/GPS providers expose a single
+  horizontal-accuracy figure, which `DebugBundleWriter`
+  projects equally onto `lat_sigma_m` and `lon_sigma_m`. A
+  per-axis path is shaped into `GpsInfo` so a future GNSS
+  source providing per-axis accuracy can bypass the equal-
+  projection branch without further refactoring; see
+  `DebugBundleWriter.buildManifestJson` for the
+  `TODO(operator-approved 2026-06-03)` marker.
+
+## Calibration provenance
+
+`CalibrationSource::Operator` now carries the real
+calibration session UUID. New calibrations recorded via
+`CalibrationStore.newSession` stamp a `UUIDv4` into
+`calibration.json` and `latestCalibrationIdFor` returns it
+verbatim; `IntrinsicsSource::UserCalibration::session_id`
+in the bundle therefore reflects the session that
+produced the intrinsics. Pre-#58 on-disk calibrations
+that have no recorded UUID surface as `"legacy:WxH"` so
+consumers can tell a legitimately untraceable
+calibration apart from a real UUID and from the
+synthesised `operator-WxH` placeholder earlier builds
+shipped. The marker is migration-only and falls out of
+the corpus once those calibrations are re-run.

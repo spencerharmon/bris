@@ -369,9 +369,9 @@ class CaptureRecorder(
                         frameCount = frameCount.toLong(),
                         startedUnixMs = startedMs,
                         endedUnixMs = endedMs,
-                        firstFrameBlake3 = "",
-                        firstFrameWidth = 0,
-                        firstFrameHeight = 0,
+                        firstFrameBlake3 = writer.firstFrameBlake3(),
+                        firstFrameWidth = writer.firstFrameWidth(),
+                        firstFrameHeight = writer.firstFrameHeight(),
                     )
                     DebugBundleWriter.write(
                         bundleDir = dir,

@@ -75,4 +75,146 @@ class DebugBundleWriterTest {
         assertEquals("user_calibration", source.getString("kind"))
         assertEquals("legacy:4032x3024", source.getString("calibration_id"))
     }
+
+    @Test
+    fun ap_input_absent_when_observer_null() {
+        val inputs = DebugBundleWriter.Inputs(
+            observer = null,
+            lensId = "0",
+            captureWidth = 4032,
+            captureHeight = 3024,
+            calibration = CalibrationSource.Placeholder,
+        )
+        val manifest = DebugBundleWriter.buildManifestJson("cap-1", snapshot(), inputs)
+        org.junit.Assert.assertFalse(
+            "ap_input must be absent for cold-start",
+            manifest.has("ap_input"),
+        )
+        org.junit.Assert.assertFalse(manifest.has("ap_derivation_trace"))
+    }
+
+    @Test
+    fun ap_input_reflects_operator_supplied_fix() {
+        val inputs = DebugBundleWriter.Inputs(
+            observer = DebugBundleWriter.ObserverFix(
+                latitudeDeg = 30.5,
+                longitudeDeg = -97.25,
+                eyeHeightM = 3.5,
+            ),
+            lensId = "0",
+            captureWidth = 4032,
+            captureHeight = 3024,
+            calibration = CalibrationSource.Placeholder,
+        )
+        val manifest = DebugBundleWriter.buildManifestJson("cap-1", snapshot(), inputs)
+        val ap = manifest.getJSONObject("ap_input")
+        assertEquals(30.5, ap.getDouble("lat"), 0.0)
+        assertEquals(-97.25, ap.getDouble("lon"), 0.0)
+        assertEquals(3.5, ap.getDouble("eye_height_m"), 0.0)
+    }
+
+    @Test
+    fun gps_truth_uses_provided_captured_unix_ms() {
+        val supplied = 1_700_000_000_000L
+        val gps = io.github.spencerharmon.bris.upload.GpsInfo(
+            latDeg = 30.0,
+            lonDeg = -97.0,
+            horizontalAccuracyM = 12.5,
+            source = "network",
+            capturedUnixMs = supplied,
+        )
+        val inputs = DebugBundleWriter.Inputs(
+            observer = null,
+            lensId = "0",
+            captureWidth = 4032,
+            captureHeight = 3024,
+            calibration = CalibrationSource.Placeholder,
+            gpsTruth = gps,
+        )
+        val manifest = DebugBundleWriter.buildManifestJson("cap-1", snapshot(), inputs)
+        val truth = manifest.getJSONObject("gps_truth")
+        assertEquals(supplied, truth.getLong("captured_unix_ms"))
+        assertEquals(12.5, truth.getDouble("lat_sigma_m"), 0.0)
+        assertEquals(12.5, truth.getDouble("lon_sigma_m"), 0.0)
+    }
+
+    @Test
+    fun gps_truth_omitted_when_accuracy_unknown() {
+        val gps = io.github.spencerharmon.bris.upload.GpsInfo(
+            latDeg = 30.0,
+            lonDeg = -97.0,
+            horizontalAccuracyM = 0.0,
+            source = "network",
+            capturedUnixMs = 1_700_000_000_000L,
+        )
+        val inputs = DebugBundleWriter.Inputs(
+            observer = null,
+            lensId = "0",
+            captureWidth = 4032,
+            captureHeight = 3024,
+            calibration = CalibrationSource.Placeholder,
+            gpsTruth = gps,
+        )
+        val manifest = DebugBundleWriter.buildManifestJson("cap-1", snapshot(), inputs)
+        org.junit.Assert.assertFalse(
+            "gps_truth must be omitted when accuracy is unknown",
+            manifest.has("gps_truth"),
+        )
+    }
+
+    @Test
+    fun placeholder_calibration_marks_intrinsics_placeholder_true() {
+        val inputs = DebugBundleWriter.Inputs(
+            observer = null,
+            lensId = "0",
+            captureWidth = 4032,
+            captureHeight = 3024,
+            calibration = CalibrationSource.Placeholder,
+        )
+        val manifest = DebugBundleWriter.buildManifestJson("cap-1", snapshot(), inputs)
+        val intrinsics = manifest.getJSONObject("intrinsics")
+        org.junit.Assert.assertTrue(intrinsics.has("placeholder"))
+        org.junit.Assert.assertTrue(intrinsics.getBoolean("placeholder"))
+    }
+
+    @Test
+    fun operator_calibration_omits_placeholder_marker() {
+        val inputs = DebugBundleWriter.Inputs(
+            observer = null,
+            lensId = "0",
+            captureWidth = 4032,
+            captureHeight = 3024,
+            calibration = CalibrationSource.Operator(
+                intrinsics = intrinsics(),
+                calibrationId = "11111111-2222-4333-8444-555555555555",
+            ),
+        )
+        val manifest = DebugBundleWriter.buildManifestJson("cap-1", snapshot(), inputs)
+        org.junit.Assert.assertFalse(
+            manifest.getJSONObject("intrinsics").has("placeholder"),
+        )
+    }
+
+    @Test
+    fun first_frame_blake3_omitted_when_null() {
+        val snap = DebugBundleWriter.CaptureSnapshot(
+            frameCount = 0,
+            startedUnixMs = 1_000,
+            endedUnixMs = 2_000,
+            firstFrameBlake3 = null,
+            firstFrameWidth = 0,
+            firstFrameHeight = 0,
+        )
+        val inputs = DebugBundleWriter.Inputs(
+            observer = null,
+            lensId = "0",
+            captureWidth = 4032,
+            captureHeight = 3024,
+            calibration = CalibrationSource.Placeholder,
+        )
+        val manifest = DebugBundleWriter.buildManifestJson("cap-1", snap, inputs)
+        org.junit.Assert.assertFalse(
+            manifest.getJSONObject("capture").has("first_frame_blake3"),
+        )
+    }
 }

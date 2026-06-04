@@ -413,6 +413,15 @@ pub struct IntrinsicsRecord {
     /// solved, if known.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub solved_at_unix_ms: Option<i64>,
+    /// Marks intrinsics emitted from
+    /// [`IntrinsicsSource::Placeholder`] so replay tooling
+    /// can distinguish synthetic placeholders (no
+    /// calibration loaded) from real calibrations that
+    /// happen to land near the same numeric values. Absent
+    /// for measured (operator / factory / device-reported)
+    /// intrinsics. Additive within `schema_version: 1`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub placeholder: Option<bool>,
 }
 
 /// Provenance of an [`IntrinsicsRecord`].
@@ -972,6 +981,7 @@ mod tests {
                 },
                 rms_px: Some(0.73),
                 solved_at_unix_ms: Some(1_700_000_000_000),
+                placeholder: None,
             },
             ap_input: Some(ApInput {
                 lat: 30.0,
@@ -1162,6 +1172,31 @@ mod tests {
         let raw = serde_json::to_string(&v).unwrap();
         assert!(raw.contains("calibration_id"));
         assert!(!raw.contains("session_id"));
+    }
+
+    #[test]
+    fn intrinsics_record_placeholder_true_round_trips() {
+        let mut m = full_manifest();
+        m.intrinsics.source = IntrinsicsSource::Placeholder;
+        m.intrinsics.placeholder = Some(true);
+        let s = serde_json::to_string(&m).unwrap();
+        assert!(s.contains("\"placeholder\":true"));
+        let back: BundleManifest = serde_json::from_str(&s).unwrap();
+        assert_eq!(back.intrinsics.placeholder, Some(true));
+    }
+
+    #[test]
+    fn intrinsics_record_placeholder_none_is_omitted() {
+        let mut m = full_manifest();
+        m.intrinsics.placeholder = None;
+        let s = serde_json::to_string(&m).unwrap();
+        // Should not appear at all (skip_serializing_if).
+        assert!(
+            !s.contains("placeholder"),
+            "unexpected placeholder field in JSON: {s}"
+        );
+        let back: BundleManifest = serde_json::from_str(&s).unwrap();
+        assert_eq!(back.intrinsics.placeholder, None);
     }
 
     #[test]
