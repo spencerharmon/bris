@@ -657,6 +657,44 @@ impl FrameSidecar {
     }
 }
 
+/// One line of the optional `index.jsonl` sidecar written
+/// next to a `frames/` directory by the on-device
+/// `DebugCaptureBuffer`.
+///
+/// This file is **not required for replay**: the canonical
+/// per-frame metadata lives in the JSON sidecars enumerated
+/// by [`enumerate_frames`]. `index.jsonl` is a convenience
+/// catalog the on-device writer maintains for fast
+/// directory scans (one line per persisted frame, in the
+/// order the writer flushed them), and it carries
+/// `pgm_bytes` / `json_bytes` / `retention` fields that are
+/// not duplicated in the per-frame sidecar.
+///
+/// The schema matches the on-disk shape produced by
+/// `bris-android/.../DebugCaptureBuffer.kt`. Additive within
+/// `schema_version: 1` (unknown trailing fields are ignored).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IndexEntry {
+    /// Frame sequence number within the capture (0-based),
+    /// matching the [`FrameSidecar::seq`] of the same frame.
+    pub seq: u32,
+    /// Wall-clock capture timestamp (Unix milliseconds),
+    /// matching [`FrameSidecar::captured_unix_ms`].
+    pub captured_unix_ms: i64,
+    /// Frame width in pixels.
+    pub width: u32,
+    /// Frame height in pixels.
+    pub height: u32,
+    /// Size of the PGM payload on disk, in bytes.
+    pub pgm_bytes: u64,
+    /// Size of the per-frame JSON sidecar on disk, in bytes.
+    pub json_bytes: u64,
+    /// Retention class the on-device writer tagged this
+    /// frame with (`"debug"`, `"fix_frame"`, ...). Free-form
+    /// string at this layer; consumers interpret it.
+    pub retention: String,
+}
+
 /// One frame's worth of (PGM, sidecar) paths.
 #[derive(Debug, Clone)]
 pub struct FramePathPair {
@@ -750,6 +788,39 @@ impl BundleManifest {
         fs::write(&path, json)?;
         Ok(())
     }
+}
+
+/// Load the optional `index.jsonl` catalog from a bundle
+/// directory.
+///
+/// Returns `Ok(None)` when the file is absent (the file is
+/// not required for replay; the canonical per-frame metadata
+/// lives in the JSON sidecars). Returns `Ok(Some(entries))`
+/// when present, with one [`IndexEntry`] per non-empty line
+/// in the file. Blank lines are skipped; any other parse
+/// failure surfaces as [`BundleError::Json`].
+pub fn load_index_jsonl(bundle_dir: &Path) -> Result<Option<Vec<IndexEntry>>, BundleError> {
+    let path = bundle_dir.join("index.jsonl");
+    if !path.exists() {
+        return Ok(None);
+    }
+    let bytes = fs::read(&path)?;
+    let text = std::str::from_utf8(&bytes).map_err(|e| BundleError::Json {
+        path: path.clone(),
+        source: serde::de::Error::custom(e.to_string()),
+    })?;
+    let mut out = Vec::new();
+    for line in text.lines() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let entry: IndexEntry = serde_json::from_str(line).map_err(|source| BundleError::Json {
+            path: path.clone(),
+            source,
+        })?;
+        out.push(entry);
+    }
+    Ok(Some(out))
 }
 
 /// Load a single sidecar JSON file.
@@ -1221,5 +1292,67 @@ mod tests {
         std::fs::write(media.join("000000000000.pgm"), b"other-bytes").unwrap();
         let err = verify_first_frame_checksum(&m, dir.path()).unwrap_err();
         assert!(matches!(err, BundleError::ChecksumMismatch { .. }));
+    }
+
+    #[test]
+    fn load_index_jsonl_returns_none_when_absent() {
+        let dir = tempdir().unwrap();
+        assert!(load_index_jsonl(dir.path()).unwrap().is_none());
+    }
+
+    #[test]
+    fn load_index_jsonl_parses_real_on_disk_schema() {
+        let dir = tempdir().unwrap();
+        let body = concat!(
+            "{\"seq\":0,\"captured_unix_ms\":1780382794242,\"width\":3024,\"height\":4032,\"pgm_bytes\":12192785,\"json_bytes\":89,\"retention\":\"debug\"}\n",
+            "{\"seq\":1,\"captured_unix_ms\":1780382794883,\"width\":3024,\"height\":4032,\"pgm_bytes\":12192785,\"json_bytes\":89,\"retention\":\"debug\"}\n",
+            "\n",
+            "{\"seq\":2,\"captured_unix_ms\":1780382797092,\"width\":3024,\"height\":4032,\"pgm_bytes\":12192785,\"json_bytes\":89,\"retention\":\"fix_frame\"}\n",
+        );
+        std::fs::write(dir.path().join("index.jsonl"), body).unwrap();
+        let entries = load_index_jsonl(dir.path()).unwrap().unwrap();
+        assert_eq!(entries.len(), 3);
+        assert_eq!(entries[0].seq, 0);
+        assert_eq!(entries[0].captured_unix_ms, 1_780_382_794_242);
+        assert_eq!(entries[0].width, 3024);
+        assert_eq!(entries[0].height, 4032);
+        assert_eq!(entries[0].pgm_bytes, 12_192_785);
+        assert_eq!(entries[0].json_bytes, 89);
+        assert_eq!(entries[0].retention, "debug");
+        assert_eq!(entries[2].seq, 2);
+        assert_eq!(entries[2].retention, "fix_frame");
+    }
+
+    #[test]
+    fn index_entry_round_trips_through_jsonl() {
+        let entries = vec![
+            IndexEntry {
+                seq: 0,
+                captured_unix_ms: 1_700_000_000_000,
+                width: 1920,
+                height: 1080,
+                pgm_bytes: 4_147_200,
+                json_bytes: 128,
+                retention: "debug".into(),
+            },
+            IndexEntry {
+                seq: 1,
+                captured_unix_ms: 1_700_000_000_100,
+                width: 1920,
+                height: 1080,
+                pgm_bytes: 4_147_200,
+                json_bytes: 130,
+                retention: "fix_frame".into(),
+            },
+        ];
+        let mut text = String::new();
+        for e in &entries {
+            text.push_str(&serde_json::to_string(e).unwrap());
+            text.push('\n');
+        }
+        let dir = tempdir().unwrap();
+        std::fs::write(dir.path().join("index.jsonl"), text).unwrap();
+        let back = load_index_jsonl(dir.path()).unwrap().unwrap();
+        assert_eq!(back, entries);
     }
 }
