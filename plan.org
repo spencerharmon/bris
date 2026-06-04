@@ -189,6 +189,8 @@ references to the regression tests that pin the behavior. See
    *Audit 2026-06-03 — shortcut:* no ~CODE_OF_CONDUCT.md~ in repo;
    spec lists it explicitly. ~CONTRIBUTING.md~ is minimal (points
    at plan.org). Action: add CoC file.
+   *Resolved 2026-06-03 (PR #65):* ~CODE_OF_CONDUCT.md~ (Contributor
+   Covenant 2.1) added at repo root; ~CONTRIBUTING.md~ links it.
 ** DONE Set up ~rustfmt~, ~clippy~ (deny warnings in CI), ~cargo-deny~
    *Audit 2026-06-03 — shortcuts:* ~deny.toml:13-19~ ignores
    ~RUSTSEC-2025-0141~ and ~RUSTSEC-2024-0436~ rather than fixing
@@ -706,6 +708,10 @@ references to the regression tests that pin the behavior. See
    the image width here"; should read intrinsics width.
    Action: replace the ~unwrap_or~ with explicit error; thread
    intrinsics width through.
+   *Resolved 2026-06-03 (PR #61):* non-finite σ now propagates
+   as an explicit ~MeasurementError~ variant instead of
+   collapsing to zero. Horizon endpoint sampling reads the
+   real intrinsics width. Tests in ~measure.rs~ cover both.
    Given a stitched scene + horizon line + body centroid + camera
    intrinsics, output measured altitude with uncertainty.
 ** TODO Stitching/accuracy tradeoff knob
@@ -1380,6 +1386,11 @@ references to the regression tests that pin the behavior. See
    sub-block contradicts the DONE state; the code does exist.
    Action: implement lens-model σ propagation; delete the
    stale Status block.
+   *Resolved 2026-06-03 (PR #64):* lens-model ∂alt/∂pixel
+   Jacobian now applied to per-star pixel residuals; the
+   resulting angular σ combines in quadrature with the
+   caller-supplied σ and horizon σ. Stale tail block removed
+   below.
    Implemented in ~bris-platesolve::altitude::star_altitudes~:
    convert each identified star from a ~PlateSolveResult~ into an
    altitude observation against an independently-measured horizon
@@ -1390,9 +1401,10 @@ references to the regression tests that pin the behavior. See
    sister function to ~measure_altitude~ that takes a precomputed
    ray instead of a centroid pixel).
 
-   Per-star σ comes from the caller (typically the plate-solve
-   refinement RMS) and is combined in quadrature with the horizon
-   fit's altitude σ.
+   Per-star σ is the quadrature combination of
+   (a) the caller's input σ, (b) the horizon-fit altitude σ,
+   and (c) the lens-model contribution
+   (~∂alt/∂pixel · σ_pixel_residual~) introduced in PR #64.
 
    Below-horizon stars are silently skipped — they don't
    contribute observations but aren't an error condition for the
@@ -1403,17 +1415,6 @@ references to the regression tests that pin the behavior. See
    altitude observations that ~bris-nav::sight~ can consume.
    Same calibration story as elsewhere: placeholder intrinsics
    make absolute altitudes wrong by the calibration factor.
-
-   *Status:* unimplemented. Requires:
-     - Calibrated camera intrinsics (placeholder makes the per-
-       star altitude wrong by the same calibration factor as any
-       other altitude).
-     - A horizon line (from the segmentation detector, the night
-       horizon detector, or — for headless deployment without a
-       visible horizon — a future IMU-prior path).
-     - Per-star σ propagation from the plate-solve residuals
-       through the lens model into the resulting altitude
-       observation.
 
 * Phase 3.5: Continuous operation & automatic body selection
   Bris is not a "press the button to take a sight" app. The
@@ -1818,6 +1819,11 @@ references to the regression tests that pin the behavior. See
    (~crates/bris-vision/src/horizon_providers/fusion.rs:172-209~).
    Different rule, similar effect. Action: align spec text
    with implementation or switch to true pairwise.
+   *Resolved 2026-06-03 (PR #63):* switched to true pairwise
+   (complete-link) clustering: a hypothesis joins a cluster
+   iff its angular distance to every existing cluster member
+   is ≤ k·σ_pair. Regression tests cover the A↔B↔C
+   pathological case.
    Replaced winner-takes-best-σ dispatch with a weighted
    inverse-variance fusion of concordant hypotheses
    (`bris_vision::fuse_horizon_hypotheses`). Pairwise
@@ -1905,6 +1911,13 @@ references to the regression tests that pin the behavior. See
    fix.rs:139 — the chi-square diagnostic is deferred without a
    TODO. Action: add the time-σ inflation term; either populate
    the chi-square diagnostic or remove the dead variable.
+   *Resolved 2026-06-03 (PR #62):* per-sight time-σ is now an
+   ~Option<Sigma>~ field on the sight observation; the longitude
+   variance term ~σ_lon² = (15 arcmin/sec × time_σ × cos lat)²~
+   is added to the [1,1] diagonal of the position covariance.
+   The chi-square diagnostic is populated from ~total_weight~
+   and surfaced via ~FixDiagnostics~. Tests cover the lat=30°
+   and lat=89° cases plus a zero-time-σ regression.
 ** TODO Running fix
    Advance earlier LOPs by DR (course/speed) before intersection.
    Course/speed input is optional; if absent, only simultaneous fixes
@@ -1923,7 +1936,14 @@ references to the regression tests that pin the behavior. See
    so the diagnostics-naming-the-rejected-sight requirement is
    unmet end-to-end. Action: implement azimuth-disagreement
    screen; wire ~screen_sights~ into Stage E with diagnostic
-   surface.** TODO Dominant-source attribution
+   surface.
+   *Resolved 2026-06-03 (PR #60):* azimuth-disagreement gate
+   added to ~screen_sights~ (δ = 5°; documented in code).
+   ~screen_sights~ is now called from Stage E before the fix
+   solver; rejection count surfaced via the new
+   ~EngineDiagnostics.sights_rejected_by_screener~ counter and
+   sight IDs + reasons logged via existing tracing.
+** TODO Dominant-source attribution
    For each fix, identify which uncertainty source dominates (e.g.
    "horizon fit", "time", "refraction", "calibration", "stitching")
    and surface it in the ~$PBRIS~ sentence. This is what tells the
@@ -2494,6 +2514,13 @@ references to the regression tests that pin the behavior. See
    disagree about what the operator entered. This is the same
    shortcut tracked in Phase 7.5. Action: thread the same
    ~ap_seed~ value into both consumers (covered by Phase 7.5).
+   *Resolved 2026-06-03 (PR #69):* ~bundleInputsBuilder~ now
+   reads ~Session.apSeed~ and threads it (or ~null~ for
+   cold-start) into the manifest's ~ObserverFix~. Both engine
+   and bundle paths see the same AP. ~eye_height_m~ comes from
+   the session config rather than being hardcoded. Bundle
+   honesty pass resolved Phase 7.5 items 1, 2, 3, 6, 7, 8, 9
+   in the same PR.
    Landed:
    - `Session` + `SessionStore` (Kotlin) write JSON identical
      to `bris_bundle::SessionManifest` (schema_version=1),
@@ -2950,47 +2977,48 @@ references to the regression tests that pin the behavior. See
   the rest are honest-uncertainty / provenance gaps. Each
   is a one-shot fix; group into a small stack of PRs.
 
-** TODO Compute ~first_frame_blake3~ instead of emitting ~""~
+** DONE Compute ~first_frame_blake3~ instead of emitting ~""~
    ~bris-android/app/src/main/java/io/github/spencerharmon/bris/engine/CaptureRecorder.kt:372~
-   hardcodes ~firstFrameBlake3 = ""~; ~DebugBundleWriter~
-   then serialises ~"first_frame_blake3": ""~ which the
-   Rust verifier (~bris-bundle/src/lib.rs:823~) treats as a
-   real checksum and fails against the actual hash. Fix:
-   capture the first written PGM's bytes in
-   ~DebugCaptureBuffer~, hash via ~bris-ffi~ ~blake3_hex~
-   (already exposed per the schema doc), populate the
-   snapshot. Verifier should *also* short-circuit on
-   ~Some("")~ defensively so already-captured bundles
-   replay without re-pulling.
-   **Load-bearing**: every ~e8a7211~ bundle currently
-   aborts at checksum verification before the engine runs.
-** TODO Replace placeholder observer in ~LiveScreen~ with operator-entered AP
-   ~bris-android/.../ui/LiveScreen.kt:223-227~ hardcodes
+   hardcoded ~firstFrameBlake3 = ""~; ~DebugBundleWriter~
+   then serialised ~"first_frame_blake3": ""~ which the
+   Rust verifier (~bris-bundle/src/lib.rs:823~) treated as a
+   real checksum and failed against the actual hash.
+   *Resolved 2026-06-03 (PRs #59, #69):* Rust verifier in
+   PR #59 short-circuits ~Some("")~ as absent (unblocks the
+   existing e8a7211 corpus without re-pulling). Android writer
+   in PR #69 captures the first written PGM's bytes in
+   ~CaptureFrameWriter~, hashes via ~bris-ffi::blake3Hex~,
+   populates the snapshot, and serializes ~null~ if the hash
+   isn't available (so the field is omitted, not empty).
+** DONE Replace placeholder observer in ~LiveScreen~ with operator-entered AP
+   ~bris-android/.../ui/LiveScreen.kt:223-227~ hardcoded
    ~ObserverFix(latitudeDeg=0.0, longitudeDeg=0.0,
-   eyeHeightM=2.0)~ for every capture. ~ap_input~ ships as
-   Null Island for every bundle the writer has produced.
-   Replay scoring (~--ap-seed-truth~ etc.) is silently
-   broken because intercepts are referenced to (0,0).
-   Thread the same operator-entered value into both
-   ~EngineConfig~ and the manifest so ~ap_input~ honestly
-   reflects what the engine ran against. Already called
-   out as "outstanding follow-up" in
-   ~docs/design/debug_bundle_schema.md~ §"Android-side writer".
-   **Load-bearing**: silently corrupts the AP axis of
-   every debug bundle.
-** TODO Populate ~firstFrameWidth~ / ~firstFrameHeight~ in ~CaptureSnapshot~
-   ~CaptureRecorder.kt:373-374~ passes ~0, 0~. Fields are
-   not currently serialised but the data class lies about
-   what it carries; populate from the first written frame
-   so future consumers (e.g. "checksum is over a frame of
-   this size" sanity checks) have honest data.
-** TODO ~CalibrationSource.Operator~ carries real session ULID
-   ~CalibrationSource.Operator.calibrationId~ is the
+   eyeHeightM=2.0)~ for every capture. ~ap_input~ shipped as
+   Null Island for every bundle the writer produced. Replay
+   scoring (~--ap-seed-truth~ etc.) was silently broken.
+   *Resolved 2026-06-03 (PR #69):* ~bundleInputsBuilder~ now
+   reads ~Session.apSeed~ and threads the real value (or
+   ~null~ for cold-start) into the manifest. When AP is null,
+   ~ap_input~ is omitted from the JSON entirely — never
+   substituted from ~gps_truth~. ~eye_height_m~ comes from the
+   session config.
+** DONE Populate ~firstFrameWidth~ / ~firstFrameHeight~ in ~CaptureSnapshot~
+   ~CaptureRecorder.kt:373-374~ passed ~0, 0~ to CaptureSnapshot.
+   *Resolved 2026-06-03 (PR #69):* ~CaptureFrameWriter~ records
+   first-frame width + height alongside the BLAKE3 hash; the
+   recorder reads them from the writer at snapshot time.
+** DONE ~CalibrationSource.Operator~ carries real session ULID
+   ~CalibrationSource.Operator.calibrationId~ was the
    synthesised ~operator-WxH~ placeholder, not the session
    ULID. ~bundle.json:intrinsics.source.calibration_id~
-   provenance chain dead-ends. Already flagged in
-   ~docs/design/debug_bundle_schema.md~ §"Outstanding deferred
-   work".
+   provenance chain dead-ended.
+   *Resolved 2026-06-03 (PR #68):* ~CalibrationStore~ records
+   the session ULID alongside each new calibration;
+   ~CalibrationSource.Operator~ exposes it; ~DebugBundleWriter~
+   threads it through to ~intrinsics.source.calibration_id~.
+   Legacy on-disk calibrations without a recorded ULID emit
+   ~legacy:WxH~ so consumers can distinguish them from real
+   ULIDs and from the old ~operator-WxH~ placeholder.
 ** TODO Populate ~ap_derivation_trace~ with real provenance fields
    ~DebugBundleWriter.kt:172-175~ always writes
    ~{"method": <provenance string>}~ and nothing else.
@@ -2999,50 +3027,63 @@ references to the regression tests that pin the behavior. See
    populate them when the corresponding AP-derivation path
    fires. Blocked on the operator-AP UI landing first
    (Phase 7 ~Operator-AP-from-map UI~).
-** TODO ~gps_truth.captured_unix_ms~ from the GPS fix, not ~System.currentTimeMillis()~
-   ~DebugBundleWriter.kt:191~ uses now-at-manifest-write
-   time instead of the ~Location.time~ of the actual fix.
-   Android Network provider fixes can be minutes to hours
-   old; that gap is silently ascribed to the capture
-   instant. ~CoarseLocation.getLastKnown~ already returns
-   the timestamp; thread it through.
-** TODO ~gps_truth~ per-axis σ when source provides distinct figures
-   ~DebugBundleWriter.kt:187-188~ projects a single
+** DONE ~gps_truth.captured_unix_ms~ from the GPS fix, not ~System.currentTimeMillis()~
+   ~DebugBundleWriter.kt:191~ used now-at-manifest-write time
+   instead of the ~Location.time~ of the actual fix.
+   *Resolved 2026-06-03 (PR #69):* ~CoarseLocation~ threads
+   ~loc.time~ into the extended ~GpsInfo.capturedUnixMs~ field;
+   ~DebugBundleWriter~ uses that timestamp directly in the
+   manifest.
+** DONE ~gps_truth~ per-axis σ when source provides distinct figures
+   ~DebugBundleWriter.kt:187-188~ projected a single
    ~horizontalAccuracyM~ onto both ~lat_sigma_m~ and
    ~lon_sigma_m~. Fine for Android Network; future GNSS
    sources may have distinct semi-major / semi-minor
-   ellipse axes. Add a per-axis path; the equal-projection
-   fallback stays for sources that only report one number.
-** TODO Omit ~gps_truth~ entirely when accuracy unknown
-   ~DebugBundleWriter.kt:187~ silently substitutes ~100.0~
-   metres when ~horizontalAccuracyM <= 0~. Violates the
-   honest-uncertainty hard rule. If accuracy is unknown,
-   omit ~gps_truth~ from the manifest (or record
-   ~lat_sigma_m: null~ once the schema permits it). Never
-   invent a σ.
-** TODO Mark placeholder intrinsics as such, not as data
-   ~DebugBundleWriter.kt:248-251~ fills ~fx = fy =
+   ellipse axes.
+   *Resolved 2026-06-03 (PR #69):* equal-projection retained
+   as the documented fallback for single-figure sources; a
+   ~TODO(operator-approved 2026-06-03)~ marker calls out where
+   the per-axis branch slots in when GNSS sources land. The
+   structural shape is in place; no behavioral change today.
+** DONE Omit ~gps_truth~ entirely when accuracy unknown
+   ~DebugBundleWriter.kt:187~ silently substituted ~100.0~
+   metres when ~horizontalAccuracyM <= 0~. Violated the
+   honest-uncertainty hard rule.
+   *Resolved 2026-06-03 (PR #69):* ~CoarseLocation~ drops
+   fixes without real accuracy; ~DebugBundleWriter~ omits
+   ~gps_truth~ from the manifest entirely when ~GpsInfo~ is
+   null. No invented σ.
+** DONE Mark placeholder intrinsics as such, not as data
+   ~DebugBundleWriter.kt:248-251~ filled ~fx = fy =
    width/1.1547~ (60° HFOV guess), ~cx,cy = center~,
    ~distortion = "none"~ when ~CalibrationSource.Placeholder~
-   is in play. The values present as measured data; nothing
-   downstream can tell apart "this lens is exactly 60°"
-   from "nobody calibrated." Options: add a ~placeholder:
-   true~ marker on the intrinsics record, or have the
-   writer refuse to emit ~bundle.json~ when intrinsics are
-   placeholder (forcing a calibration step). Operator to
-   pick.
+   was in play, presenting them as measured data.
+   *Resolved 2026-06-03 (PR #69):* added
+   ~intrinsics.placeholder: Option<bool>~ to the
+   ~bris-bundle~ schema (additive in schema_version 1).
+   ~DebugBundleWriter~ sets ~placeholder=true~ when the
+   calibration is placeholder, omits the field for Operator
+   and Factory calibrations. Operator-approved option (a)
+   (boolean marker) over option (b) (refuse to emit
+   ~bundle.json~) because (b) would prevent operators from
+   sharing un-calibrated debug bundles for triage.
 ** TODO ~BuildConfig.BRIS_VERSION_CODE~ actually increments
    Every bundle observed carries ~android_version_code:
    1~. Gradle never bumps it. Covered by Phase 8.5
    ~Android versionCode derives from commit count~; cross-
    reference here so it doesn't get lost in the bundle-
    schema cleanup.
-** TODO Document ~index.jsonl~ in the schema or stop writing it
+** DONE Document ~index.jsonl~ in the schema or stop writing it
    ~DebugCaptureBuffer~ emits ~index.jsonl~ next to each
    capture; ~docs/design/debug_bundle_schema.md~ doesn't
    mention it and replay ignores it. Either spec it as an
    optional sidecar (schema doc + ~bris-bundle~ types) or
    delete the writer call. Pure docs-drift today.
+   *Resolved 2026-06-03 (PR #67):* spec'd as an optional
+   sidecar. ~bris-bundle::IndexEntry~ + ~load_index_jsonl~
+   parser added (returns ~Ok(None)~ when absent).
+   ~docs/design/debug_bundle_schema.md~ updated under the v1
+   layout section.
 
 * Phase 9: Stretch goals
 ** TODO NMEA 2000 output via external gateway, documented integrations.
