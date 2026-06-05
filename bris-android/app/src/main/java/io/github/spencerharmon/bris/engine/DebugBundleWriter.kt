@@ -100,6 +100,27 @@ object DebugBundleWriter {
          * can locate the sibling `session.json` for overlay.
          */
         val sessionId: String? = null,
+        /**
+         * Rotation (CW degrees) the on-device capture path
+         * applied to the sensor-native pixels before they
+         * landed in `frames/*.pgm`. Used to rotate the
+         * intrinsics block so `bundle.json`'s
+         * `intrinsics.{width,height,fx,fy,cx,cy}` describe
+         * the bytes on disk, not the sensor-native
+         * calibration.
+         *
+         * The corresponding `capture.source_rotation_deg` is
+         * recorded as 0 because the PGM bytes are already
+         * gravity-up after the analyzer's rotation; replay
+         * does not need to rotate them again.
+         * `capture.pre_rotation_was_deg` records the actual
+         * applied rotation for audit.
+         *
+         * Defaults to 0 (no rotation applied), preserving
+         * backward compatibility with callers that don't yet
+         * thread the value.
+         */
+        val sourceRotationDeg: Int = 0,
     )
 
     /**
@@ -142,19 +163,20 @@ object DebugBundleWriter {
         val build = buildInfoJson()
 
         val capture = JSONObject()
-            // Frames written by `DebugCaptureBuffer` are
-            // gravity-up: `FrameAnalyzer` reads
-            // `ImageProxy.imageInfo.rotationDegrees` and rotates
-            // the Y plane (and intrinsics cx/cy/fx/fy) before
-            // pushing to the engine. `CameraSurface` sets the
-            // analyzer's `targetRotation` to the current display
-            // rotation at bind time and re-binds on
-            // `DisplayManager.DisplayListener.onDisplayChanged`,
-            // so portrait ↔ landscape rotation is honored.
-            // Declare 0 here and record the same value in
-            // `pre_rotation_was_deg` for audit.
+            // Frames in the bundle are gravity-up: the
+            // analyzer reads CameraX's
+            // `ImageProxy.imageInfo.rotationDegrees` and
+            // rotates both the Y plane and the intrinsics
+            // before writing the PGM. Declare 0 for
+            // `source_rotation_deg` (replay does NOT need
+            // to rotate the bytes again) and record the
+            // analyzer-applied rotation in
+            // `pre_rotation_was_deg` for audit. The
+            // intrinsics record built below is rotated by
+            // the same `sourceRotationDeg` value so it lines
+            // up with the bytes on disk.
             .put("source_rotation_deg", 0)
-            .put("pre_rotation_was_deg", 0)
+            .put("pre_rotation_was_deg", inputs.sourceRotationDeg)
             .put("frame_count", snapshot.frameCount)
             .put("started_unix_ms", snapshot.startedUnixMs)
             .put("ended_unix_ms", snapshot.endedUnixMs)
@@ -165,6 +187,7 @@ object DebugBundleWriter {
             inputs.lensId,
             inputs.captureWidth,
             inputs.captureHeight,
+            inputs.sourceRotationDeg,
         )
 
         val root = JSONObject()
@@ -246,6 +269,7 @@ object DebugBundleWriter {
         lensId: String,
         width: Int,
         height: Int,
+        sourceRotationDeg: Int,
     ): JSONObject {
         val intr = when (source) {
             is CalibrationSource.Operator -> source.intrinsics
@@ -272,14 +296,32 @@ object DebugBundleWriter {
         } else {
             JSONObject().put("model", "none")
         }
+        // Rotate the (fx, fy, cx, cy, width, height) tuple to
+        // line up with the analyzer-rotated PGM bytes. When
+        // there is no measured calibration, fall back to a
+        // synthetic placeholder over the post-rotation
+        // (width, height) so the principal point lands at
+        // the rotated image center.
+        val nativeW = intr?.width ?: width
+        val nativeH = intr?.height ?: height
+        val nativeFx = intr?.fx ?: (width.toDouble() / 1.1547)
+        val nativeFy = intr?.fy ?: (width.toDouble() / 1.1547)
+        val nativeCx = intr?.cx ?: (width / 2.0)
+        val nativeCy = intr?.cy ?: (height / 2.0)
+        val rot = rotateIntrinsicsForFrameRotation(
+            fx = nativeFx, fy = nativeFy,
+            cx = nativeCx, cy = nativeCy,
+            w = nativeW, h = nativeH,
+            rotationDeg = sourceRotationDeg,
+        )
         val rec = JSONObject()
             .put("source", sourceObj)
-            .put("width", intr?.width ?: width)
-            .put("height", intr?.height ?: height)
-            .put("fx", intr?.fx ?: (width.toDouble() / 1.1547))
-            .put("fy", intr?.fy ?: (width.toDouble() / 1.1547))
-            .put("cx", intr?.cx ?: (width / 2.0))
-            .put("cy", intr?.cy ?: (height / 2.0))
+            .put("width", rot.width)
+            .put("height", rot.height)
+            .put("fx", rot.fx)
+            .put("fy", rot.fy)
+            .put("cx", rot.cx)
+            .put("cy", rot.cy)
             .put("distortion", distortion)
         if (intr != null && intr.rmsPx.isFinite()) rec.put("rms_px", intr.rmsPx)
         // Tradeoff (operator-approved 2026-06-03): rather than
@@ -300,6 +342,11 @@ object DebugBundleWriter {
                 JSONObject()
                     .put("model", Build.MODEL ?: "")
                     .put("lens_id", lensId)
+                    // Profile key carries the calibrated
+                    // (sensor-native) dimensions, not the
+                    // post-rotation ones — the lookup table
+                    // is keyed by what the calibration
+                    // workflow measured.
                     .put("width", intr?.width ?: width)
                     .put("height", intr?.height ?: height),
             )
