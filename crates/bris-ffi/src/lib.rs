@@ -324,6 +324,21 @@ pub struct FfiEngineConfig {
     /// from session A never hydrate into session B's engine
     /// pool because the files are different.
     pub store_data_root: Option<String>,
+
+    /// Whether the streaming engine dispatches the
+    /// [`bris_vision::VerticalLineProvider`] in Stage C.
+    /// `None` (the FFI default) preserves the core Rust
+    /// default, which is currently `false` — the provider is
+    /// off because its gravity inference is wrong by 20–40°
+    /// for full-height lines on tilted cameras (the typical
+    /// hand-held capture geometry). See
+    /// [`bris_streaming::EngineConfig::enable_vertical_line_provider`]
+    /// and `docs/design/ml_gravity.md`.
+    ///
+    /// `Some(true)` opts back in (intended for operators with
+    /// a true plumb-string rig); `Some(false)` is explicit
+    /// off.
+    pub enable_vertical_line_provider: Option<bool>,
 }
 
 impl FfiEngineConfig {
@@ -385,6 +400,9 @@ impl FfiEngineConfig {
                 });
             }
             cfg.store.data_root = std::path::PathBuf::from(root);
+        }
+        if let Some(enable) = self.enable_vertical_line_provider {
+            cfg.enable_vertical_line_provider = enable;
         }
         Ok(cfg)
     }
@@ -1925,6 +1943,7 @@ mod kinematics_overlay_tests {
             cold_start_coarse_hemisphere: None,
             assumed_max_speed_kn: None,
             store_data_root: None,
+            enable_vertical_line_provider: None,
         }
     }
 

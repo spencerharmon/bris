@@ -22,6 +22,18 @@
 //! when Stage C first runs. The second-pass entry point
 //! [`merge_reflection_pair`] re-runs the fuser over the prior
 //! hypotheses plus the new one.
+//!
+//! ## Vertical-line provider: disabled by default
+//!
+//! The [`bris_vision::VerticalLineProvider`] is **off** in
+//! Stage C unless
+//! [`crate::EngineConfig::enable_vertical_line_provider`] is
+//! flipped to `true`. The provider's gravity inference
+//! (`gravity ≈ r_bot - r_top`) is only valid for short lines
+//! centered on the principal point; full-height lines on
+//! tilted cameras (typical capture geometry) yield
+//! confidently-wrong horizons off by 20–40°. See
+//! `docs/design/ml_gravity.md` for the planned replacement.
 
 use crate::config::EngineConfig;
 use crate::pipeline::horizon_providers::{
@@ -117,6 +129,12 @@ pub(crate) struct VanishingPointDispatch {
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct VerticalLineDispatch {
     pub stats: bris_vision::VerticalLineStats,
+    /// Whether Stage C invoked the provider on this frame.
+    /// `false` when [`crate::EngineConfig::enable_vertical_line_provider`]
+    /// is `false` (the default — see that field's docs and
+    /// `docs/design/ml_gravity.md` for the gravity-math bug
+    /// motivating the disable).
+    pub invoked: bool,
     pub hypothesized: bool,
     pub used: bool,
 }
@@ -246,7 +264,14 @@ pub(crate) fn detect(
     }
 
     // Vertical-line provider: independent of body candidates.
-    {
+    // Disabled by default; see EngineConfig::enable_vertical_line_provider
+    // and docs/design/ml_gravity.md for the gravity-math bug
+    // (`gravity ≈ r_bot - r_top` is only valid for short,
+    // principal-point-centered lines; the streaming engine sees
+    // full-height lines on tilted cameras and the inferred
+    // gravity is wrong by 20–40°).
+    if cfg.enable_vertical_line_provider {
+        stats.vertical_line.invoked = true;
         let provider = bris_vision::VerticalLineProvider {
             config: cfg.vertical_line_provider_config,
         };
@@ -259,16 +284,16 @@ pub(crate) fn detect(
             stats.vertical_line.hypothesized = true;
             hypotheses.push(hyp);
         }
-    }
-    if best_below(&hypotheses, early_term) {
-        return finish(
-            &hypotheses,
-            &intrinsics,
-            frame.width(),
-            cfg,
-            analyzed_size,
-            stats,
-        );
+        if best_below(&hypotheses, early_term) {
+            return finish(
+                &hypotheses,
+                &intrinsics,
+                frame.width(),
+                cfg,
+                analyzed_size,
+                stats,
+            );
+        }
     }
 
     // Vanishing-point provider (most expensive).
@@ -635,6 +660,140 @@ mod tests {
         assert!(
             cfg.segmentation_model_path.is_none(),
             "default config should not enable segmentation"
+        );
+    }
+
+    /// Build a textureless dark frame with a single bright
+    /// near-vertical stripe. Gradient / sky-region / night /
+    /// night-textured / vanishing-point providers all decline
+    /// on this geometry; only the vertical-line provider has
+    /// historically returned a hypothesis. Used to prove that
+    /// disabling the flag actually removes that silent-winner
+    /// path.
+    fn vertical_stripe_frame() -> Frame {
+        let w = 128_u32;
+        let h = 96_u32;
+        let mut pixels = vec![0_u16; (w * h) as usize];
+        let cx = (w / 2) as i32;
+        for y in 0..h {
+            for dx in -1_i32..=1_i32 {
+                let x = cx + dx;
+                if x >= 0 && (x as u32) < w {
+                    pixels[(y as usize) * (w as usize) + (x as usize)] = 60_000;
+                }
+            }
+        }
+        Frame::new(
+            w,
+            h,
+            pixels,
+            Tt::from_julian_date(JD_J2000),
+            1000,
+            Intrinsics::placeholder(w, h),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn vertical_line_provider_off_by_default() {
+        let cfg = EngineConfig::new(Observer::default_dev());
+        assert!(
+            !cfg.enable_vertical_line_provider,
+            "default EngineConfig must leave the vertical-line provider disabled"
+        );
+        let frame = vertical_stripe_frame();
+        let (_outcome, _, stats) = detect(
+            &FramePyramid::new(frame.clone()),
+            Condition::Night,
+            &cfg,
+            &[],
+            None,
+            frame.capture_tt,
+        );
+        assert!(
+            !stats.vertical_line.invoked,
+            "Stage C must not invoke VerticalLineProvider when the flag is false"
+        );
+        assert!(
+            !stats.vertical_line.hypothesized,
+            "vertical_line.hypothesized must be false when provider not invoked"
+        );
+        assert!(
+            !stats.vertical_line.used,
+            "vertical_line.used must be false when provider not invoked"
+        );
+        assert_eq!(
+            stats.vertical_line.stats.hypothesized, 0,
+            "per-call hypothesized counter must stay zero when provider not invoked"
+        );
+    }
+
+    #[test]
+    fn vertical_line_provider_on_when_flag_set() {
+        let mut cfg = EngineConfig::new(Observer::default_dev());
+        cfg.enable_vertical_line_provider = true;
+        let frame = vertical_stripe_frame();
+        let (_outcome, _, stats) = detect(
+            &FramePyramid::new(frame.clone()),
+            Condition::Night,
+            &cfg,
+            &[],
+            None,
+            frame.capture_tt,
+        );
+        assert!(
+            stats.vertical_line.invoked,
+            "Stage C must invoke VerticalLineProvider when the flag is true"
+        );
+    }
+
+    /// Load-bearing test: with only a vertical stripe in the
+    /// scene, the disabled engine returns *no* horizon (rather
+    /// than the historically-wrong gravity-from-line one).
+    /// Flipping the flag back on restores the prior behavior:
+    /// the vertical-line provider produces a hypothesis.
+    #[test]
+    fn vertical_stripe_only_yields_no_horizon_when_disabled() {
+        let cfg_off = EngineConfig::new(Observer::default_dev());
+        let frame = vertical_stripe_frame();
+        let (outcome_off, _, _) = detect(
+            &FramePyramid::new(frame.clone()),
+            Condition::Night,
+            &cfg_off,
+            &[],
+            None,
+            frame.capture_tt,
+        );
+        assert!(
+            matches!(outcome_off, HorizonStageOutcome::None),
+            "with only a vertical stripe in frame, disabled Stage C must \
+             emit no horizon (got {outcome_off:?})"
+        );
+
+        let mut cfg_on = EngineConfig::new(Observer::default_dev());
+        cfg_on.enable_vertical_line_provider = true;
+        let (outcome_on, _, stats_on) = detect(
+            &FramePyramid::new(frame.clone()),
+            Condition::Night,
+            &cfg_on,
+            &[],
+            None,
+            frame.capture_tt,
+        );
+        assert!(
+            stats_on.vertical_line.hypothesized,
+            "vertical-stripe frame must yield a hypothesis when the provider is enabled"
+        );
+        assert!(
+            matches!(
+                outcome_on,
+                HorizonStageOutcome::Detected {
+                    detector: HorizonDetector::VerticalLine,
+                    ..
+                }
+            ),
+            "enabled Stage C on a vertical-stripe-only frame must select \
+             the VerticalLine detector (got {outcome_on:?})"
         );
     }
 }
