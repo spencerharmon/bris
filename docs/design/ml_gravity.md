@@ -1,6 +1,6 @@
 # ML-based gravity estimation for horizon detection
 
-Status: **handoff-ready for one-pass implementation.**
+Status: **live as of this commit.**
 Kickoff confirmations recorded 2026-06-05 (see
 §"Operator decisions at kickoff"). All blockers cleared;
 the implementer proceeds without re-asking on any item
