@@ -1,12 +1,10 @@
 # ML-based gravity estimation for horizon detection
 
 Status: **handoff-ready for one-pass implementation.**
-Sequencing updated 2026-06-05 per operator: Layer 1
-(deterministic σ) skipped; first deliverable is Layer 2
-(heteroscedastic training). See [[file:../plan.org][plan.org]]
-Phase 7.7 for the phase breakdown. Two operator blockers
-must be cleared before kickoff (see §"Open questions");
-all other choices have decided defaults.
+Kickoff confirmations recorded 2026-06-05 (see
+§"Operator decisions at kickoff"). All blockers cleared;
+the implementer proceeds without re-asking on any item
+documented below.
 
 Related docs:
 - `horizon_autodetect.md` — Stage C provider family + fusion design.
@@ -867,7 +865,41 @@ Two concrete blockers require operator input before the
 implementer starts. Everything else has a default decided
 below.
 
-### Concrete blockers (operator must confirm before kickoff)
+### Operator decisions at kickoff (2026-06-05)
+
+Both blockers are cleared. The implementer proceeds without
+re-asking.
+
+- **B1. GeoCalib weights license**: operator confirmed BSD-3-
+  compatible. Vendor without double-checking. The training-
+  results doc records the license confirmation note.
+- **B2. Vendoring strategy**: **fetch-at-build with checksum**.
+  No Git LFS. The implementer adds a fetch script (or
+  `build.rs` hook, or Makefile target — pick the most
+  idiomatic for the workspace and document the choice in the
+  PR) that downloads the ONNX from a stable URL into
+  `data/ml-gravity/` and verifies the BLAKE3 checksum
+  recorded in `data/ml-gravity/SHA256SUMS`. The release URL
+  is whatever the implementer uploads to as part of Phase
+  7.7a; create a new GitHub release tagged `ml-gravity-v1`
+  on the bris repo, attach the ONNX, and reference its
+  download URL in the fetch script.
+- **GPU access**: confirmed at kickoff. NVIDIA RTX 3080,
+  driver 595.71.05, CUDA 13.2. Host has
+  `nvidia-container-toolkit` 1.19.1 installed and verified
+  with `podman run --device nvidia.com/gpu=all`. The
+  implementer's subprocess should be able to use the GPU
+  the same way; if it can't, that's a real blocker and the
+  session stops there.
+- **Containerization**: **podman, not docker.** The host has
+  podman 5.8.2; no docker is installed. The doc says
+  "Dockerfile" — the file format is identical; just invoke
+  `podman build` / `podman run` everywhere. The fetched
+  base image must support GPU passthrough via the
+  `nvidia.com/gpu=all` device spec (verified at kickoff
+  using `docker.io/nvidia/cuda:13.0.0-base-ubuntu22.04`).
+
+### Concrete blockers (historical — cleared before kickoff)
 
 **B1. GeoCalib weights license.** The GeoCalib *code* is
 BSD-3 (compatible with the workspace's GPL-3.0-or-later).
@@ -882,6 +914,7 @@ in a GPL-3.0-or-later repo + included in a binary released
 under the same. If not, fall back to PerspectiveFields
 (Apache 2.0 code; check weights similarly) or train from
 scratch on permissively-licensed data.
+*Resolved 2026-06-05: operator confirmed.*
 
 **B2. Git LFS adoption.** The model file is ~30 MB. Vendoring
 in the repo requires Git LFS, which affects every clone, CI
@@ -895,6 +928,7 @@ Operator must pick one of:
   - fetch-at-build (recommended if LFS is rejected);
   - separate release artifact (only if both above are
     rejected).
+*Resolved 2026-06-05: fetch-at-build with checksum.*
 
 ### Decided defaults (no operator action needed)
 
