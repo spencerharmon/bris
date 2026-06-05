@@ -811,6 +811,11 @@ private fun defaultEngineConfig(
         }
     },
     storeDataRoot = storeDataRoot,
+    // null = inherit the Rust default, which is currently
+    // `false` because the VerticalLineProvider's gravity
+    // inference is wrong by 20–40° for full-height lines on
+    // tilted cameras. See docs/design/ml_gravity.md.
+    enableVerticalLineProvider = null,
 )
 
 /**
