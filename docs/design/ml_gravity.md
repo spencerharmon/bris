@@ -1,10 +1,12 @@
 # ML-based gravity estimation for horizon detection
 
-Status: **design draft** (operator review pending). Sequencing
-updated 2026-06-05 per operator handoff: Layer 1 (deterministic
-σ) skipped; first deliverable is Layer 2 (heteroscedastic
-training). See [[file:../plan.org][plan.org]] Phase 7.7 for
-the phase breakdown.
+Status: **handoff-ready for one-pass implementation.**
+Sequencing updated 2026-06-05 per operator: Layer 1
+(deterministic σ) skipped; first deliverable is Layer 2
+(heteroscedastic training). See [[file:../plan.org][plan.org]]
+Phase 7.7 for the phase breakdown. Two operator blockers
+must be cleared before kickoff (see §"Open questions");
+all other choices have decided defaults.
 
 Related docs:
 - `horizon_autodetect.md` — Stage C provider family + fusion design.
@@ -67,8 +69,9 @@ metadata).
    hypothesis.
 3. **Report honest σ.** Heteroscedastic — the model knows when
    it's uncertain. Per AGENTS.md rule zero, this is non-
-   negotiable: a single calibration constant is acceptable as
-   a spike but not as ship-state.
+   negotiable. The first-and-only model shipped is
+   heteroscedastic; Layer 1 deterministic-σ is explicitly
+   skipped.
 4. **Run on Pi Zero 2W.** Model size + inference latency
    budgeted against the existing per-frame envelope.
 5. **No replacement of other providers.** Strict addition.
@@ -85,11 +88,12 @@ metadata).
   is more useful because it's also consumed by classification
   (`pre_classification_masking.md`), AP estimation, and
   rotation-honesty validation.
-- Marine-specific model training in this PR. The initial spike
-  uses a pretrained model that may underperform on marine
-  scenes; that limitation is documented and addressed via the
+- Marine-specific model training in this PR. The Phase 7.7a
+  training uses GeoCalib's existing OpenPano + MegaDepth
+  data only; that model may underperform on marine scenes;
+  the limitation is documented and addressed via the
   deferred `bris-MLGravity-trainer` companion app + custom
-  dataset work.
+  dataset work (Phase 7.7d + 7.7e).
 - Body identification. The model says where down is; it does
   not pick the moon over a streetlight.
 - Body-conditioned gravity refinement (e.g. "you have a body
@@ -239,7 +243,7 @@ GeoCalib outputs both intrinsics and roll/pitch. Two questions:
      estimates them internally. We use only its roll/pitch
      output. The intrinsics output is ignored.
 2. **Do we use the model's intrinsics output for anything?**
-   - **Not in the spike.** Optional future enhancement: emit
+   - **Not in scope.** Optional future enhancement: emit
      a `BundleWarning` if the model's estimated intrinsics
      disagree with the bundle's recorded intrinsics by more
      than k×. Additional rotation-honesty signal. Out of
@@ -265,7 +269,7 @@ The honest expectation:
   uncertainty rather than confident garbage.
 
 The path from "probably works" to "validated for marine":
-1. Spike ships pretrained model. Ship as-is.
+1. Phase 7.7a ships the pretrained-and-retrained-head model.
 2. Operator captures marine corpus with the deferred
    `bris-MLGravity-trainer` app (records frames + IMU gravity).
 3. Marine fine-tune. Re-validate σ calibration on marine
@@ -290,7 +294,7 @@ publicly available, ONNX-exportable.
 | **UprightNet** (ICCV 2019, Cornell/Adobe) | RGB | gravity in image frame | ~10 MB | MIT | trained on InteriorNet, indoor only |
 | HLW-CNN family | RGB | horizon line directly | varies | varies | trained on HLW (outdoor, minimal marine) |
 
-**Pick: GeoCalib for the spike.**
+**Pick: GeoCalib.**
 
 Reasons:
 - Directly outputs the quantity we need (roll/pitch, trivially
@@ -324,35 +328,26 @@ operations. If GeoCalib uses any, the workaround is one of:
    to fold constants and eliminate unsupported control flow.
 3. **Switch to PerspectiveFields** as a fallback model.
 
-This needs to be the **first thing** verified in the spike
-(separate exploration commit before the implementation work
-begins). If GeoCalib's ops are tract-incompatible AND
-PerspectiveFields is too, the spike is blocked and we revert
-to the design-level question of switching ML runtimes (ort vs
-onnxruntime vs torch via bindings).
+This needs to be the **first thing** verified in Phase 7.7a
+(separate exploration commit before training begins). If
+GeoCalib's ops are tract-incompatible AND PerspectiveFields
+is too, Phase 7.7a is blocked and we revert to the design-
+level question of switching ML runtimes (ort vs onnxruntime
+vs torch via bindings).
 
 ## Can we retrain GeoCalib to output σ using existing datasets?
 
 **Yes**, and the answer is more nuanced than "wait for marine
 data." Three layers:
 
-### Layer 1: deterministic σ (the spike)
+### Layer 1: deterministic σ (NOT SHIPPING — historical context)
 
-The pretrained GeoCalib outputs deterministic predictions. We
-compute σ by running it on a held-out validation set with
-known gravity, measuring residual variance:
-`σ_global² = mean((g_pred − g_true)²)`. Single fixed σ for all
-predictions.
-
-- **Dataset needed: zero new collection.** GeoCalib's own
-  validation set (held-out OpenPano + MegaDepth subset) works.
-- **Honesty cost: high.** Same σ for every scene, regardless
-  of how hard the scene is. AGENTS.md rule zero violation
-  unless we explicitly mark it as spike-grade in code +
-  diagnostics. **Spike marker:** the config field is named
-  `sigma_global_rad_spike_only` so the lie is visible at
-  every call site.
-- **Use: spike only.** Ships the wiring; not ship-state.
+**Skipped per operator handoff 2026-06-05.** Documented here
+only to explain what was rejected and why. The pretrained
+GeoCalib outputs deterministic predictions; one could compute
+a σ_global by running it on a held-out validation set and
+reporting that single value for every prediction. This is
+rejected because:
 
 ### Layer 2: heteroscedastic σ (the production fix)
 
@@ -394,28 +389,24 @@ combined distribution. Recalibrate σ.
   marine + non-marine.
 - **Use: ship-state for the full production pipeline.**
 
-### What we ship in this design's spike
+### What we ship
 
-**Operator-chosen sequencing (2026-06-05): skip Layer 1.** The
-Layer-1 deterministic-σ "global constant" is no longer
-planned as a shipping step. The first deliverable is the
-Layer-2 heteroscedastic-σ trained model. The provider PR
-(below) consumes that model directly.
-
-Rationale: a Layer-1 spike would have shipped wiring with a
-placeholder σ that violates AGENTS.md rule zero in an
-uncomfortably visible way (single σ for every scene is
-honest only as a calibration constant, never as a per-
-prediction value). Training Layer 2 first is the same total
-work — the head retrain is GPU-hours not days — and ships
-an honest σ from day one.
+Layer 2 (heteroscedastic σ) is the first and only model
+shipped. The provider's loader rejects any model that
+doesn't have the 4-scalar `(roll, pitch, σ_roll, σ_pitch)`
+output shape. There is no deterministic-σ fallback path.
 
 The σ output field is `Sigma` in the provider, computed from
-the model's per-prediction `σ_pred` output. The provider
-detects which model variant is loaded (deterministic vs
-heteroscedastic) by inspecting output tensor shape; a
-deterministic model fails the load-time convention check
-and the provider refuses to initialize.
+the model's per-prediction `σ_pred` output via the Jacobian
+in §"σ propagation through the lens model."
+
+Rationale for skipping Layer 1: a Layer-1 fallback would have
+shipped wiring with a placeholder σ that violates AGENTS.md
+rule zero in an uncomfortably visible way (single σ for every
+scene is honest only as a calibration constant, never as a
+per-prediction value). Training Layer 2 directly is the same
+total work — the head retrain is GPU-hours not days — and
+ships an honest σ from day one.
 
 ## σ propagation through the lens model (full math)
 
@@ -443,7 +434,7 @@ Combined variance (independent components):
      = [rx²·σ_gx² + ry²·σ_gy² + rz²·σ_gz²] / (1 - (r·g)²)
 ```
 
-For the spike (Layer 1) where σ_gx = σ_gy = σ_gz = σ_g,
+For the isotropic case where σ_gx = σ_gy = σ_gz = σ_g,
 this simplifies (using rx²+ry²+rz² = 1):
 `σ_α² = σ_g² / (1 - (r·g)²) = σ_g² / cos²(α)`.
 
@@ -580,7 +571,7 @@ provider blocks Stage C dispatch for the inference duration.
 
 Two design choices:
 
-1. **Block in-line** (chosen for the spike): inference runs
+1. **Block in-line** (chosen for Phase 7.7b): inference runs
    synchronously in Stage C. Per-frame budget is the per-
    frame time + ML inference time. Frame-skip / cache
    mechanism keeps total below budget.
@@ -872,60 +863,81 @@ controlled poses, optimized for training-data efficiency
 
 ## Open questions
 
-These need operator sign-off before code lands.
+Two concrete blockers require operator input before the
+implementer starts. Everything else has a default decided
+below.
 
-1. **Vendor the GeoCalib ONNX (~30 MB) in the repo via Git
-   LFS, or fetch at build time?** Vendoring keeps reproducible
-   builds and embedded targets simple; fetching keeps the
-   repo small. Precedent: the segmentation model lives at
-   (path to confirm). Recommend **vendor via LFS** for
-   reproducibility, with a fetch-at-build escape hatch
-   documented.
-2. **`ml-gravity` cargo feature default: on or off?** On =
-   everyone gets the model in their build (~30 MB binary
-   bloat). Off = operator must opt in, smaller default
-   binary. **Recommend off for the spike, revisit after
-   Layer 2 ships.**
-3. **Where in `plan.org` does this work live?** Recommend
-   **new Phase 7.7 "Gravity provider stack"** alongside the
-   pre-classification masking work. Sister entries:
-   `Pre-classification masking & pipeline reordering` and
-   `ML gravity provider (3-PR spike + Layer 2/3 follow-ups)`.
-4. **Global σ_global value for Layer 1 spike.** Honest
-   answer is "measure it on GeoCalib's validation set" but
-   the operator may want a conservative default until the
-   calibration is run. **Recommend 0.05 rad (~3°) as a
-   placeholder; calibration script in Spike PR 1 produces
-   the real value and replaces the default.**
-5. **Per-frame cache lifetime.** N=10 is the obvious default.
-   The right number depends on Pi Zero 2W timing
-   measurements that don't exist yet. **Operator confirms
-   default; measurement-driven retune in a follow-up.**
-6. **Drift rate α for cached gravity.** 1°/sec for hand-held;
-   higher for boats. **Operator confirms default; per-
-   profile override via `Session.profile` is the natural
-   place for the boat-specific value.**
-7. **σ_imu default.** 0.5° is a placeholder for Android
-   accelerometer typical; the real value comes from a
-   per-device profile when one exists. **Operator confirms
-   default.**
-8. **Agreement threshold k.** Default 3 (3-σ test). **Operator
-   confirms default.**
-9. **Layer 2 retrain compute.** Operator's local GPU vs
-   cloud? Reproducibility (Dockerfile + exact dataset
-   checksums) regardless. **Operator decides; affects
-   workflow not architecture.**
-10. **License / IP review for GeoCalib weights.** BSD-3 on
-    the code; the weights are presumably the same but worth
-    confirming the redistribution terms before vendoring.
-    **Operator confirms before Spike PR 1 lands.**
-11. **Failed convention self-test behavior.** If the model
-    fails the load-time convention test (e.g. y-axis sign
-    flip after re-export), should the provider refuse to
-    initialize, or initialize with an inverted-y flag set
-    automatically? **Recommend refuse to initialize** —
-    surfaces the bug rather than papering over it. Operator
-    confirms.
+### Concrete blockers (operator must confirm before kickoff)
+
+**B1. GeoCalib weights license.** The GeoCalib *code* is
+BSD-3 (compatible with the workspace's GPL-3.0-or-later).
+The *weights* may be licensed differently (some ML projects
+ship weights under CC-NC or "research only" while keeping
+the training code permissive). The repo's `cargo deny check`
+does not catch this; weights aren't a cargo dependency.
+The operator must personally check
+`https://github.com/cvg/GeoCalib`'s LICENSE + the model
+release notes and confirm the weights are redistributable
+in a GPL-3.0-or-later repo + included in a binary released
+under the same. If not, fall back to PerspectiveFields
+(Apache 2.0 code; check weights similarly) or train from
+scratch on permissively-licensed data.
+
+**B2. Git LFS adoption.** The model file is ~30 MB. Vendoring
+in the repo requires Git LFS, which affects every clone, CI
+run, and contributor workflow. The alternatives are
+(a) fetch-at-build with checksum (no LFS; adds network
+requirement at build time), or (b) split the model into a
+separate release artifact downloaded on first use
+(complicates embedded deployment).
+Operator must pick one of:
+  - LFS adoption (recommended for reproducibility);
+  - fetch-at-build (recommended if LFS is rejected);
+  - separate release artifact (only if both above are
+    rejected).
+
+### Decided defaults (no operator action needed)
+
+If the operator does not actively reject any of these before
+kickoff, the implementer treats them as approved per AGENTS.md
+§"Stopping is also a shortcut" — these are tradeoffs, not
+user-visible-contract questions.
+
+- **Cargo feature default**: `ml-gravity` is OFF by default.
+  Operator opts in. Revisit after Phase 7.7b ships and we
+  measure the binary-size impact.
+- **σ_imu default**: `0.5°` (`8.7e-3` rad) as a placeholder
+  for Android accelerometer typical noise. Replaced by
+  per-device profile when one exists. Implementer adds a
+  `TODO(operator-approved 2026-06-05):` comment in code
+  citing this default.
+- **Per-frame cache lifetime N**: `10` (≈1 Hz at 10 fps).
+  Retune on Pi Zero 2W timing measurements in a follow-up.
+- **Drift rate α for cached gravity**: `1°/sec` for hand-held.
+  Boat-mounted profiles override via `Session.profile` once
+  that path exists.
+- **Agreement threshold k**: `3` (3-σ test for IMU×ML
+  agreement). Standard outlier-rejection convention.
+- **Failed convention self-test behavior**: provider
+  refuses to initialize and reports `ml_gravity_load_failed
+  = true` with reason `"convention test failed"`. No
+  auto-flip-and-continue.
+- **Layer 2 retrain compute**: operator's choice; doesn't
+  affect the design. Implementer documents whichever path
+  is used (Dockerfile + dataset checksums regardless).
+- **plan.org placement**: Phase 7.7 (already added). Five
+  sub-phases 7.7a–e.
+- **`σ_global` (Layer 1 deterministic-σ placeholder)**: not
+  applicable. Layer 1 is skipped per operator handoff;
+  there is no global-σ fallback in the shipped provider.
+  The first model loaded must be heteroscedastic; the
+  loader's convention self-test rejects a 2-scalar output.
+- **Segmentation-model bundling precedent**: the existing
+  segmentation model is fetched / packaged via the
+  segmentation cargo feature. Implementer mirrors that
+  pattern for `ml-gravity`. If the segmentation precedent
+  is itself unclear, implementer documents the chosen
+  pattern explicitly in the PR and applies it to both.
 
 ## What this doc does not change
 
@@ -941,9 +953,183 @@ These need operator sign-off before code lands.
 - No new telemetry. All inference is local; all training
   data collection is operator-initiated.
 
+## Implementer instructions (one-pass session)
+
+This section governs the implementer agent. Read it before
+touching anything.
+
+### Scope
+
+**Implement Phases 7.7a + 7.7b in one pass.** Phase 7.7a
+produces the trained ONNX file + training-results doc + the
+reproducible-training scripts. Phase 7.7b consumes that ONNX,
+adds the `MlGravityProvider`, wires it into Stage C, and
+validates on the bedroom-moon corpus. Both ship together as
+a single coherent change.
+
+Phases 7.7c (IMU coexistence), 7.7d (marine fine-tune), and
+7.7e (trainer APK) are out of scope. They have explicit
+upstream blockers and ship separately.
+
+### Forbidden shortcuts (per AGENTS.md rule zero)
+
+The one-pass implementer must NOT:
+
+- Ship Layer 1 (deterministic-σ global constant) as a
+  fallback or option. The operator handoff explicitly skips
+  Layer 1. The first-and-only model the provider accepts is
+  heteroscedastic (4-scalar output).
+- Stub the heteroscedastic training with placeholder σ values
+  and ship the provider against the stub. The training
+  pipeline must actually run and produce a real ONNX file.
+- Vendor the model file without confirming Git LFS adoption
+  (blocker B2 above).
+- Vendor the model file without confirming the weights
+  license (blocker B1 above).
+- Ship a single σ for all predictions "because we don't
+  have time to retrain." If you don't have time, you have a
+  concrete blocker; report it and stop.
+- Skip the convention self-test in the loader. The self-test
+  is the load-bearing defense against sign-flip regressions.
+- Use `Sigma::ZERO` or `unwrap_or(Sigma::ZERO)` anywhere in
+  the provider. Non-finite or unreasonable model output is a
+  real failure; emit `None` and increment the
+  `ml_gravity_nan_outputs` counter.
+- Stub the corpus validation. The bedroom-moon corpus replay
+  is part of the deliverable and must actually run; the
+  outcome must be documented in `ml_gravity_results.md`.
+- Disable any existing horizon provider as a side effect.
+  Vertical-line is already disabled (PR #72); no others move.
+- Skip writing failing tests before implementation. AGENTS.md
+  test-first discipline applies to every test the spec
+  enumerates (preprocessing, σ Jacobian, convention self-
+  test, fixture-ONNX integration, corpus smoke).
+- Merge with `--admin` to bypass branch protection. Wait for
+  green CI.
+
+### Required behavior under each blocker
+
+If blocker B1 (weights license) is unclear after the operator
+has confirmed kickoff: STOP and ask. Do not vendor weights of
+uncertain license.
+
+If blocker B2 (LFS) is unclear after the operator has confirmed
+kickoff: assume LFS-vendoring is approved and proceed. If LFS
+setup itself fails (CI-side), fall back to fetch-at-build and
+document the change in the PR.
+
+If tract-onnx compatibility check fails (no supported ops for
+the full GeoCalib forward pass): try the documented mitigations
+(op replacement at export, onnxsim), and if all fail, STOP
+and ask the operator whether to pivot to PerspectiveFields or
+swap runtimes.
+
+For every other ambiguity, use the decided defaults in
+§"Open questions" above without stopping.
+
+### Deliverables checklist
+
+The PR is not done until all of the following exist on disk:
+
+1. `scripts/ml-gravity/Dockerfile` and pinned
+   `requirements.txt`. Image builds successfully.
+2. `scripts/ml-gravity/export_geocalib.py` + training
+   driver script. Reproduces the model end-to-end from a
+   clean container.
+3. `scripts/ml-gravity/tract_compat_check.py` (or
+   equivalent Rust test). Demonstrably runs against the
+   exported ONNX.
+4. `data/ml-gravity/geocalib-heteroscedastic-v1.onnx` (via
+   LFS if B2 = LFS) or build-time fetch infrastructure if
+   B2 = fetch.
+5. `data/ml-gravity/SHA256SUMS` containing the model file
+   checksum.
+6. `docs/design/ml_gravity_training.md` with dataset splits,
+   hyperparameters, validation residuals, calibration plot
+   image (vendored as PNG under the same dir), expected σ
+   floor on training distribution, license confirmation for
+   the weights (the answer to blocker B1).
+7. `crates/bris-vision/src/ml_gravity/` with `mod.rs`,
+   `preprocess.rs`, `sigma.rs` (Jacobian helper),
+   `convention.rs` (self-test), and a `model.rs` (ONNX
+   loader). All gated behind `#[cfg(feature = "ml-gravity")]`.
+8. `crates/bris-vision/tests/ml_gravity_*.rs` integration
+   tests covering preprocessing, σ Jacobian, convention
+   self-test, and a tiny-fixture ONNX inference round-trip.
+9. `crates/bris-streaming/src/pipeline/horizon.rs`
+   dispatching `MlGravityProvider` last in the chain, gated
+   by `EngineConfig::enable_ml_gravity` (default false) AND
+   the cargo feature.
+10. `crates/bris-vision/src/horizon.rs` with the new
+    `HorizonProvenance::MlGravity { model_id, sigma_rad }`
+    variant + serde support.
+11. `crates/bris-streaming/src/diagnostics.rs` with the
+    eight new ML-gravity counters (additive; existing
+    consumers compile unchanged).
+12. `crates/bris-ffi/src/lib.rs` with the additive
+    `enable_ml_gravity: Option<bool>` on `FfiEngineConfig`.
+13. `crates/bris-cli/src/main.rs` with the new
+    `--ml-gravity` replay flag.
+14. `docs/design/replay_report.md` updated for the new
+    provenance variant in the JSON schema.
+15. `docs/design/ml_gravity_results.md` (new) with the
+    bedroom-moon corpus replay outcome: per-capture sight
+    count, fix count, σ statistics, before/after.
+16. `docs/design/ml_gravity.md` (this file) status line
+    flipped to "Status: live as of <commit>."
+17. `plan.org` Phase 7.7a + 7.7b flipped from TODO to DONE
+    with audit annotations citing the merge commit.
+
+No deliverable may be stubbed, mocked, or marked "follow-up."
+
+### Concrete blockers the implementer may legitimately hit
+
+These are the *only* legitimate reasons for the one-pass
+session to stop short of all 17 deliverables:
+
+- Blocker B1 unresolved (weights license).
+- Blocker B2 unresolved AND LFS setup fails in CI AND
+  fetch-at-build also fails.
+- tract-onnx incompatibility with GeoCalib AND with
+  PerspectiveFields (would require a runtime swap, which
+  is out of scope for one PR).
+- Convention self-test discovers that GeoCalib's output
+  sign conventions cannot be reconciled with the engine's
+  `CameraRay` convention via the documented formulas
+  (would require a redesign of the conversion math).
+- Training run produces a calibration plot that's wildly
+  non-monotonic (model is fundamentally not learnable with
+  the chosen head + loss). Operator decides next move.
+- The corpus smoke test produces no sights AND no
+  documentable Stage E failure (provider produces no
+  hypothesis at all; deeper investigation needed).
+
+Anything else — tedium, ambiguity, design tradeoff,
+refactor temptation, perf optimization opportunity — is
+NOT a blocker per AGENTS.md §"Stopping is also a shortcut."
+Note tradeoffs in the PR description, continue.
+
 ## Validation criteria
 
-The spike (Spike PRs 1-3) is "done" when:
+Phase 7.7a (training) is "done" when:
+
+- The ONNX file at
+  `data/ml-gravity/geocalib-heteroscedastic-v1.onnx` loads in
+  tract-onnx and produces finite outputs on a fixture
+  tensor.
+- Convention self-test passes: a known-orientation panorama
+  fixture produces a `g_cam` matching the design doc §
+  "Coordinate conventions" sign convention.
+- Per-prediction calibration plot in
+  `docs/design/ml_gravity_training.md` is monotonic and
+  close to the y=x line on the held-out validation set.
+- Training-results doc lists dataset splits, hyperparameters,
+  validation residuals, and the expected σ floor on the
+  training distribution.
+- The training environment is reproducible from
+  `scripts/ml-gravity/Dockerfile`.
+
+Phase 7.7b (provider) is "done" when:
 
 - ML gravity provider produces a hypothesis on every frame
   of the bedroom-moon corpus (currently zero providers do
@@ -952,8 +1138,8 @@ The spike (Spike PRs 1-3) is "done" when:
   visible scene (verifiable via corpus explorer renders —
   the red horizon line should land at a plausible position
   given how the camera was held).
-- The σ is reported and honestly large (Layer 1: matches
-  the global constant; Layer 2: per-frame heteroscedastic).
+- The σ is reported and honestly large (per-prediction
+  heteroscedastic).
 - Replay produces ≥ 1 sight from at least one bedroom-moon
   capture, OR honestly fails Stage E with `Apparent` /
   `BelowHorizon` / `Stitch` for documentable geometric
@@ -962,16 +1148,16 @@ The spike (Spike PRs 1-3) is "done" when:
 - The corpus explorer shows model-derived horizons with
   `HorizonProvenance::MlGravity` in the tooltip/badge.
 
-Layer 2 (heteroscedastic σ) is "done" when:
+Phase 7.7c (IMU coexistence) is "done" when:
 
-- Predicted σ correlates with actual residual on validation
-  set (per-prediction calibration plot is monotonic).
-- σ on the bedroom-moon corpus is honestly large (the model
-  knows it's out of distribution).
-- The `ml_gravity_ood_warning` counter fires on bedroom-
-  moon frames at >50% rate (model knows OOD when it sees it).
+- The `ml_gravity_corroborated` and
+  `ml_gravity_imu_disagreement` counters populate correctly
+  on a corpus with per-frame IMU gravity.
+- All four IMU×ML present/absent combinations are tested.
+- `docs/design/ml_gravity.md` §"Coexistence with IMU" is
+  flipped from "design" to "live" status.
 
-Layer 3 (marine) is "done" when:
+Phase 7.7d (marine) is "done" when:
 
 - σ on marine validation corpus is calibrated to actual
   residual.
