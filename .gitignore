@@ -75,3 +75,4 @@ crates/bris-vision/tests/regression/night_test_highres/Screenshot*.png
 
 # Local exports pulled off device via adb; not for the repo.
 bris-exports/
+__pycache__/
