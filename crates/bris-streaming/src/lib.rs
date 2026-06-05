@@ -65,7 +65,10 @@ mod pipeline;
 mod store;
 
 pub use config::{ColdStartEngineConfig, EngineConfig, PlateSolverInit};
-pub use diagnostics::{EngineDiagnostics, PipelineStageStats};
+pub use diagnostics::{
+    BodyCentroidSnapshot, EngineDiagnostics, HorizonHypothesisSnapshot, PipelineStageStats,
+    StageEOutcomeSnapshot,
+};
 pub use engine::PoolSight;
 pub use engine::{FixReceiver, PushError, StreamingEngine};
 pub use fix::{DominantSource, FixProvenance, PublishedFix};

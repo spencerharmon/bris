@@ -214,6 +214,11 @@ pub(crate) struct StageEOutcome {
     /// run. Counted only when Stage E reached `try_publish`
     /// (i.e. `publish_attempted == true`); otherwise zero.
     pub sights_rejected_by_screener: u64,
+    /// Per-candidate reduction outcomes this run, one entry
+    /// per (body, horizon) pair Stage E attempted to reduce.
+    /// Diagnostic-only; the engine surfaces this verbatim in
+    /// `EngineDiagnostics::last_stage_e_outcomes`.
+    pub attempts: Vec<crate::diagnostics::StageEOutcomeSnapshot>,
 }
 
 /// Identifier for the body that produced a sight.
@@ -455,19 +460,30 @@ pub(crate) fn run(
             continue;
         }
         match reduce_to_sight(&cand, storage, cfg) {
-            Ok(sights) => {
+            Ok(reduced) => {
                 let is_cross = !is_same_frame(&cand);
-                for sight in sights {
-                    if window.try_insert(sight, cfg.sight_window_capacity) {
+                for r in reduced {
+                    out.attempts
+                        .push(crate::diagnostics::StageEOutcomeSnapshot::Ok {
+                            altitude_rad: r.observed_altitude_rad,
+                            sigma_rad: r.sight.altitude_sigma_rad,
+                        });
+                    if window.try_insert(r.sight, cfg.sight_window_capacity) {
                         inserted += 1;
                         if is_cross {
                             out.cross_frame_sights_emitted += 1;
                         }
-                        out.inserted_sights.push(sight);
+                        out.inserted_sights.push(r.sight);
                     }
                 }
             }
-            Err(e) => trace!(error = ?e, "Stage E: sight reduction failed"),
+            Err(e) => {
+                out.attempts
+                    .push(crate::diagnostics::StageEOutcomeSnapshot::Err {
+                        kind: reduce_error_kind(&e).to_string(),
+                    });
+                trace!(error = ?e, "Stage E: sight reduction failed");
+            }
         }
     }
     out.sights_inserted = inserted;
@@ -621,7 +637,7 @@ fn reduce_to_sight(
     c: &PairCandidate<'_>,
     storage: &Storage,
     cfg: &EngineConfig,
-) -> Result<Vec<Sight>, ReduceError> {
+) -> Result<Vec<ReducedSight>, ReduceError> {
     let observer = cfg.observer;
     // Look up intrinsics once; both same-frame paths need
     // them.
@@ -691,14 +707,17 @@ fn reduce_to_sight(
                 apparent.direction.azimuth,
             )
             .map_err(ReduceError::Lop)?;
-            Ok(vec![Sight {
-                lop,
-                anchor_tt: c.body_tt,
-                altitude_sigma_rad: observed.sigma.combine(apparent.altitude_sigma).value(),
-                body: SightBody::SolarSystem(body),
-                azimuth_rad: apparent.direction.azimuth,
-                source_frame_id: c.body.frame_id,
-                horizon_frame_id: c.horizon.frame_id,
+            Ok(vec![ReducedSight {
+                sight: Sight {
+                    lop,
+                    anchor_tt: c.body_tt,
+                    altitude_sigma_rad: observed.sigma.combine(apparent.altitude_sigma).value(),
+                    body: SightBody::SolarSystem(body),
+                    azimuth_rad: apparent.direction.azimuth,
+                    source_frame_id: c.body.frame_id,
+                    horizon_frame_id: c.horizon.frame_id,
+                },
+                observed_altitude_rad: observed.value,
             }])
         }
         BodyDetection::IdentifiedStars(result) => {
@@ -755,7 +774,7 @@ fn expand_identified_star(
     source_frame_id: FrameId,
     horizon_frame_id: FrameId,
     anchor_tt: Tt,
-) -> Result<Sight, ReduceError> {
+) -> Result<ReducedSight, ReduceError> {
     // Look up the catalog record for the apparent place.
     let star_record = bris_almanac::by_hr(ident.hr).ok_or(ReduceError::UnknownStarHr(ident.hr))?;
     let apparent = bris_almanac::star_apparent_place(star_record, frame_tt, jd_ut1, observer)
@@ -784,18 +803,29 @@ fn expand_identified_star(
         apparent.direction.azimuth,
     )
     .map_err(ReduceError::Lop)?;
-    Ok(Sight {
-        lop,
-        anchor_tt,
-        altitude_sigma_rad: observed_altitude
-            .sigma
-            .combine(apparent.altitude_sigma)
-            .value(),
-        body: SightBody::Star { hr: ident.hr },
-        azimuth_rad: apparent.direction.azimuth,
-        source_frame_id,
-        horizon_frame_id,
+    Ok(ReducedSight {
+        sight: Sight {
+            lop,
+            anchor_tt,
+            altitude_sigma_rad: observed_altitude
+                .sigma
+                .combine(apparent.altitude_sigma)
+                .value(),
+            body: SightBody::Star { hr: ident.hr },
+            azimuth_rad: apparent.direction.azimuth,
+            source_frame_id,
+            horizon_frame_id,
+        },
+        observed_altitude_rad: observed_altitude.value,
     })
+}
+
+/// A reduced sight bundled with its observed altitude, so
+/// the engine can record the latter in per-frame diagnostics.
+#[derive(Debug, Clone, Copy)]
+struct ReducedSight {
+    sight: Sight,
+    observed_altitude_rad: f64,
 }
 
 /// Errors during sight reduction. Internal-only; logged at
@@ -819,6 +849,24 @@ enum ReduceError {
     /// logs and continues so the body record can be retried
     /// when a better-paired horizon arrives.
     Stitch(PanoramaError),
+}
+
+/// Short, stable identifier for a [`ReduceError`] variant.
+/// Used to populate
+/// [`crate::diagnostics::StageEOutcomeSnapshot::Err::kind`]
+/// without exposing the internal error type to embedders.
+fn reduce_error_kind(e: &ReduceError) -> &'static str {
+    match e {
+        ReduceError::FrameEvicted => "FrameEvicted",
+        ReduceError::UnknownStarHr(_) => "UnknownStarHr",
+        ReduceError::Apparent(_) => "Apparent",
+        ReduceError::Measure(bris_vision::MeasurementError::BelowHorizon) => "BelowHorizon",
+        ReduceError::Measure(bris_vision::MeasurementError::NonFinite) => "NonFinite",
+        ReduceError::Measure(bris_vision::MeasurementError::NonFiniteSigma) => "NonFiniteSigma",
+        ReduceError::Measure(bris_vision::MeasurementError::ImageTooNarrow(_)) => "ImageTooNarrow",
+        ReduceError::Lop(_) => "Lop",
+        ReduceError::Stitch(_) => "Stitch",
+    }
 }
 
 /// Run `multi_sight_fix` over the current window; build a

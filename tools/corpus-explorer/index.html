@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Bris corpus explorer</title>
+    <link rel="stylesheet" href="explorer.css" />
+  </head>
+  <body>
+    <header>
+      <h1>Bris corpus explorer</h1>
+      <div id="status" class="status">loading…</div>
+    </header>
+    <main>
+      <nav id="sidebar" aria-label="sessions">
+        <h2>Sessions</h2>
+        <ul id="session-list"></ul>
+      </nav>
+      <section id="main-view">
+        <p class="hint">Pick a session on the left.</p>
+      </section>
+    </main>
+    <div id="lightbox" hidden>
+      <img id="lightbox-img" alt="" />
+      <button id="lightbox-close" aria-label="close">×</button>
+    </div>
+    <script type="module" src="explorer.js"></script>
+  </body>
+</html>

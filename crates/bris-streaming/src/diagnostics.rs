@@ -13,7 +13,7 @@
 //! long. The returned struct is `Clone` and contains owned data.
 
 use bris_core::time::Tt;
-use bris_vision::Condition;
+use bris_vision::{Classification, Condition};
 
 /// Engine state snapshot.
 #[derive(Debug, Clone)]
@@ -272,6 +272,91 @@ pub struct EngineDiagnostics {
     /// (`info!`) with their source frame id and rejection
     /// reason at the point of rejection.
     pub sights_rejected_by_screener: u64,
+
+    /// Snapshot of the body centroid detected on the most
+    /// recent processed frame, in source-frame pixel
+    /// coordinates. `None` when the frame produced no body
+    /// candidate (or before the first frame).
+    ///
+    /// Populated for both the day path (saturated-body
+    /// centroid) and night/identified-stars path (mean of the
+    /// peak coordinates, with a 1/√N positional σ proxy).
+    /// Diagnostic-only; consumers must not infer geometry
+    /// from this field, only display.
+    pub last_body_centroid: Option<BodyCentroidSnapshot>,
+
+    /// Snapshot of the horizon hypothesis emitted on the most
+    /// recent processed frame. `None` when the frame produced
+    /// no horizon (or before the first frame).
+    pub last_horizon_hypothesis: Option<HorizonHypothesisSnapshot>,
+
+    /// Stage E sight-reduction outcomes for the most recent
+    /// frame: one entry per candidate (body, horizon) pair
+    /// that Stage E attempted to reduce, success or failure.
+    /// Empty when no candidate pair was available.
+    ///
+    /// Reset at the start of each `push_frame`; consumers
+    /// observe only the most-recent frame's attempts.
+    pub last_stage_e_outcomes: Vec<StageEOutcomeSnapshot>,
+
+    /// Most recent raw classification snapshot, including the
+    /// disagreement / confidence summary. `None` until the
+    /// first frame.
+    pub last_frame_classification: Option<Classification>,
+}
+
+/// Body-centroid snapshot for one frame.
+#[derive(Debug, Clone, Copy)]
+pub struct BodyCentroidSnapshot {
+    /// X in source-frame pixels (sub-pixel).
+    pub x: f64,
+    /// Y in source-frame pixels.
+    pub y: f64,
+    /// 1σ position uncertainty in source-frame pixels.
+    pub sigma_px: f64,
+    /// Area of the centroid's connected component
+    /// (source-frame pixels). For the night/star path this is
+    /// the number of contributing peaks (proxy).
+    pub area_px: u32,
+    /// Number of additional saturated bodies detected
+    /// ("secondaries") — reflections, lit hardware, etc.
+    pub secondaries: u32,
+}
+
+/// Horizon-hypothesis snapshot for one frame, in source-frame
+/// pixel coordinates.
+#[derive(Debug, Clone, Copy)]
+pub struct HorizonHypothesisSnapshot {
+    /// `y = slope · x + intercept`, source-frame pixels.
+    pub slope: f64,
+    /// y-intercept (source-frame pixels).
+    pub intercept: f64,
+    /// Altitude-σ (radians) attributed to the horizon fit.
+    pub altitude_sigma_rad: f64,
+    /// Provider label, e.g. `"gradient"`, `"sky-region"`,
+    /// `"reflection-pair"`, `"vertical-line"`,
+    /// `"vanishing-point"`, `"segmentation"`,
+    /// `"night-gradient"`, `"night-textured"`, `"fused"`.
+    pub provider: &'static str,
+}
+
+/// One sight-reduction attempt's outcome.
+#[derive(Debug, Clone)]
+pub enum StageEOutcomeSnapshot {
+    /// Reduction succeeded.
+    Ok {
+        /// Observed altitude (radians).
+        altitude_rad: f64,
+        /// Altitude 1σ (radians).
+        sigma_rad: f64,
+    },
+    /// Reduction was attempted but failed; `kind` is a short,
+    /// stable error-variant identifier (e.g. `"BelowHorizon"`,
+    /// `"NonFinite"`, `"FrameEvicted"`).
+    Err {
+        /// Short variant name.
+        kind: String,
+    },
 }
 
 /// Per-stage processing statistics.

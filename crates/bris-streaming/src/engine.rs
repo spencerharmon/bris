@@ -182,6 +182,10 @@ struct EngineState {
     last_horizon_analysis_size: Option<(u32, u32)>,
     last_horizon_provenance: Option<bris_vision::HorizonProvenance>,
     last_horizon_altitude_sigma_rad: Option<f64>,
+    last_body_centroid: Option<crate::diagnostics::BodyCentroidSnapshot>,
+    last_horizon_hypothesis: Option<crate::diagnostics::HorizonHypothesisSnapshot>,
+    last_stage_e_outcomes: Vec<crate::diagnostics::StageEOutcomeSnapshot>,
+    last_frame_classification: Option<bris_vision::Classification>,
     /// Ring buffer + body/horizon queues + eviction. Owns the
     /// retained raw frames and detection records.
     storage: Storage,
@@ -278,9 +282,91 @@ fn position_prior_from_state(
     })
 }
 
+/// Project a [`BodyDetection`] into a per-frame centroid
+/// snapshot for diagnostics. Returns `None` when the
+/// detection carries no positional information (`None`
+/// variant, or a Night-without-stars payload that hasn't
+/// been plate-solved).
+fn body_centroid_snapshot(
+    body: &BodyDetection,
+) -> Option<crate::diagnostics::BodyCentroidSnapshot> {
+    match body {
+        BodyDetection::Day(c, secondaries) => Some(crate::diagnostics::BodyCentroidSnapshot {
+            x: c.x,
+            y: c.y,
+            sigma_px: c.position_sigma_px.value(),
+            area_px: c.area_px,
+            #[allow(clippy::cast_possible_truncation)]
+            secondaries: secondaries.len() as u32,
+        }),
+        BodyDetection::Night(peaks) => {
+            if peaks.is_empty() {
+                return None;
+            }
+            // Diagnostic mean over the peak set. Sigma is a
+            // 1/sqrt(N) proxy (matches the night-path sigma
+            // bookkeeping used in Stage E pair selection).
+            #[allow(clippy::cast_precision_loss)]
+            let n = peaks.len() as f64;
+            let (sum_x, sum_y) = peaks
+                .iter()
+                .fold((0.0_f64, 0.0_f64), |(sx, sy), p| (sx + p.x, sy + p.y));
+            Some(crate::diagnostics::BodyCentroidSnapshot {
+                x: sum_x / n,
+                y: sum_y / n,
+                sigma_px: 1.0 / n.sqrt(),
+                #[allow(clippy::cast_possible_truncation)]
+                area_px: peaks.len() as u32,
+                secondaries: 0,
+            })
+        }
+        BodyDetection::IdentifiedStars(result) => {
+            if result.identified.is_empty() {
+                return None;
+            }
+            #[allow(clippy::cast_precision_loss)]
+            let n = result.identified.len() as f64;
+            let (sum_x, sum_y) = result
+                .identified
+                .iter()
+                .fold((0.0_f64, 0.0_f64), |(sx, sy), s| {
+                    (sx + s.pixel_x, sy + s.pixel_y)
+                });
+            Some(crate::diagnostics::BodyCentroidSnapshot {
+                x: sum_x / n,
+                y: sum_y / n,
+                sigma_px: 1.0 / n.sqrt(),
+                #[allow(clippy::cast_possible_truncation)]
+                area_px: result.identified.len() as u32,
+                secondaries: 0,
+            })
+        }
+        BodyDetection::None => None,
+    }
+}
+
+/// Stable provider label for diagnostics consumers (replay
+/// report, render overlay). Kept short so it reads cleanly on
+/// the overlay text block.
+fn horizon_provider_label(p: bris_vision::HorizonProvenance) -> &'static str {
+    use bris_vision::{HorizonProvenance, OpticalKind};
+    match p {
+        HorizonProvenance::Optical(OpticalKind::Gradient) => "gradient",
+        HorizonProvenance::Optical(OpticalKind::SkyRegion) => "sky-region",
+        HorizonProvenance::Optical(OpticalKind::Night) => "night-gradient",
+        HorizonProvenance::Optical(OpticalKind::NightTextured) => "night-textured",
+        HorizonProvenance::Optical(OpticalKind::Segmentation) => "segmentation",
+        HorizonProvenance::ReflectionPair { .. } => "reflection-pair",
+        HorizonProvenance::VerticalLine { .. } => "vertical-line",
+        HorizonProvenance::VanishingPoint { .. } => "vanishing-point",
+        HorizonProvenance::Fused { .. } => "fused",
+    }
+}
+
 /// Update per-stage counters and last-classification / last-tt
 /// fields based on a freshly-completed pipeline pass. Pure
 /// function: caller holds the state lock.
+#[allow(clippy::too_many_lines)]
 fn update_stage_counters(
     state: &mut EngineState,
     outcome: &StageOutcome,
@@ -360,6 +446,8 @@ fn update_stage_counters(
     state.last_dispatched_condition = Some(outcome.dispatched_condition);
     state.last_processed_frame_tt = Some(outcome.frame_tt);
     state.last_horizon_analysis_size = Some(outcome.horizon_analyzed_size);
+    state.last_frame_classification = Some(outcome.classification);
+    state.last_body_centroid = body_centroid_snapshot(&outcome.body);
 
     match &outcome.horizon {
         HorizonStageOutcome::Detected {
@@ -367,10 +455,17 @@ fn update_stage_counters(
         } => {
             state.last_horizon_provenance = Some(*provenance);
             state.last_horizon_altitude_sigma_rad = Some(line.altitude_sigma.value());
+            state.last_horizon_hypothesis = Some(crate::diagnostics::HorizonHypothesisSnapshot {
+                slope: line.slope,
+                intercept: line.intercept,
+                altitude_sigma_rad: line.altitude_sigma.value(),
+                provider: horizon_provider_label(*provenance),
+            });
         }
         HorizonStageOutcome::None => {
             state.last_horizon_provenance = None;
             state.last_horizon_altitude_sigma_rad = None;
+            state.last_horizon_hypothesis = None;
         }
     }
 
@@ -522,6 +617,10 @@ impl StreamingEngine {
                 last_horizon_analysis_size: None,
                 last_horizon_provenance: None,
                 last_horizon_altitude_sigma_rad: None,
+                last_body_centroid: None,
+                last_horizon_hypothesis: None,
+                last_stage_e_outcomes: Vec::new(),
+                last_frame_classification: None,
                 storage: Storage::new(config.input_ring_capacity),
                 sight_window,
                 last_publication: None,
@@ -770,6 +869,9 @@ impl StreamingEngine {
         }
         state.cross_frame_sights_emitted += stage_e_outcome.cross_frame_sights_emitted;
         state.sights_rejected_by_screener += stage_e_outcome.sights_rejected_by_screener;
+        state
+            .last_stage_e_outcomes
+            .clone_from(&stage_e_outcome.attempts);
         // Cumulative counters from this Stage E pass.
         state.sights_inserted_total += stage_e_outcome.sights_inserted as u64;
         state.sights_evicted_total += stage_e_outcome.sights_evicted as u64;
@@ -880,6 +982,10 @@ impl StreamingEngine {
             last_horizon_analysis_size: state.last_horizon_analysis_size,
             last_horizon_provenance: state.last_horizon_provenance,
             last_horizon_altitude_sigma_rad: state.last_horizon_altitude_sigma_rad,
+            last_body_centroid: state.last_body_centroid,
+            last_horizon_hypothesis: state.last_horizon_hypothesis,
+            last_stage_e_outcomes: state.last_stage_e_outcomes.clone(),
+            last_frame_classification: state.last_frame_classification,
             reflection_pair_attempts: state.reflection_pair_attempts,
             reflection_pair_hypothesized: state.reflection_pair_hypothesized,
             reflection_pair_used: state.reflection_pair_used,
@@ -1295,6 +1401,44 @@ mod tests {
             }
         }
         Frame::new(w, h, pixels, tt, 1000, Intrinsics::placeholder(w, h)).unwrap()
+    }
+
+    #[test]
+    fn diagnostics_capture_body_centroid_and_horizon_snapshots() {
+        let mut cfg = EngineConfig::new(Observer::default_dev());
+        cfg.store.enabled = false;
+        let engine = StreamingEngine::new(cfg);
+        let tt = bris_core::time::Tt::from_julian_date(bris_core::time::JD_J2000);
+        engine.push_frame(body_plus_horizon_frame(tt)).unwrap();
+        let diag = engine.diagnostics();
+        let centroid = diag
+            .last_body_centroid
+            .expect("body centroid snapshot must be populated after a body-bearing frame");
+        assert!(
+            (centroid.x - 64.0).abs() < 4.0,
+            "centroid x={} (expected ~64)",
+            centroid.x
+        );
+        assert!(
+            (centroid.y - 32.0).abs() < 4.0,
+            "centroid y={} (expected ~32)",
+            centroid.y
+        );
+        assert!(centroid.area_px > 50);
+        let horizon = diag
+            .last_horizon_hypothesis
+            .expect("horizon hypothesis must be populated after a horizon-bearing frame");
+        assert!(
+            horizon.intercept > 50.0 && horizon.intercept < 78.0,
+            "horizon intercept={} (expected ~64)",
+            horizon.intercept,
+        );
+        assert!(!horizon.provider.is_empty());
+        assert!(diag.last_frame_classification.is_some());
+        assert!(
+            !diag.last_stage_e_outcomes.is_empty(),
+            "Stage E should have attempted at least one reduction"
+        );
     }
 
     #[test]
