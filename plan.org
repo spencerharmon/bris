@@ -3085,6 +3085,150 @@ references to the regression tests that pin the behavior. See
    ~docs/design/debug_bundle_schema.md~ updated under the v1
    layout section.
 
+* Phase 7.7: Gravity provider stack
+  The vertical-line horizon provider was disabled in PR #72
+  for a fundamental math bug (gravity inferred from
+  `r_bot - r_top` is wrong for full-height lines on tilted
+  cameras). The remaining Stage C providers (gradient,
+  night, sky-region, segmentation, reflection-pair,
+  vanishing-point) honestly emit no hypothesis on tilted,
+  non-horizon-visible scenes. The corpus replay confirms
+  the bedroom-moon captures produce zero sights under those
+  conditions.
+
+  Replacement: a direct camera-frame gravity estimator. Given
+  gravity, the horizon line follows from `ℓ = K⁻ᵀ g_cam`
+  (existing `horizon_line_from_normal` machinery).
+
+  Full design: [[file:docs/design/ml_gravity.md][docs/design/ml_gravity.md]].
+
+  **Operator-chosen sequencing (handoff, 2026-06-05):** skip
+  the Layer-1 deterministic-σ spike. Go directly to Layer 2
+  (heteroscedastic training producing per-prediction σ) as
+  the first deliverable. The model is the precondition for
+  the provider; the provider follows once the model is
+  trained and exported.
+
+  Phase ordering:
+
+** TODO Phase 7.7a: Train GeoCalib with heteroscedastic σ head
+   First deliverable. No code changes in the workspace yet;
+   produces an ONNX file.
+
+   - Verify GeoCalib runs in tract-onnx (`docs/design/
+     ml_gravity.md` §"tract-onnx compatibility"). If not,
+     fall back to PerspectiveFields or pivot the runtime
+     decision; flag as a blocker.
+   - Reproduce GeoCalib's training environment in a
+     `Dockerfile` under `scripts/ml-gravity/`. Pin every
+     dependency version + dataset checksum.
+   - Fine-tune ONLY the regression head with the
+     heteroscedastic loss:
+     `L = (g_pred − g_true)² / (2σ_pred²) + ½ log(σ_pred²)`.
+     Backbone weights frozen. OpenPano synthesized-tilt
+     pairs as training data — no new collection.
+   - Validate σ calibration on a held-out subset: per-
+     prediction calibration plot should be monotonic.
+   - Export to ONNX with output tensor shape (4 scalars:
+     roll, pitch, σ_roll, σ_pitch) and verify tract loads it.
+   - Run convention self-test fixture (known panorama with
+     known gravity) to confirm sign conventions match the
+     design doc's `g_cam` formulas.
+   - Vendor the ONNX file at `data/ml-gravity/geocalib-
+     heteroscedastic-v1.onnx` (via Git LFS pending operator
+     sign-off; otherwise fetch-at-build with checksum).
+   - Document the export pipeline in
+     `docs/design/ml_gravity_training.md` (new file): dataset
+     splits, hyperparameters, calibration plot, validation
+     residuals, expected σ floor.
+
+   Deliverable: the ONNX file + the training scripts + the
+   training-results doc. No bris-vision / bris-streaming
+   code touched. Operator reviews the calibration plot before
+   green-lighting Phase 7.7b.
+
+** TODO Phase 7.7b: ~MlGravityProvider~ + Stage C wiring
+   Follows 7.7a. Consumes the trained model.
+
+   - `crates/bris-vision/src/ml_gravity/` with provider impl
+     per the design doc's PR-2 outline (preprocessing,
+     load-time convention self-test, σ Jacobian helper).
+   - Behind a new `ml-gravity` cargo feature (default off).
+   - `EngineConfig::enable_ml_gravity` flag (default false);
+     `bris-ffi` plumbing.
+   - `HorizonProvenance::MlGravity { model_id, sigma_rad }`
+     variant.
+   - `EngineDiagnostics` counters per the design doc's
+     failure-mode table (8 counters).
+   - Wire into `bris-streaming::pipeline::horizon` last in
+     the dispatch order. Inverse-variance fusion handles
+     the rest; the model never wins against clean
+     gradient/night horizons because its σ floor is higher.
+   - `bris-cli replay --ml-gravity` flag.
+   - Unit tests + tiny-fixture integration test (per design
+     doc §"Test infrastructure").
+   - Re-run replay against the bedroom-moon corpus; document
+     outcome in `docs/design/ml_gravity_results.md`.
+
+   Acceptance: ≥1 sight emerges from a previously-stuck
+   capture, OR Stage E honestly fails for a documented
+   geometric reason (NOT "no horizon hypothesis"); per-frame
+   budget within +200 ms on Pi Zero 2W; corpus explorer
+   shows model-derived horizons with `HorizonProvenance::
+   MlGravity` in the badge.
+
+** TODO Phase 7.7c: IMU coexistence
+   Follows Phase 7.5 #5 (per-frame gravity in sidecar) +
+   Phase 7.7b. Without per-frame IMU gravity in sidecars,
+   the coexistence policy has nothing to corroborate.
+
+   - When sidecar carries `gravity_camera_frame` AND the
+     model is available, run the IMU-vs-ML agreement test
+     (3-σ default; configurable threshold).
+   - Agreement: report IMU gravity; model is silent
+     corroborator.
+   - Disagreement: report ML gravity with inflated σ;
+     diagnostic counter fires; engine logs the
+     disagreement for the operator.
+   - Tests cover all four IMU×ML present/absent combinations.
+   - Document the policy in `docs/design/ml_gravity.md`
+     §"Coexistence with IMU" (already drafted; mark live
+     when this lands).
+
+** TODO Phase 7.7d: Marine fine-tune (deferred, blocks on bris-MLGravity-trainer)
+   The pretrained + Layer-2-retrained model is calibrated
+   for OpenPano + MegaDepth distribution. Marine scenes
+   without boat structure are out-of-distribution and the σ
+   under-estimates honestly. Phase 7.7d is the marine
+   re-calibration.
+
+   - Blocks on the deferred `bris-MLGravity-trainer` APK +
+     its produced marine corpus.
+   - Combine OpenPano + MegaDepth + operator marine corpus.
+   - Re-fine-tune; recalibrate σ on marine validation
+     subset.
+   - Re-export to `data/ml-gravity/geocalib-heteroscedastic-
+     marine-v1.onnx`; loader detects which model is loaded
+     and reports model id in diagnostics.
+   - Update validation criteria: fix-σ contributions from
+     the gravity provider within Phase-8 documented
+     accuracy budget on marine validation corpus.
+
+** TODO Phase 7.7e: bris-MLGravity-trainer companion APK (deferred)
+   Separate Android app, parallel to the main Bris APK.
+   Captures frames + IMU gravity at controlled poses,
+   optimised for training-data efficiency (deduplication,
+   pose diversity, exposure spread).
+
+   - Reuses `bris-bundle` debug-bundle schema for on-disk
+     format; `gravity_camera_frame` populated per frame from
+     IMU.
+   - Separate APK so training-data workflow doesn't pollute
+     the user-facing capture UI.
+   - Operator can install/uninstall independently of the
+     main app.
+   - Out of scope for 7.7a–c; feeds 7.7d when it lands.
+
 * Phase 9: Stretch goals
 ** TODO NMEA 2000 output via external gateway, documented integrations.
 ** TODO Mechanical pan rig reference design (servo + 3D-printed mount).

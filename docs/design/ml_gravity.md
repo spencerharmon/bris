@@ -1,6 +1,10 @@
 # ML-based gravity estimation for horizon detection
 
-Status: **design draft** (operator review pending). No code yet.
+Status: **design draft** (operator review pending). Sequencing
+updated 2026-06-05 per operator handoff: Layer 1 (deterministic
+σ) skipped; first deliverable is Layer 2 (heteroscedastic
+training). See [[file:../plan.org][plan.org]] Phase 7.7 for
+the phase breakdown.
 
 Related docs:
 - `horizon_autodetect.md` — Stage C provider family + fusion design.
@@ -392,16 +396,26 @@ combined distribution. Recalibrate σ.
 
 ### What we ship in this design's spike
 
-The spike implements **Layer 1** (single global σ from a
-calibration set). Code is structured so Layer 2 is a
-re-export of model weights — no provider-side changes needed
-when the heteroscedastic model arrives.
+**Operator-chosen sequencing (2026-06-05): skip Layer 1.** The
+Layer-1 deterministic-σ "global constant" is no longer
+planned as a shipping step. The first deliverable is the
+Layer-2 heteroscedastic-σ trained model. The provider PR
+(below) consumes that model directly.
+
+Rationale: a Layer-1 spike would have shipped wiring with a
+placeholder σ that violates AGENTS.md rule zero in an
+uncomfortably visible way (single σ for every scene is
+honest only as a calibration constant, never as a per-
+prediction value). Training Layer 2 first is the same total
+work — the head retrain is GPU-hours not days — and ships
+an honest σ from day one.
 
 The σ output field is `Sigma` in the provider, computed from
-either the global constant (Layer 1) or the model's per-
-prediction σ_pred (Layer 2+). Same code path; provider
-detects which mode by inspecting model output tensor shape
-(deterministic = 2 scalars, heteroscedastic = 4 scalars).
+the model's per-prediction `σ_pred` output. The provider
+detects which model variant is loaded (deterministic vs
+heteroscedastic) by inspecting output tensor shape; a
+deterministic model fails the load-time convention check
+and the provider refuses to initialize.
 
 ## σ propagation through the lens model (full math)
 
@@ -681,154 +695,180 @@ to keep PR feedback fast.
 ## Implementation roadmap
 
 Each step independently testable, in the spirit of
-CONTRIBUTING.md "one logical change per PR." The spike is
-**three PRs**, not one, to keep each reviewable.
+CONTRIBUTING.md "one logical change per PR." Per the
+operator handoff (2026-06-05), the work splits into
+**phases**, not just PRs:
 
-### Spike PR 1: Model export + tract compatibility verification
+- **Phase 7.7a** — train the heteroscedastic model; produces
+  an ONNX file + training-results doc, no workspace code.
+- **Phase 7.7b** — build the provider that consumes the
+  trained model; wires into Stage C; smoke-tests against the
+  bedroom corpus.
+- **Phase 7.7c** — IMU coexistence (blocks on Phase 7.5 #5).
+- **Phase 7.7d** — marine fine-tune (blocks on the trainer
+  APK).
+- **Phase 7.7e** — trainer APK (companion workstream).
 
-**Goal:** prove the ONNX file works in tract-onnx before
-investing in the wiring.
+Detailed checklist for each phase below.
 
-1. **Add `scripts/ml-gravity/export_geocalib.py`** that
-   clones GeoCalib at a pinned commit, exports to ONNX,
-   optionally runs `onnxsim` to fold/strip unsupported ops.
-   Records the exact PyTorch + GeoCalib + onnx + onnxsim
-   versions in a `manifest.txt` next to the output.
-2. **Add `crates/bris-vision/tests/geocalib_ops_supported.
-   rs`** — a test that loads the exported ONNX file with
-   tract and asserts inference runs on a fixture tensor.
-   Test is gated by `#[cfg(feature = "ml-gravity")]` and
-   ignored unless the model file is present.
-3. **Vendor the model** at `data/ml-gravity/geocalib-v1.
-   onnx` (via LFS pending operator sign-off; otherwise
-   fetch-at-build with checksum).
-4. **CI updates**: add LFS support if vendoring chosen; add
-   the `test-ml-gravity` CI job that runs the ops-supported
-   test.
+### Phase 7.7a: Train heteroscedastic GeoCalib (no workspace code)
 
-PR-1 acceptance: GeoCalib ONNX runs in tract on a fixture
-tensor, returning finite outputs.
+**Goal:** produce `data/ml-gravity/geocalib-heteroscedastic-
+v1.onnx` plus training documentation.
 
-If tract incompatibility is discovered: PR-1 is the place
-to either fix it (op replacement at export) or pivot to
-PerspectiveFields. Documented in the PR.
+1. **Verify tract-onnx compatibility upfront.** Export a
+   stock GeoCalib checkpoint to ONNX, load in tract, run on
+   a fixture tensor. If unsupported ops emerge: either
+   replace at export time (PyTorch model edit), simplify
+   with `onnxsim`, or pivot to PerspectiveFields. Document
+   the outcome in `scripts/ml-gravity/tract_compat_notes.md`.
+   This is the **first thing** done; if it blocks, the
+   whole phase blocks pending operator decision on runtime
+   swap.
+2. **Reproducible training environment.** `Dockerfile` +
+   `requirements.txt` under `scripts/ml-gravity/` pinning
+   PyTorch, GeoCalib commit, onnx, onnxsim, training data
+   checksums. CI-runnable; no network at train time after
+   the dataset is cached.
+3. **Dataset preparation.** OpenPano + MegaDepth synthesized-
+   tilt pairs, the GeoCalib upstream defaults. Held-out
+   validation subset for σ calibration. Script logs
+   per-split sample counts and aspect-ratio distributions.
+4. **Head retrain with heteroscedastic loss.** Backbone
+   frozen. Loss: `L = (g_pred − g_true)² / (2σ_pred²) +
+   ½ log(σ_pred²)`. Hyperparameters logged. Expected:
+   GPU-hours, single node.
+5. **σ calibration validation.** On the held-out validation
+   set, compute per-prediction `(σ_pred, residual)` pairs.
+   Plot calibration curve (binned mean residual vs binned
+   σ). The curve should be monotonic and close to the
+   y=x line. Save the plot as a deliverable.
+6. **ONNX export with 4-scalar output** (roll, pitch,
+   σ_roll, σ_pitch). Run convention self-test fixture:
+   render a known-orientation panorama, invoke the ONNX,
+   confirm the output `g_cam` sign convention matches the
+   design doc §"Coordinate conventions."
+7. **Vendor the ONNX** at `data/ml-gravity/geocalib-
+   heteroscedastic-v1.onnx` (Git LFS pending operator
+   sign-off; otherwise fetch-at-build with checksum).
+8. **`docs/design/ml_gravity_training.md`** (new file)
+   documents the dataset splits, hyperparameters,
+   calibration plot, validation residuals, the convention
+   self-test results, and the expected σ floor on the
+   training distribution.
 
-### Spike PR 2: Provider wiring
+**Deliverable:** the ONNX file + scripts + training-results
+doc. No bris-vision / bris-streaming code touched. Operator
+reviews the calibration plot before green-lighting Phase
+7.7b.
 
-**Goal:** new provider that hands a horizon hypothesis to
-Stage C, gated by config.
+### Phase 7.7b: Provider + Stage C wiring
 
-5. **`crates/bris-vision/src/ml_gravity/mod.rs`** with:
+**Goal:** new provider consumes the trained model and feeds
+Stage C.
+
+9. **`crates/bris-vision/src/ml_gravity/mod.rs`**:
    - `MlGravityProvider` struct (model handle, config).
-   - `MlGravityConfig` with model path, σ_global_rad,
-     enable flag, frame-cache N, drift rate α, σ_imu, agree
-     threshold k.
-   - `load_model(path)` with convention self-test at load.
+   - `MlGravityConfig` with model path, enable flag,
+     frame-cache N, drift rate α, σ_imu, agree threshold k.
+   - `load_model(path)` runs the convention self-test at
+     load; refuses to construct if the test fails.
    - `detect_with_stats(ctx, &mut stats)` implementing
      `HorizonProvider` trait.
-   - Preprocessing module per the pipeline above.
-   - σ Jacobian helper.
-6. **`bris-streaming::pipeline::horizon` dispatch update**:
-   - Add `MlGravityProvider` invocation last in the
-     dispatch order.
-   - Gated by `EngineConfig::enable_ml_gravity` (defaults
-     false) AND the `ml-gravity` cargo feature.
-   - When invoked, populate `EngineDiagnostics` counters
-     (see below).
-7. **`HorizonProvenance::MlGravity { model_id, sigma_rad }`**
-   variant in `crates/bris-vision/src/horizon.rs`.
-   Public-API addition; serialized in the replay-report
-   JSON (extends `docs/design/replay_report.md`).
-8. **`EngineDiagnostics` counter additions** (additive;
-   AGENTS.md-approved):
-   - `ml_gravity_invoked: u64`
-   - `ml_gravity_hypothesized: u64`
-   - `ml_gravity_corroborated: u64`
-   - `ml_gravity_imu_disagreement: u64`
-   - `ml_gravity_nan_outputs: u64`
-   - `ml_gravity_preprocess_failed: u64`
-   - `ml_gravity_load_failed: bool`
-   - `ml_gravity_inference_ms_p99: f64` (gauge)
-9. **`bris-cli replay --ml-gravity`** flag that flips
-   `enable_ml_gravity = true` in the engine config and
-   logs the provider's per-frame outputs in the report.
-10. **`bris-ffi`**: additive `enable_ml_gravity: Option<bool>`
+   - Preprocessing module per the design doc §"Image
+     preprocessing pipeline."
+   - σ Jacobian helper per the design doc §"σ propagation
+     through the lens model."
+10. **`bris-streaming::pipeline::horizon` dispatch update**:
+    - Add `MlGravityProvider` invocation last in the
+      dispatch order.
+    - Gated by `EngineConfig::enable_ml_gravity` (defaults
+      false) AND the `ml-gravity` cargo feature.
+    - When invoked, populate `EngineDiagnostics` counters
+      (see below).
+11. **`HorizonProvenance::MlGravity { model_id, sigma_rad }`**
+    variant in `crates/bris-vision/src/horizon.rs`.
+    Public-API addition; serialized in the replay-report
+    JSON (extends `docs/design/replay_report.md`).
+12. **`EngineDiagnostics` counter additions** (additive;
+    AGENTS.md-approved):
+    - `ml_gravity_invoked: u64`
+    - `ml_gravity_hypothesized: u64`
+    - `ml_gravity_corroborated: u64` (zero until Phase 7.7c
+      lands; counter shape established here)
+    - `ml_gravity_imu_disagreement: u64` (same)
+    - `ml_gravity_nan_outputs: u64`
+    - `ml_gravity_preprocess_failed: u64`
+    - `ml_gravity_load_failed: bool`
+    - `ml_gravity_inference_ms_p99: f64` (gauge)
+13. **`bris-cli replay --ml-gravity`** flag that flips
+    `enable_ml_gravity = true` in the engine config and
+    logs the provider's per-frame outputs in the report.
+14. **`bris-ffi`**: additive `enable_ml_gravity: Option<bool>`
     in `FfiEngineConfig`; default `None` means use the core's
     default (false).
-11. **Tests**: unit tests for the provider (coordinate
+15. **Tests**: unit tests for the provider (coordinate
     conversion, preprocessing, σ Jacobian, convention
-    self-test); integration test against the tiny fixture
-    ONNX model.
+    self-test); integration test against a tiny fixture
+    ONNX model (10 KB "returns roll=0, pitch=0" stub) under
+    `tests/fixtures/`.
+16. **Corpus smoke test**: re-run replay against the bedroom
+    corpus with `--ml-gravity` enabled. Document outcome in
+    `docs/design/ml_gravity_results.md` (new file): per-
+    capture sight count, fix count, σ statistics, before/
+    after comparison.
 
-PR-2 acceptance: cargo test passes with `--features
-ml-gravity`; replay against a synthetic frame with known
-gravity produces a hypothesis within the σ_global of truth;
-CI is green.
+**Acceptance:** ≥1 sight emerges from a previously-stuck
+capture, OR Stage E honestly fails for a documented
+geometric reason (NOT "no horizon hypothesis"); per-frame
+budget within +200 ms on Pi Zero 2W; corpus explorer shows
+model-derived horizons with `HorizonProvenance::MlGravity`
+in the badge.
 
-### Spike PR 3: Corpus validation
+### Phase 7.7c: IMU coexistence (blocks on Phase 7.5 #5)
 
-**Goal:** validate on the operator's existing corpus and
-document the result.
+Follows the Android writer landing per-frame
+`gravity_camera_frame` in sidecars. Without that, the
+coexistence policy has nothing to corroborate.
 
-12. Re-run replay against the bedroom-moon corpus with
-    `--ml-gravity` enabled.
-13. Document outcome in `docs/design/ml_gravity_results.md`
-    (new file): per-capture sight count, fix count, σ
-    statistics, which frames produced sights, before/after
-    comparison.
-14. If sights emerge from previously-stuck captures, declare
-    the spike successful. If not, document the next
-    bottleneck (Stage E, body identification, etc.).
-15. Update `docs/design/ml_gravity.md` (this doc) with
-    "Status: spike complete" and a pointer to the results.
+17. Implement the agreement check per §"Coexistence with
+    IMU" above. All four IMU×ML present/absent combinations
+    tested.
+18. Diagnostic counters that were stubbed in 7.7b
+    (`ml_gravity_corroborated`, `ml_gravity_imu_disagreement`)
+    now populated.
+19. Document the live behavior in `docs/design/
+    ml_gravity.md` §"Coexistence with IMU" (flip from
+    "design" to "live").
 
-PR-3 acceptance: documented results; the explorer view of
-the corpus shows model-derived horizons; operator agrees
-spike is done.
+### Phase 7.7d: Marine fine-tune (blocks on trainer APK)
 
-### Layer 2 (separate PR, follows the spike)
+20. Reuse Phase 7.7a's training scripts. Combine OpenPano +
+    MegaDepth + operator marine corpus.
+21. Recalibrate σ on marine subset; document expected σ
+    floor for marine scenes in `docs/design/
+    ml_gravity_training.md`.
+22. Re-export to `data/ml-gravity/geocalib-heteroscedastic-
+    marine-v1.onnx`. Loader detects which model is loaded
+    via the embedded model id and reports in diagnostics.
+23. Marine validation: fix-σ contributions from the gravity
+    provider within Phase-8 documented accuracy budget on
+    marine corpus.
 
-16. **Retrain GeoCalib head with heteroscedastic loss.**
-    Training scripts live under `scripts/ml-gravity/`.
-    Validated against held-out OpenPano + MegaDepth.
-17. **Re-export ONNX** with the new head. The output tensor
-    shape changes from 2 scalars to 4 scalars; the loader
-    detects this and switches σ mode.
-18. **Update `MlGravityProvider`** to use the per-prediction
-    σ output instead of the global constant. Behavior change
-    is purely σ-honest; no API change.
+### Phase 7.7e: bris-MLGravity-trainer companion APK (companion)
 
-### Layer 3 (deferred — follows `bris-MLGravity-trainer`)
-
-19. **Marine fine-tune.** Combines OpenPano + MegaDepth +
-    operator's marine corpus.
-20. **Recalibrate σ** on marine subset; document expected
-    σ floor for marine scenes.
-21. **Re-export, re-ship.**
-
-### bris-MLGravity-trainer (deferred companion workstream)
-
-A separate Android APK that captures frames + IMU gravity at
+Separate Android APK that captures frames + IMU gravity at
 controlled poses, optimized for training-data efficiency
-(deduplication, pose diversity, exposure spread). Out of
-scope for this design doc; tracked separately. The training
-app feeds Layer 3.
+(deduplication, pose diversity, exposure spread).
 
-The trainer is **separate from the existing Bris APK** so
-that:
-- Training-data-capture concerns don't pollute the user-
-  facing capture UI.
-- Training-data captures can be high-frequency / high-volume
-  without confusing the operator's sight log.
-- The trainer can be removed from devices after data
-  collection; the main app doesn't carry the burden.
-
-Trainer dataset format: identical to the existing Bris
-debug-bundle format (per `docs/design/debug_bundle_schema.
-md`), with `gravity_camera_frame` populated in every sidecar
-from IMU. Reuses `bris-bundle` for the on-disk schema. The
-fine-tuning script reads bris-bundle directories the same
-way `bris replay` does.
+- Reuses `bris-bundle` debug-bundle schema for on-disk
+  format; `gravity_camera_frame` populated per frame from
+  IMU.
+- Separate APK so training-data workflow doesn't pollute
+  the user-facing capture UI.
+- Operator can install/uninstall independently of the
+  main app.
+- Out of scope for 7.7a–c; feeds 7.7d when it lands.
 
 ## Open questions
 
