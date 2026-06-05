@@ -17,6 +17,7 @@
 
 mod config;
 mod nmea_transport;
+mod replay_report;
 
 use anyhow::{bail, Context};
 use bris_almanac::{refraction::Atmosphere, Observer};
@@ -489,6 +490,20 @@ struct ReplayArgs {
     /// Emit NMEA sentences for every published fix to stdout.
     #[arg(long)]
     nmea_stdout: bool,
+    /// Render an annotated PNG next to each input frame and
+    /// emit a per-session `bris-replay-report.json` (and, when
+    /// `--all-sessions` is in use, a corpus-root
+    /// `index.json`). Slow on large corpora.
+    #[arg(long)]
+    render_frames: bool,
+    /// Replay every session under `<corpus>/sessions/`. Each
+    /// session is processed end-to-end; rendering and report
+    /// generation are governed by `--render-frames`.
+    #[arg(
+        long,
+        conflicts_with_all = ["bundle", "frames", "session"]
+    )]
+    all_sessions: bool,
 }
 
 /// CLI-facing rotation enum.
@@ -616,12 +631,179 @@ struct ModeResult {
     fixes: Vec<PublishedFix>,
     suppressed: u64,
     frames_pushed: u64,
+    /// Populated when `--render-frames` is on. One entry per
+    /// processed frame, plus the running rejection histogram.
+    /// `None` when rendering was off (no work done; no report).
+    render: Option<RenderRunOutput>,
+}
+
+/// Per-mode rendering output: per-frame records and a
+/// Stage E rejection histogram aggregated across the run.
+#[derive(Debug, Default)]
+struct RenderRunOutput {
+    frames: Vec<replay_report::FrameReport>,
+    rejection_counts: std::collections::BTreeMap<String, u64>,
+}
+
+/// Build a per-frame replay report and write the annotated
+/// PNG.
+///
+/// `pgm_path` and `render_path` in the returned report are
+/// **bundle-relative** strings; the session-level writer
+/// promotes them to corpus-relative paths if needed.
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+fn render_one_frame(
+    frame: &bris_vision::Frame,
+    pair: &FramePathPair,
+    seq: usize,
+    captured_utc: chrono::DateTime<Utc>,
+    diag: &bris_streaming::EngineDiagnostics,
+    bundle_dir: &Path,
+    capture_id_short: &str,
+    session_id_short: &str,
+) -> anyhow::Result<replay_report::FrameReport> {
+    use bris_streaming::StageEOutcomeSnapshot;
+    use bris_vision::{CentroidOverlay, HorizonOverlay, OverlayData, StageEOutcomeView};
+
+    let classification_label = diag
+        .last_raw_classification
+        .map_or_else(|| "unknown".into(), |c| format!("{c:?}"));
+
+    let centroid_overlay = diag.last_body_centroid.map(|c| CentroidOverlay {
+        x: c.x,
+        y: c.y,
+        sigma_px: c.sigma_px,
+        area_px: c.area_px,
+        secondaries: c.secondaries,
+    });
+    let horizon_overlay = diag.last_horizon_hypothesis.map(|h| HorizonOverlay {
+        slope: h.slope,
+        intercept: h.intercept,
+        provider: h.provider,
+        sigma_rad: h.altitude_sigma_rad,
+    });
+    let stage_e_view: Vec<StageEOutcomeView> = diag
+        .last_stage_e_outcomes
+        .iter()
+        .map(|o| match o {
+            StageEOutcomeSnapshot::Ok {
+                altitude_rad,
+                sigma_rad,
+            } => StageEOutcomeView::Ok {
+                altitude_rad: *altitude_rad,
+                sigma_rad: *sigma_rad,
+            },
+            StageEOutcomeSnapshot::Err { kind } => StageEOutcomeView::Err { kind: kind.clone() },
+        })
+        .collect();
+
+    let stem = pair
+        .pgm
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("frame");
+    let render_filename = format!("{stem}-render.png");
+    let render_path_abs = pair.pgm.parent().map_or_else(
+        || std::path::PathBuf::from(&render_filename),
+        |d| d.join(&render_filename),
+    );
+
+    let utc_string = captured_utc.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string();
+    let overlay = OverlayData {
+        frame_seq: pair.sidecar_data.seq,
+        captured_utc: utc_string,
+        classification: &classification_label,
+        centroid: centroid_overlay,
+        horizon: horizon_overlay,
+        stage_e_outcomes: stage_e_view,
+        capture_id_short: capture_id_short.to_string(),
+        session_id_short: session_id_short.to_string(),
+    };
+    bris_vision::render_debug_overlay(frame, &overlay, &render_path_abs)
+        .context("render debug overlay PNG")?;
+
+    let pgm_rel = path_relative_to(&pair.pgm, bundle_dir);
+    let render_rel = path_relative_to(&render_path_abs, bundle_dir);
+
+    let horizon_report = diag
+        .last_horizon_hypothesis
+        .map(|h| replay_report::HorizonReport {
+            provider: h.provider.to_string(),
+            intercept_px: h.intercept,
+            slope: h.slope,
+            sigma_rad: h.altitude_sigma_rad,
+        });
+    let centroid_report = diag
+        .last_body_centroid
+        .map(|c| replay_report::BodyCentroidReport {
+            x: c.x,
+            y: c.y,
+            sigma_px: c.sigma_px,
+            area_px: c.area_px,
+            secondaries: c.secondaries,
+        });
+    let stage_e_report: Vec<replay_report::StageEAttemptReport> = diag
+        .last_stage_e_outcomes
+        .iter()
+        .map(|o| match o {
+            StageEOutcomeSnapshot::Ok {
+                altitude_rad,
+                sigma_rad,
+            } => replay_report::StageEAttemptReport::Ok {
+                altitude_rad: *altitude_rad,
+                sigma_rad: *sigma_rad,
+            },
+            StageEOutcomeSnapshot::Err { kind } => replay_report::StageEAttemptReport::Err {
+                error: kind.clone(),
+            },
+        })
+        .collect();
+    let sight_emitted = stage_e_report
+        .iter()
+        .any(|o| matches!(o, replay_report::StageEAttemptReport::Ok { .. }));
+
+    Ok(replay_report::FrameReport {
+        #[allow(clippy::cast_possible_truncation)]
+        seq: seq as u32,
+        captured_unix_ms: pair.sidecar_data.captured_unix_ms,
+        render_path: Some(render_rel),
+        pgm_path: pgm_rel,
+        classification: classification_label,
+        horizon: horizon_report,
+        body_centroid: centroid_report,
+        stage_e_outcomes: stage_e_report,
+        sight_emitted,
+    })
+}
+
+/// String path of `target` relative to `base`; falls back to
+/// the absolute path when `target` is not a descendant of
+/// `base`.
+fn path_relative_to(target: &Path, base: &Path) -> String {
+    target.strip_prefix(base).ok().map_or_else(
+        || target.to_string_lossy().to_string(),
+        |p| p.to_string_lossy().to_string(),
+    )
 }
 
 fn run_replay(args: &ReplayArgs) -> anyhow::Result<()> {
+    if args.all_sessions {
+        return run_replay_all_sessions(args);
+    }
     if let Some(session_id) = args.session {
         return run_replay_session(args, session_id);
     }
+    let (_capture_report, _) = run_replay_capture(args)?;
+    Ok(())
+}
+
+/// Run replay over one bundle (one capture). Returns the per-
+/// capture report (when `--render-frames` was on) and the
+/// loaded `BundleManifest` so callers can stitch reports
+/// together at the session level.
+fn run_replay_capture(
+    args: &ReplayArgs,
+) -> anyhow::Result<(Option<replay_report::CaptureReport>, BundleManifest)> {
     // 1. Resolve the manifest (from --bundle or synthesized from --frames + flags).
     let (mut manifest, bundle_dir) = resolve_manifest(args)?;
     apply_cli_overrides(&mut manifest, args)?;
@@ -666,7 +848,47 @@ fn run_replay(args: &ReplayArgs) -> anyhow::Result<()> {
         print_summary(&results, &manifest);
     }
 
-    Ok(())
+    // 7. Build the per-capture report from the Default-mode
+    //    run (if rendering was on for that mode).
+    let capture_report = build_capture_report(&results, &manifest, frames.len());
+    Ok((capture_report, manifest))
+}
+
+/// Pick the Default-mode result (if present) and build a
+/// per-capture report from it.
+fn build_capture_report(
+    results: &[ModeResult],
+    manifest: &BundleManifest,
+    frame_count: usize,
+) -> Option<replay_report::CaptureReport> {
+    let default_result = results.iter().find(|r| r.mode == ReplayMode::Default)?;
+    let render = default_result.render.as_ref()?;
+    Some(replay_report::CaptureReport {
+        capture_id: manifest.bundle_id.clone(),
+        bundle_dir: format!("captures/{}/", manifest.bundle_id),
+        app_version: manifest.device.app_version.clone(),
+        #[allow(clippy::cast_possible_truncation)]
+        frame_count: frame_count as u32,
+        frames_pushed: default_result.frames_pushed,
+        fixes_published: default_result.fixes.len() as u64,
+        sights_inserted_total: render.frames.iter().filter(|f| f.sight_emitted).count() as u64,
+        stage_e_rejection_counts: render.rejection_counts.clone(),
+        frames: render
+            .frames
+            .iter()
+            .cloned()
+            .map(|mut f| {
+                // Promote the bundle-relative paths recorded
+                // in `render_one_frame` to session-relative
+                // paths.
+                f.render_path = f
+                    .render_path
+                    .map(|p| format!("captures/{}/{p}", manifest.bundle_id));
+                f.pgm_path = format!("captures/{}/{}", manifest.bundle_id, f.pgm_path);
+                f
+            })
+            .collect(),
+    })
 }
 
 /// Resolve a `BundleManifest` for the run, returning it plus the
@@ -689,6 +911,7 @@ fn run_replay_session(args: &ReplayArgs, session_id: uuid::Uuid) -> anyhow::Resu
         captures = session.ordered_capture_ids.len(),
         "replay: session resolved"
     );
+    let mut capture_reports: Vec<replay_report::CaptureReport> = Vec::new();
     for cap_id in &session.ordered_capture_ids {
         let bundle_dir = session_dir.join("captures").join(cap_id);
         if !bundle_dir.join("bundle.json").exists() {
@@ -701,8 +924,95 @@ fn run_replay_session(args: &ReplayArgs, session_id: uuid::Uuid) -> anyhow::Resu
         info!(capture_id = %cap_id, "replay: starting capture");
         let mut per_capture_args = args.clone();
         per_capture_args.session = None;
+        per_capture_args.all_sessions = false;
         per_capture_args.bundle = Some(bundle_dir);
-        run_replay(&per_capture_args).with_context(|| format!("replay capture {cap_id}"))?;
+        let (capture_report, _manifest) = run_replay_capture(&per_capture_args)
+            .with_context(|| format!("replay capture {cap_id}"))?;
+        if let Some(rep) = capture_report {
+            capture_reports.push(rep);
+        }
+    }
+    if args.render_frames {
+        let report = replay_report::ReplaySessionReport {
+            schema_version: replay_report::SCHEMA_VERSION,
+            session_id: session.session_id.to_string(),
+            session_title: session.title.clone(),
+            generated_unix_ms: chrono::Utc::now().timestamp_millis(),
+            engine_build: replay_report::EngineBuild::current(),
+            captures: capture_reports,
+        };
+        let path = replay_report::write_session_report(&session_dir, &report)
+            .with_context(|| format!("write session report to {}", session_dir.display()))?;
+        info!(report = %path.display(), "replay: session report written");
+    }
+    Ok(())
+}
+
+/// Replay every session under `<corpus>/sessions/`.
+fn run_replay_all_sessions(args: &ReplayArgs) -> anyhow::Result<()> {
+    let corpus = args
+        .corpus
+        .clone()
+        .unwrap_or_else(|| PathBuf::from("./bris-corpus"));
+    let sessions_root = corpus.join("sessions");
+    let entries = fs::read_dir(&sessions_root)
+        .with_context(|| format!("read sessions root {}", sessions_root.display()))?;
+    let mut session_ids: Vec<uuid::Uuid> = Vec::new();
+    for entry in entries {
+        let entry = entry?;
+        if !entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+            continue;
+        }
+        let Some(name) = entry.file_name().to_str().map(str::to_string) else {
+            continue;
+        };
+        if let Ok(id) = uuid::Uuid::parse_str(&name) {
+            if entry.path().join("session.json").exists() {
+                session_ids.push(id);
+            }
+        }
+    }
+    session_ids.sort();
+    info!(
+        count = session_ids.len(),
+        "replay --all-sessions: enumerated sessions"
+    );
+    let mut index_entries: Vec<replay_report::CorpusIndexEntry> = Vec::new();
+    for id in &session_ids {
+        let mut per_session_args = args.clone();
+        per_session_args.all_sessions = false;
+        per_session_args.session = Some(*id);
+        per_session_args.corpus = Some(corpus.clone());
+        if let Err(e) = run_replay_session(&per_session_args, *id) {
+            warn!(session_id = %id, error = ?e, "replay --all-sessions: session failed; continuing");
+            continue;
+        }
+        let session_dir = corpus.join("sessions").join(id.to_string());
+        let report_path = session_dir.join(replay_report::SESSION_REPORT_FILENAME);
+        if args.render_frames && report_path.exists() {
+            let session = SessionManifest::load_from_dir(&session_dir).ok();
+            let bytes = fs::read(&report_path).ok();
+            let parsed: Option<replay_report::ReplaySessionReport> =
+                bytes.and_then(|b| serde_json::from_slice(&b).ok());
+            #[allow(clippy::cast_possible_truncation)]
+            let capture_count = parsed.as_ref().map_or(0, |r| r.captures.len() as u32);
+            index_entries.push(replay_report::CorpusIndexEntry {
+                session_id: id.to_string(),
+                session_title: session.map_or_else(|| id.to_string(), |s| s.title),
+                report_path: format!("sessions/{id}/{}", replay_report::SESSION_REPORT_FILENAME),
+                capture_count,
+            });
+        }
+    }
+    if args.render_frames {
+        let index = replay_report::CorpusIndex {
+            schema_version: replay_report::SCHEMA_VERSION,
+            generated_unix_ms: chrono::Utc::now().timestamp_millis(),
+            sessions: index_entries,
+        };
+        let path = replay_report::write_corpus_index(&corpus, &index)
+            .with_context(|| format!("write corpus index to {}", corpus.display()))?;
+        info!(index = %path.display(), "replay --all-sessions: corpus index written");
     }
     Ok(())
 }
@@ -1052,11 +1362,29 @@ fn run_one_mode(
     let frames_owned: Vec<FramePathPair> = frames.to_vec();
     let engine_feed = engine.clone();
     let mode_label = mode.label().to_string();
+    let render_enabled = args.render_frames && bundle_dir.is_some();
+    let render_state: Option<Arc<std::sync::Mutex<RenderRunOutput>>> = if render_enabled {
+        Some(Arc::new(std::sync::Mutex::new(RenderRunOutput::default())))
+    } else {
+        None
+    };
+    let render_state_feed = render_state.clone();
+    // Owned, capture-relative bundle path used to build the
+    // render+report paths.
+    let bundle_dir_owned = bundle_dir.map(Path::to_path_buf);
+    // Truncated session id for the overlay's bottom-right
+    // label. None when we couldn't read session.json.
+    let session_id_short = manifest
+        .session_id
+        .map(|s| s.to_string().chars().take(8).collect::<String>())
+        .unwrap_or_default();
+    let capture_id_short = manifest.bundle_id.chars().take(8).collect::<String>();
+    let engine_diag_handle = engine.clone();
     let feeder = std::thread::Builder::new()
         .name(format!("bris-replay-feed-{mode_label}"))
         .spawn(move || -> anyhow::Result<u64> {
             let mut pushed = 0u64;
-            for pair in &frames_owned {
+            for (idx, pair) in frames_owned.iter().enumerate() {
                 let s = &pair.sidecar_data;
                 let utc = Utc
                     .timestamp_millis_opt(s.captured_unix_ms)
@@ -1082,10 +1410,46 @@ fn run_one_mode(
                 } else {
                     frame
                 };
+                // Clone the frame buffer up front for the
+                // optional render step. push_frame consumes
+                // the Frame; the render path runs after.
+                let frame_for_render = if render_state_feed.is_some() {
+                    Some(frame.clone())
+                } else {
+                    None
+                };
                 if let Err(e) = engine_feed.push_frame(frame) {
                     warn!(error = ?e, frame = %pair.pgm.display(), "replay: push_frame failed");
-                } else {
-                    pushed += 1;
+                    continue;
+                }
+                pushed += 1;
+                if let (Some(state), Some(frame), Some(bundle_dir)) = (
+                    render_state_feed.as_ref(),
+                    frame_for_render,
+                    bundle_dir_owned.as_deref(),
+                ) {
+                    let diag = engine_diag_handle.diagnostics();
+                    let report = render_one_frame(
+                        &frame,
+                        pair,
+                        idx,
+                        utc,
+                        &diag,
+                        bundle_dir,
+                        &capture_id_short,
+                        &session_id_short,
+                    );
+                    if let Ok(frame_report) = report {
+                        let mut s = state
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner);
+                        for outcome in &frame_report.stage_e_outcomes {
+                            if let replay_report::StageEAttemptReport::Err { error } = outcome {
+                                *s.rejection_counts.entry(error.clone()).or_insert(0) += 1;
+                            }
+                        }
+                        s.frames.push(frame_report);
+                    }
                 }
             }
             Ok(pushed)
@@ -1150,6 +1514,14 @@ fn run_one_mode(
         fixes: collected,
         suppressed: diag.ap_rederive_suppressed_count,
         frames_pushed: pushed,
+        render: render_state.map(|m| {
+            Arc::try_unwrap(m)
+                .map(|m| {
+                    m.into_inner()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                })
+                .unwrap_or_default()
+        }),
     })
 }
 

@@ -7,6 +7,7 @@
 pub mod centroid;
 pub mod centroid_refine;
 pub mod condition;
+pub mod debug_render;
 pub mod frame;
 pub mod fusion;
 pub mod horizon;
@@ -35,6 +36,10 @@ pub use centroid_refine::{
 pub use condition::{
     classify, AstronomicalEvidence, Classification, Condition, ConditionConfig, ImageEvidence,
     TwilightBand,
+};
+pub use debug_render::{
+    render_debug_overlay, CentroidOverlay, HorizonOverlay, OverlayData, StageEOutcomeView,
+    RENDER_MAX_SIDE_PX,
 };
 pub use frame::{rotate_pixels, Frame, FrameError, Intrinsics, IntrinsicsScaleError, Rotation};
 pub use fusion::{fuse_altitudes, FrameMeasurement, FusionConfig, FusionError};
