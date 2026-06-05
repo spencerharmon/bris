@@ -16,6 +16,30 @@
 //!   here.
 //! - Intra-frame, fires in all conditions (Day, Night,
 //!   Twilight).
+//!
+//! # Disabled by default in the streaming engine
+//!
+//! As of the disable-by-default change, the
+//! [`bris_streaming::EngineConfig`] no longer dispatches this
+//! provider in Stage C unless its
+//! `enable_vertical_line_provider` flag is flipped to `true`.
+//! The provider's gravity inference reduces to
+//! `gravity ≈ r_bot - r_top` (image-space endpoint
+//! difference projected through `K⁻¹`); that small-angle
+//! approximation is only valid for *short* lines *centered on
+//! the principal point*. For full-height lines on tilted
+//! cameras — the common hand-held capture geometry — the
+//! inferred gravity is wrong by 20–40°, and the synthesised
+//! horizon is confidently wrong (operator + agent diagnosed
+//! this on the bedroom-moon corpus).
+//!
+//! The module's detector + unit tests remain authoritative
+//! for the short-line / plumb-string regime where the math
+//! *does* hold; the change is purely about whether Stage C
+//! invokes the provider. See `docs/design/ml_gravity.md` for
+//! the planned replacement (an ML-based per-frame gravity
+//! estimator that does not depend on a visible vertical
+//! reference).
 
 // Pedantic casts are pervasive in the Hough detector below
 // (pixel grids are `usize`/`u32`; arithmetic is `f64`).

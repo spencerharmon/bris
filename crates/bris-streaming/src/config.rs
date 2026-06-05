@@ -310,7 +310,35 @@ pub struct EngineConfig {
     /// [`bris_vision::VerticalLineConfig`]. Defaults are
     /// sensible (±20° from vertical, min 50 px line,
     /// 1e-3 rad floor); operator may tune.
+    ///
+    /// These tunables only take effect when
+    /// [`Self::enable_vertical_line_provider`] is `true`. As
+    /// of the disable-by-default change the provider is off
+    /// in Stage C by default; see that field's docs.
     pub vertical_line_provider_config: bris_vision::VerticalLineConfig,
+
+    /// Whether the [`bris_vision::VerticalLineProvider`] is
+    /// dispatched by Stage C. Defaults to `false`.
+    ///
+    /// The provider infers camera-frame gravity from a single
+    /// near-vertical line via the approximation
+    /// `gravity ≈ r_bot - r_top` (image-space endpoint
+    /// difference). That approximation is only valid for
+    /// *short* lines *centered on the principal point*; for
+    /// full-height lines on tilted cameras — the common
+    /// hand-held capture geometry — the inferred gravity is
+    /// wrong by 20–40°, and the synthesised horizon is
+    /// confidently wrong. The operator diagnosed this on the
+    /// bedroom-moon corpus.
+    ///
+    /// The provider stays in the codebase (other consumers
+    /// reference it, the unit tests still exercise it) but is
+    /// off by default in the streaming engine pending the
+    /// ML-gravity provider described in
+    /// `docs/design/ml_gravity.md`. Operators with a true
+    /// plumb-string rig — short string centered in the FOV —
+    /// may set this to `true` to opt back in.
+    pub enable_vertical_line_provider: bool,
 
     /// Configuration for the vanishing-point horizon provider
     /// (`bris_vision::VanishingPointProvider`). The most
@@ -522,6 +550,9 @@ impl EngineConfig {
                 .expect("30 arcsec is a valid Sigma"),
             position_prior_max_age_seconds: 30.0,
             vertical_line_provider_config: bris_vision::VerticalLineConfig::default(),
+            // Disabled by default; see field doc + docs/design/ml_gravity.md
+            // for the gravity-math bug that motivated the change.
+            enable_vertical_line_provider: false,
             vanishing_point_provider_config: bris_vision::VanishingPointConfig::default(),
             horizon_fusion: HorizonFusionConfig::default(),
             store: StoreConfig::default(),
