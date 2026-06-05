@@ -70,7 +70,8 @@ fn git_output(args: &[&str]) -> String {
 /// Horizon record in the per-frame report.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct HorizonReport {
-    /// Short provider label (e.g. `"gradient"`, `"vertical-line"`).
+    /// Short provider label (e.g. `"gradient"`, `"vertical-line"`,
+    /// `"ml-gravity"`).
     pub provider: String,
     /// Source-frame pixel intercept.
     pub intercept_px: f64,
@@ -78,6 +79,11 @@ pub(crate) struct HorizonReport {
     pub slope: f64,
     /// Altitude-σ attributed to the horizon fit (radians).
     pub sigma_rad: f64,
+    /// When `provider == "ml-gravity"`, the 12-char model id
+    /// of the loaded ONNX file (BLAKE3-truncated). Absent on
+    /// other providers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_id: Option<String>,
 }
 
 /// Body centroid record in the per-frame report.
@@ -286,6 +292,7 @@ mod tests {
                         intercept_px: 583.6,
                         slope: 0.0058,
                         sigma_rad: 0.001,
+                        model_id: None,
                     }),
                     body_centroid: Some(BodyCentroidReport {
                         x: 1743.2,

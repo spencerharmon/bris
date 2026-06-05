@@ -480,6 +480,15 @@ struct ReplayArgs {
     /// Override the engine's segmentation-model path.
     #[arg(long)]
     segmentation_model: Option<PathBuf>,
+    /// Enable the ML-gravity horizon provider for this replay.
+    /// Requires `--ml-gravity-model` to point at a heteroscedastic
+    /// ONNX file. See `docs/design/ml_gravity.md`.
+    #[arg(long)]
+    ml_gravity: bool,
+    /// Path to the ML-gravity ONNX model. Implies
+    /// `--ml-gravity` even when that flag is not also passed.
+    #[arg(long)]
+    ml_gravity_model: Option<PathBuf>,
     /// Engine sight/fix store root. Defaults to a temp dir per
     /// run so replays don't pollute the operator's `.bris/`.
     #[arg(long)]
@@ -725,14 +734,21 @@ fn render_one_frame(
     let pgm_rel = path_relative_to(&pair.pgm, bundle_dir);
     let render_rel = path_relative_to(&render_path_abs, bundle_dir);
 
-    let horizon_report = diag
-        .last_horizon_hypothesis
-        .map(|h| replay_report::HorizonReport {
+    let horizon_report = diag.last_horizon_hypothesis.map(|h| {
+        let model_id = match diag.last_horizon_provenance {
+            Some(bris_vision::HorizonProvenance::MlGravity { model_id, .. }) => {
+                Some(model_id.to_string())
+            }
+            _ => None,
+        };
+        replay_report::HorizonReport {
             provider: h.provider.to_string(),
             intercept_px: h.intercept,
             slope: h.slope,
             sigma_rad: h.altitude_sigma_rad,
-        });
+            model_id,
+        }
+    });
     let centroid_report = diag
         .last_body_centroid
         .map(|c| replay_report::BodyCentroidReport {
@@ -1339,6 +1355,14 @@ fn build_engine_config(
         let p = default_segmentation_model_path();
         p.exists().then_some(p)
     });
+    let ml_gravity_path = args.ml_gravity_model.clone().or_else(|| {
+        let p = std::path::PathBuf::from("data/ml-gravity/geocalib-heteroscedastic-v1.onnx");
+        p.exists().then_some(p)
+    });
+    if args.ml_gravity || args.ml_gravity_model.is_some() {
+        cfg.enable_ml_gravity = true;
+    }
+    cfg.ml_gravity_model_path = ml_gravity_path;
     Ok(cfg)
 }
 

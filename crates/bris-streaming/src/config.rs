@@ -340,6 +340,36 @@ pub struct EngineConfig {
     /// may set this to `true` to opt back in.
     pub enable_vertical_line_provider: bool,
 
+    /// Path to the heteroscedastic ML-gravity ONNX model.
+    /// `None` (default) disables the [`bris_vision::MlGravityProvider`]
+    /// dispatch entirely. The provider is *also* gated on
+    /// [`Self::enable_ml_gravity`]; both must be set for
+    /// Stage C to invoke it. See
+    /// `docs/design/ml_gravity.md`.
+    ///
+    /// Even when set, the provider is gated on the `ml-gravity`
+    /// cargo feature (default-off in `bris-vision`); building
+    /// without it makes this field inert.
+    pub ml_gravity_model_path: Option<PathBuf>,
+
+    /// Whether the [`bris_vision::MlGravityProvider`] is
+    /// dispatched by Stage C. Defaults to `false`.
+    ///
+    /// When `true` AND [`Self::ml_gravity_model_path`] is
+    /// `Some(_)` AND the `ml-gravity` cargo feature is on, the
+    /// provider runs *last* in the Stage C dispatch and
+    /// contributes a low-priority hypothesis (geometric
+    /// providers always win on real horizons because their σ
+    /// floor is tighter; the ML provider is the silent winner
+    /// when nothing else fires).
+    pub enable_ml_gravity: bool,
+
+    /// Tunables for the ML-gravity provider (σ floor / ceiling,
+    /// model-path override). Default takes the path from
+    /// [`Self::ml_gravity_model_path`].
+    #[cfg(feature = "ml-gravity")]
+    pub ml_gravity_provider_config: bris_vision::MlGravityConfig,
+
     /// Configuration for the vanishing-point horizon provider
     /// (`bris_vision::VanishingPointProvider`). The most
     /// expensive of the auto-horizon providers; dispatched
@@ -553,6 +583,10 @@ impl EngineConfig {
             // Disabled by default; see field doc + docs/design/ml_gravity.md
             // for the gravity-math bug that motivated the change.
             enable_vertical_line_provider: false,
+            ml_gravity_model_path: None,
+            enable_ml_gravity: false,
+            #[cfg(feature = "ml-gravity")]
+            ml_gravity_provider_config: bris_vision::MlGravityConfig::default(),
             vanishing_point_provider_config: bris_vision::VanishingPointConfig::default(),
             horizon_fusion: HorizonFusionConfig::default(),
             store: StoreConfig::default(),

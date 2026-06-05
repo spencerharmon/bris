@@ -97,6 +97,8 @@ pub(crate) enum HorizonDetector {
     VanishingPoint,
     /// Multi-source fusion of ≥ 2 concordant hypotheses.
     Fused,
+    /// ML-estimated camera-frame gravity provider.
+    MlGravity,
 }
 
 /// Per-frame fusion bookkeeping. Returned to the engine for
@@ -139,6 +141,16 @@ pub(crate) struct VerticalLineDispatch {
     pub used: bool,
 }
 
+/// Per-frame bookkeeping for the ML-gravity provider.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct MlGravityDispatch {
+    #[cfg(feature = "ml-gravity")]
+    pub stats: bris_vision::MlGravityStats,
+    pub invoked: bool,
+    pub hypothesized: bool,
+    pub used: bool,
+}
+
 /// Aggregate per-frame Stage C diagnostics that are not the
 /// horizon outcome itself.
 #[derive(Debug, Clone, Copy, Default)]
@@ -146,6 +158,7 @@ pub(crate) struct StageCStats {
     pub fusion: FusionStats,
     pub vertical_line: VerticalLineDispatch,
     pub vanishing_point: VanishingPointDispatch,
+    pub ml_gravity: MlGravityDispatch,
 }
 
 /// Run Stage C on one frame.
@@ -312,6 +325,8 @@ pub(crate) fn detect(
         }
     }
 
+    run_ml_gravity(&ctx, cfg, &mut hypotheses, &mut stats);
+
     finish(
         &hypotheses,
         &intrinsics,
@@ -365,6 +380,42 @@ fn run_segmentation(
 ) {
 }
 
+#[cfg(feature = "ml-gravity")]
+fn run_ml_gravity(
+    ctx: &HorizonProviderContext<'_>,
+    cfg: &EngineConfig,
+    out: &mut Vec<HorizonHypothesis>,
+    stats: &mut StageCStats,
+) {
+    if !cfg.enable_ml_gravity {
+        return;
+    }
+    if !bris_vision::horizon_providers::ml_gravity::is_loaded() {
+        return;
+    }
+    stats.ml_gravity.invoked = true;
+    let provider = bris_vision::MlGravityProvider::new(cfg.ml_gravity_provider_config.clone());
+    if let Some(hyp) = provider.detect_with_stats(ctx, &mut stats.ml_gravity.stats) {
+        trace!(
+            provider = "ml-gravity",
+            sigma_rad = hyp.line.altitude_sigma.value(),
+            inference_ms = stats.ml_gravity.stats.inference_ms,
+            "Stage C: provider produced hypothesis"
+        );
+        stats.ml_gravity.hypothesized = true;
+        out.push(hyp);
+    }
+}
+
+#[cfg(not(feature = "ml-gravity"))]
+fn run_ml_gravity(
+    _ctx: &HorizonProviderContext<'_>,
+    _cfg: &EngineConfig,
+    _out: &mut Vec<HorizonHypothesis>,
+    _stats: &mut StageCStats,
+) {
+}
+
 fn detector_from_provenance(p: HorizonProvenance) -> HorizonDetector {
     match p {
         HorizonProvenance::Optical(kind) => optical_kind_to_detector(kind),
@@ -372,6 +423,7 @@ fn detector_from_provenance(p: HorizonProvenance) -> HorizonDetector {
         HorizonProvenance::VerticalLine { .. } => HorizonDetector::VerticalLine,
         HorizonProvenance::VanishingPoint { .. } => HorizonDetector::VanishingPoint,
         HorizonProvenance::Fused { .. } => HorizonDetector::Fused,
+        HorizonProvenance::MlGravity { .. } => HorizonDetector::MlGravity,
     }
 }
 
@@ -391,6 +443,9 @@ fn finish(
         }
         if *detector == HorizonDetector::VanishingPoint {
             stats.vanishing_point.used = true;
+        }
+        if *detector == HorizonDetector::MlGravity {
+            stats.ml_gravity.used = true;
         }
     }
     stats.fusion = fusion;
