@@ -816,6 +816,13 @@ private fun defaultEngineConfig(
     // inference is wrong by 20–40° for full-height lines on
     // tilted cameras. See docs/design/ml_gravity.md.
     enableVerticalLineProvider = null,
+    // ML-gravity provider (docs/design/ml_gravity.md). Off in
+    // production captures because the on-device ONNX model
+    // would inflate the APK by ~45 MB; opt in by setting both
+    // fields when the operator wires the model into the
+    // assets/ tree (Phase 7.7d).
+    mlGravityModelPath = null,
+    enableMlGravity = null,
 )
 
 /**
