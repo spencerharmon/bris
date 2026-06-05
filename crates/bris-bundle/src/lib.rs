@@ -887,6 +887,127 @@ pub fn enumerate_frames(dir: &Path) -> Result<Vec<FramePathPair>, BundleError> {
     Ok(pairs)
 }
 
+/// Non-fatal advisories about a bundle's on-disk shape.
+///
+/// Returned by [`validate_intrinsics_against_first_pgm`] so
+/// load-time callers can log them without aborting replay
+/// of bundles produced by older / buggy writers. The Phase
+/// 7.5 follow-up that adds per-frame rotation in sidecars
+/// will let replay recover automatically; until then the
+/// honest answer for an existing on-disk corpus is
+/// "surface the mismatch, keep loading".
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BundleWarning {
+    /// Intrinsics record's `(width, height)` does not match
+    /// the first PGM's `(width, height)`. Almost always a
+    /// rotation bug: the writer emitted sensor-native
+    /// intrinsics next to gravity-rotated frame bytes.
+    IntrinsicsDimensionMismatch {
+        /// Width declared in `bundle.json` `intrinsics.width`.
+        intrinsics_width: u32,
+        /// Height declared in `bundle.json` `intrinsics.height`.
+        intrinsics_height: u32,
+        /// Width of the first PGM file on disk.
+        pgm_width: u32,
+        /// Height of the first PGM file on disk.
+        pgm_height: u32,
+    },
+}
+
+/// Compare the manifest's intrinsics dimensions against the
+/// first PGM on disk and return any mismatches as warnings.
+///
+/// **Warning, not error**, by design: bundles produced before
+/// the Android writer learned to rotate its intrinsics block
+/// to match `FrameAnalyzer`'s rotated bytes ship inconsistent
+/// pairs, and aborting load on every such bundle would break
+/// existing operator workflows that still need to replay
+/// them (acknowledging the math is wrong). New bundles
+/// produced by the fixed writer pass this check cleanly;
+/// callers that want strictness can promote the warning to
+/// an error themselves.
+///
+/// Returns `Ok(vec![])` for a self-consistent bundle and
+/// `Ok(vec![warning, ...])` otherwise. Filesystem and JSON
+/// errors still propagate.
+///
+/// # Errors
+///
+/// Filesystem I/O, missing sidecar, or an unparseable PGM
+/// header.
+pub fn validate_intrinsics_against_first_pgm(
+    manifest: &BundleManifest,
+    bundle_dir: &Path,
+) -> Result<Vec<BundleWarning>, BundleError> {
+    let pairs = enumerate_frames(bundle_dir)?;
+    let Some(first) = pairs.first() else {
+        return Ok(Vec::new());
+    };
+    let (pgm_w, pgm_h) = read_pgm_dimensions(&first.pgm)?;
+    let mut out = Vec::new();
+    if manifest.intrinsics.width != pgm_w || manifest.intrinsics.height != pgm_h {
+        out.push(BundleWarning::IntrinsicsDimensionMismatch {
+            intrinsics_width: manifest.intrinsics.width,
+            intrinsics_height: manifest.intrinsics.height,
+            pgm_width: pgm_w,
+            pgm_height: pgm_h,
+        });
+    }
+    Ok(out)
+}
+
+/// Parse the header of a P5 (binary) PGM and return
+/// `(width, height)`. Skips `#`-prefixed comment lines per
+/// the PGM spec. Returns a [`BundleError::Json`] (re-using
+/// the typed parse error variant for path provenance)
+/// when the file does not start with `P5\n` or has
+/// non-integer dimensions.
+fn read_pgm_dimensions(path: &Path) -> Result<(u32, u32), BundleError> {
+    let bytes = fs::read(path)?;
+    let mk_err = |msg: &str| BundleError::Json {
+        path: path.to_path_buf(),
+        source: serde::de::Error::custom(msg.to_string()),
+    };
+    // We don't decode the pixels — only the header. The header
+    // is ASCII, terminated by whitespace, in the order
+    // magic, width, height, maxval.
+    let mut tokens = Vec::new();
+    let mut i = 0;
+    while i < bytes.len() && tokens.len() < 3 {
+        // Skip whitespace.
+        while i < bytes.len() && bytes[i].is_ascii_whitespace() {
+            i += 1;
+        }
+        if i >= bytes.len() {
+            break;
+        }
+        // Comment line: skip to end of line.
+        if bytes[i] == b'#' {
+            while i < bytes.len() && bytes[i] != b'\n' {
+                i += 1;
+            }
+            continue;
+        }
+        // Read non-whitespace token.
+        let start = i;
+        while i < bytes.len() && !bytes[i].is_ascii_whitespace() {
+            i += 1;
+        }
+        tokens.push(&bytes[start..i]);
+    }
+    if tokens.len() < 3 {
+        return Err(mk_err("truncated PGM header"));
+    }
+    if tokens[0] != b"P5" && tokens[0] != b"P2" {
+        return Err(mk_err("not a PGM (missing P5/P2 magic)"));
+    }
+    let parse = |t: &[u8]| -> Result<u32, BundleError> {
+        let s = std::str::from_utf8(t).map_err(|e| mk_err(&e.to_string()))?;
+        s.parse::<u32>().map_err(|e| mk_err(&e.to_string()))
+    };
+    Ok((parse(tokens[1])?, parse(tokens[2])?))
+}
+
 /// Verify the first-frame BLAKE3 checksum recorded in the
 /// manifest, if any.
 ///
@@ -1356,6 +1477,68 @@ mod tests {
         assert_eq!(entries[0].retention, "debug");
         assert_eq!(entries[2].seq, 2);
         assert_eq!(entries[2].retention, "fix_frame");
+    }
+
+    fn write_pgm(path: &Path, w: u32, h: u32) {
+        // Minimal valid P5 header + width*height bytes of
+        // payload. Pixel content is irrelevant; only the
+        // header is parsed by the validator.
+        let mut buf = format!("P5\n{w} {h}\n255\n").into_bytes();
+        buf.extend(std::iter::repeat_n(0u8, (w * h) as usize));
+        std::fs::write(path, buf).unwrap();
+    }
+
+    #[test]
+    fn validate_intrinsics_consistent_returns_no_warnings() {
+        let dir = tempdir().unwrap();
+        let frames = dir.path().join("frames");
+        std::fs::create_dir_all(&frames).unwrap();
+        write_pgm(&frames.join("000000000000.pgm"), 3024, 4032);
+        write_sidecar(&frames.join("000000000000.json"), 0, 100);
+        let mut m = full_manifest();
+        m.intrinsics.width = 3024;
+        m.intrinsics.height = 4032;
+        let warns = validate_intrinsics_against_first_pgm(&m, dir.path()).unwrap();
+        assert!(warns.is_empty(), "expected no warnings, got {warns:?}");
+    }
+
+    #[test]
+    fn validate_intrinsics_mismatch_yields_warning() {
+        // Classic landscape-cal-vs-portrait-frame bug: the
+        // Android writer shipped sensor-native intrinsics
+        // alongside gravity-rotated frame bytes.
+        let dir = tempdir().unwrap();
+        let frames = dir.path().join("frames");
+        std::fs::create_dir_all(&frames).unwrap();
+        write_pgm(&frames.join("000000000000.pgm"), 3024, 4032);
+        write_sidecar(&frames.join("000000000000.json"), 0, 100);
+        let mut m = full_manifest();
+        m.intrinsics.width = 4032;
+        m.intrinsics.height = 3024;
+        let warns = validate_intrinsics_against_first_pgm(&m, dir.path()).unwrap();
+        assert_eq!(warns.len(), 1);
+        assert_eq!(
+            warns[0],
+            BundleWarning::IntrinsicsDimensionMismatch {
+                intrinsics_width: 4032,
+                intrinsics_height: 3024,
+                pgm_width: 3024,
+                pgm_height: 4032,
+            }
+        );
+    }
+
+    #[test]
+    fn validate_intrinsics_no_frames_returns_no_warnings() {
+        // An empty bundle (Debug OFF, no fix observed) has
+        // nothing to compare against; the validator must
+        // not invent a complaint.
+        let dir = tempdir().unwrap();
+        let frames = dir.path().join("frames");
+        std::fs::create_dir_all(&frames).unwrap();
+        let m = full_manifest();
+        let warns = validate_intrinsics_against_first_pgm(&m, dir.path()).unwrap();
+        assert!(warns.is_empty());
     }
 
     #[test]

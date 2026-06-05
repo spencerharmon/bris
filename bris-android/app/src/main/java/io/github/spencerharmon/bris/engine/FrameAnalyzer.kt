@@ -40,9 +40,15 @@ class FrameAnalyzer(
     /**
      * Per-frame callback fired after the analyzer has
      * constructed the [`FfiFrame`] and pushed it to the
-     * engine. `null` when no active capture is recording.
+     * engine. Second arg is the rotation (degrees, CW,
+     * normalised to 0/90/180/270) the analyzer applied to
+     * the sensor-native pixels to get the gravity-up
+     * `FfiFrame`; the recorder stashes the first frame's
+     * rotation so `bundle.json` can declare intrinsics that
+     * match the on-disk PGM bytes. `null` when no active
+     * capture is recording.
      */
-    private val captureFrameTap: ((FfiFrame) -> Unit)? = null,
+    private val captureFrameTap: ((FfiFrame, Int) -> Unit)? = null,
     /**
      * Returns the **current** sensor analog conversion gain
      * in electrons per ADU for the active camera, scaled to
@@ -96,7 +102,7 @@ class FrameAnalyzer(
             ) ?: return
             engine.pushFrame(ffiFrame)
             frameCount.incrementAndGet()
-            captureFrameTap?.invoke(ffiFrame)
+            captureFrameTap?.invoke(ffiFrame, ((rotationDeg % 360) + 360) % 360)
         } catch (t: Throwable) {
             // CameraX runs the analyzer on a background thread.
             // An uncaught exception here would propagate up
@@ -204,43 +210,21 @@ private fun Image.toFfiFrame(
         else -> Triple(w, h, sensor) // unreachable in practice
     }
 
-    // Rotate intrinsics to match. cx/cy/fx/fy are defined in
-    // sensor coords; when we rotate the pixel grid we must
-    // rotate the principal point and swap (fx, fy) for 90/270.
-    // Distortion coefficients k1/k2/k3/p1/p2 are radially
-    // symmetric (around the principal point) so they don't
-    // change under a frame-rotation; p1/p2 are tangential and
-    // *do* rotate, but for the small values bris's calibration
-    // produces (<1e-3 typical), the rotation is a second-order
-    // correction we can defer until the calibration path itself
-    // becomes rotation-aware (separate Phase-2 follow-up).
-    val rotatedIntrinsics = when (rot) {
-        0 -> intrinsics
-        180 -> FfiIntrinsics(
-            fx = intrinsics.fx, fy = intrinsics.fy,
-            cx = (w - 1).toDouble() - intrinsics.cx,
-            cy = (h - 1).toDouble() - intrinsics.cy,
-            k1 = intrinsics.k1, k2 = intrinsics.k2, k3 = intrinsics.k3,
-            p1 = intrinsics.p1, p2 = intrinsics.p2,
-        )
-        90 -> FfiIntrinsics(
-            // 90° CW: (x,y) -> (h-1-y, x). Swap fx/fy, remap cx/cy.
-            fx = intrinsics.fy, fy = intrinsics.fx,
-            cx = (h - 1).toDouble() - intrinsics.cy,
-            cy = intrinsics.cx,
-            k1 = intrinsics.k1, k2 = intrinsics.k2, k3 = intrinsics.k3,
-            p1 = intrinsics.p1, p2 = intrinsics.p2,
-        )
-        270 -> FfiIntrinsics(
-            // 270° CW: (x,y) -> (y, w-1-x). Swap fx/fy.
-            fx = intrinsics.fy, fy = intrinsics.fx,
-            cx = intrinsics.cy,
-            cy = (w - 1).toDouble() - intrinsics.cx,
-            k1 = intrinsics.k1, k2 = intrinsics.k2, k3 = intrinsics.k3,
-            p1 = intrinsics.p1, p2 = intrinsics.p2,
-        )
-        else -> intrinsics
-    }
+    // Rotate intrinsics to match. Math lives in
+    // `rotateIntrinsicsForFrameRotation` so DebugBundleWriter
+    // can apply the same transform without duplicating it.
+    val rotIntr = rotateIntrinsicsForFrameRotation(
+        fx = intrinsics.fx, fy = intrinsics.fy,
+        cx = intrinsics.cx, cy = intrinsics.cy,
+        w = w, h = h,
+        rotationDeg = rot,
+    )
+    val rotatedIntrinsics = FfiIntrinsics(
+        fx = rotIntr.fx, fy = rotIntr.fy,
+        cx = rotIntr.cx, cy = rotIntr.cy,
+        k1 = intrinsics.k1, k2 = intrinsics.k2, k3 = intrinsics.k3,
+        p1 = intrinsics.p1, p2 = intrinsics.p2,
+    )
 
     return FfiFrame(
         width = outW.toUInt(),

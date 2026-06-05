@@ -126,17 +126,35 @@ class CaptureRecorder(
     private var captureStartedAtMs: Long = 0L
     private var frameWriter: CaptureFrameWriter? = null
     private var captureDir: java.io.File? = null
+    /**
+     * Rotation (CW degrees) the analyzer applied to the
+     * first frame of the current capture, or `null` if no
+     * frame has been observed yet. Reset at `start()`,
+     * stamped into `bundle.json` at `finalize` so the
+     * intrinsics record matches the rotated PGM bytes.
+     */
+    private var firstFrameRotationDeg: Int? = null
 
     /**
      * Per-analyzer-frame tap. LiveScreen wires this as
      * `FrameAnalyzer.captureFrameTap` so every frame seen
      * during Start→Stop lands in the capture directory's
      * `frames/` — BUT only when Debug mode is ON. With
-     * Debug OFF, the tap is a no-op; fix-frames are still
-     * persisted by `finalize` pulling from the engine ring
-     * buffer.
+     * Debug OFF, the tap is a no-op for the write path;
+     * fix-frames are still persisted by `finalize` pulling
+     * from the engine ring buffer.
+     *
+     * Second arg is the rotation (CW degrees) the analyzer
+     * applied to the sensor-native pixels. Always recorded
+     * for the first frame of the session (regardless of
+     * Debug mode) so `bundle.json`'s intrinsics block can
+     * be rotated to match what landed on disk. See
+     * `DebugBundleWriter.Inputs.sourceRotationDeg`.
      */
-    fun onAnalyzerFrame(frame: uniffi.bris_ffi.FfiFrame) {
+    fun onAnalyzerFrame(frame: uniffi.bris_ffi.FfiFrame, appliedRotationDeg: Int) {
+        if (firstFrameRotationDeg == null) {
+            firstFrameRotationDeg = ((appliedRotationDeg % 360) + 360) % 360
+        }
         if (!debugModeProvider()) return
         val writer = frameWriter ?: return
         try {
@@ -172,6 +190,7 @@ class CaptureRecorder(
         bestVerdict = FixVerdict.RED
         pbrisLines.clear()
         sustainedGreenStartMs = null
+        firstFrameRotationDeg = null
 
         // Open the streaming frame writer for this capture.
         // captureDirProvider == null → legacy mode, no
@@ -362,6 +381,9 @@ class CaptureRecorder(
                 frameWriter = null
                 val inputs = bundleInputsProvider?.invoke()
                 if (inputs != null) {
+                    val rotated = firstFrameRotationDeg?.let { rot ->
+                        inputs.copy(sourceRotationDeg = rot)
+                    } ?: inputs
                     val frameCount = writer.frameCount()
                     val startedMs = writer.startedUnixMs() ?: captureStartedAtMs
                     val endedMs = writer.endedUnixMs() ?: System.currentTimeMillis()
@@ -377,7 +399,7 @@ class CaptureRecorder(
                         bundleDir = dir,
                         bundleId = captureId,
                         snapshot = snap,
-                        inputs = inputs,
+                        inputs = rotated,
                     )
                 }
             }

@@ -458,7 +458,7 @@ private fun CameraSurface(
     persistedIntrinsics: CalibrationStore.PersistedIntrinsics?,
     lensId: String,
     captureSize: android.util.Size,
-    captureFrameTap: ((uniffi.bris_ffi.FfiFrame) -> Unit)? = null,
+    captureFrameTap: ((uniffi.bris_ffi.FfiFrame, Int) -> Unit)? = null,
 ) {
     val context = LocalContext.current
     val previewView = remember(context) { PreviewView(context) }
