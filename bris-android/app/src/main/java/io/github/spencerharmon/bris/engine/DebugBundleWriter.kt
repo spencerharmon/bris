@@ -103,7 +103,7 @@ object DebugBundleWriter {
         /**
          * Rotation (CW degrees) the on-device capture path
          * applied to the sensor-native pixels before they
-         * landed in `frames/*.pgm`. Used to rotate the
+         * landed in the `frames/` directory's PGMs. Used to rotate the
          * intrinsics block so `bundle.json`'s
          * `intrinsics.{width,height,fx,fy,cx,cy}` describe
          * the bytes on disk, not the sensor-native
