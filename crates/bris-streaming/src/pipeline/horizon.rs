@@ -217,63 +217,73 @@ pub(crate) fn detect(
     let mut stats = StageCStats::default();
 
     if day_first {
-        run_provider(&GradientProvider { cfg }, &ctx, &mut hypotheses);
-        if best_below(&hypotheses, early_term) {
-            return finish(
-                &hypotheses,
-                &intrinsics,
-                frame.width(),
-                cfg,
-                analyzed_size,
-                stats,
-            );
+        if cfg.horizon_provider_set.gradient {
+            run_provider(&GradientProvider { cfg }, &ctx, &mut hypotheses);
+            if best_below(&hypotheses, early_term) {
+                return finish(
+                    &hypotheses,
+                    &intrinsics,
+                    frame.width(),
+                    cfg,
+                    analyzed_size,
+                    stats,
+                );
+            }
         }
-        run_provider(&SkyRegionProvider { cfg }, &ctx, &mut hypotheses);
-        if best_below(&hypotheses, early_term) {
-            return finish(
-                &hypotheses,
-                &intrinsics,
-                frame.width(),
-                cfg,
-                analyzed_size,
-                stats,
-            );
+        if cfg.horizon_provider_set.sky_region {
+            run_provider(&SkyRegionProvider { cfg }, &ctx, &mut hypotheses);
+            if best_below(&hypotheses, early_term) {
+                return finish(
+                    &hypotheses,
+                    &intrinsics,
+                    frame.width(),
+                    cfg,
+                    analyzed_size,
+                    stats,
+                );
+            }
         }
     }
     if night_first {
-        run_provider(&NightProvider { cfg }, &ctx, &mut hypotheses);
-        if best_below(&hypotheses, early_term) {
-            return finish(
-                &hypotheses,
-                &intrinsics,
-                frame.width(),
-                cfg,
-                analyzed_size,
-                stats,
-            );
+        if cfg.horizon_provider_set.night {
+            run_provider(&NightProvider { cfg }, &ctx, &mut hypotheses);
+            if best_below(&hypotheses, early_term) {
+                return finish(
+                    &hypotheses,
+                    &intrinsics,
+                    frame.width(),
+                    cfg,
+                    analyzed_size,
+                    stats,
+                );
+            }
         }
-        run_provider(&NightTexturedProvider { cfg }, &ctx, &mut hypotheses);
-        if best_below(&hypotheses, early_term) {
-            return finish(
-                &hypotheses,
-                &intrinsics,
-                frame.width(),
-                cfg,
-                analyzed_size,
-                stats,
-            );
+        if cfg.horizon_provider_set.night_textured {
+            run_provider(&NightTexturedProvider { cfg }, &ctx, &mut hypotheses);
+            if best_below(&hypotheses, early_term) {
+                return finish(
+                    &hypotheses,
+                    &intrinsics,
+                    frame.width(),
+                    cfg,
+                    analyzed_size,
+                    stats,
+                );
+            }
         }
     }
-    run_segmentation(&ctx, cfg, &mut hypotheses);
-    if best_below(&hypotheses, early_term) {
-        return finish(
-            &hypotheses,
-            &intrinsics,
-            frame.width(),
-            cfg,
-            analyzed_size,
-            stats,
-        );
+    if cfg.horizon_provider_set.segmentation {
+        run_segmentation(&ctx, cfg, &mut hypotheses);
+        if best_below(&hypotheses, early_term) {
+            return finish(
+                &hypotheses,
+                &intrinsics,
+                frame.width(),
+                cfg,
+                analyzed_size,
+                stats,
+            );
+        }
     }
 
     // Vertical-line provider: independent of body candidates.
@@ -283,7 +293,7 @@ pub(crate) fn detect(
     // principal-point-centered lines; the streaming engine sees
     // full-height lines on tilted cameras and the inferred
     // gravity is wrong by 20–40°).
-    if cfg.enable_vertical_line_provider {
+    if cfg.enable_vertical_line_provider && cfg.horizon_provider_set.vertical_line {
         stats.vertical_line.invoked = true;
         let provider = bris_vision::VerticalLineProvider {
             config: cfg.vertical_line_provider_config,
@@ -310,7 +320,7 @@ pub(crate) fn detect(
     }
 
     // Vanishing-point provider (most expensive).
-    {
+    if cfg.horizon_provider_set.vanishing_point {
         stats.vanishing_point.invoked = true;
         let provider = bris_vision::VanishingPointProvider {
             config: cfg.vanishing_point_provider_config,
@@ -388,6 +398,9 @@ fn run_ml_gravity(
     stats: &mut StageCStats,
 ) {
     if !cfg.enable_ml_gravity {
+        return;
+    }
+    if !cfg.horizon_provider_set.ml_gravity {
         return;
     }
     if !bris_vision::horizon_providers::ml_gravity::is_loaded() {
@@ -508,6 +521,19 @@ pub(crate) fn merge_reflection_pair(
     cfg: &EngineConfig,
 ) -> ReflectionPairMerge {
     let mut stats = bris_vision::ReflectionPairStats::default();
+    if !cfg.horizon_provider_set.reflection_pair {
+        let fusion = FusionStats {
+            singleton: matches!(prev, HorizonStageOutcome::Detected { .. }),
+            ..FusionStats::default()
+        };
+        return ReflectionPairMerge {
+            outcome: prev,
+            stats,
+            hypothesized: false,
+            used: false,
+            fusion,
+        };
+    }
     let provider = bris_vision::ReflectionPairProvider::default();
     let Some(hyp) = provider.detect_with_stats(ctx, &mut stats) else {
         let fusion = FusionStats {

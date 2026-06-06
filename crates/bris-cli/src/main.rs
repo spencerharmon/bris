@@ -489,6 +489,16 @@ struct ReplayArgs {
     /// `--ml-gravity` even when that flag is not also passed.
     #[arg(long)]
     ml_gravity_model: Option<PathBuf>,
+    /// Comma-separated subset of horizon providers to dispatch.
+    /// Names: gradient, sky-region, night, night-textured,
+    /// segmentation, reflection-pair, vertical-line,
+    /// vanishing-point, ml-gravity. Default: all (preserves
+    /// the current dispatch). Use `--horizon-providers
+    /// ml-gravity` to inspect a single provider's hypothesis
+    /// in the replay report without interference from the
+    /// others winning Stage C fusion.
+    #[arg(long, value_delimiter = ',')]
+    horizon_providers: Option<Vec<String>>,
     /// Engine sight/fix store root. Defaults to a temp dir per
     /// run so replays don't pollute the operator's `.bris/`.
     #[arg(long)]
@@ -1363,7 +1373,43 @@ fn build_engine_config(
         cfg.enable_ml_gravity = true;
     }
     cfg.ml_gravity_model_path = ml_gravity_path;
+    if let Some(names) = args.horizon_providers.as_ref() {
+        cfg.horizon_provider_set = parse_horizon_provider_set(names).map_err(anyhow::Error::msg)?;
+    }
     Ok(cfg)
+}
+
+/// Parse a list of provider names (`gradient`, `night`, ...)
+/// into a [`HorizonProviderSet`] with only those entries on.
+/// Unknown names are rejected; an empty list is rejected.
+fn parse_horizon_provider_set(
+    names: &[String],
+) -> Result<bris_streaming::HorizonProviderSet, String> {
+    let mut set = bris_streaming::HorizonProviderSet::none();
+    let mut any = false;
+    for raw in names {
+        let name = raw.trim().to_ascii_lowercase();
+        if name.is_empty() {
+            continue;
+        }
+        match name.as_str() {
+            "gradient" => set.gradient = true,
+            "sky-region" | "sky_region" | "skyregion" => set.sky_region = true,
+            "night" | "night-gradient" => set.night = true,
+            "night-textured" | "night_textured" => set.night_textured = true,
+            "segmentation" => set.segmentation = true,
+            "reflection-pair" | "reflection_pair" => set.reflection_pair = true,
+            "vertical-line" | "vertical_line" => set.vertical_line = true,
+            "vanishing-point" | "vanishing_point" => set.vanishing_point = true,
+            "ml-gravity" | "ml_gravity" => set.ml_gravity = true,
+            other => return Err(format!("unknown horizon provider name: {other}")),
+        }
+        any = true;
+    }
+    if !any {
+        return Err("--horizon-providers must list at least one provider".into());
+    }
+    Ok(set)
 }
 
 #[allow(clippy::too_many_lines)]
