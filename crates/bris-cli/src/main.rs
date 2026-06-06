@@ -499,6 +499,20 @@ struct ReplayArgs {
     /// others winning Stage C fusion.
     #[arg(long, value_delimiter = ',')]
     horizon_providers: Option<Vec<String>>,
+    /// Override publication-gate `max_position_sigma_nm`
+    /// (default 50.0). Use `inf` to disable; large values
+    /// permit a 'rough fix at honest σ' diagnostic on
+    /// adversarial corpora.
+    #[arg(long)]
+    max_position_sigma_nm: Option<f64>,
+    /// Override publication-gate `min_azimuth_spread_rad`
+    /// (default 30° = 0.524 rad). 0 disables.
+    #[arg(long)]
+    min_azimuth_spread_rad: Option<f64>,
+    /// Override publication-gate `max_ellipse_axis_ratio`
+    /// (default 10.0). `inf` disables.
+    #[arg(long)]
+    max_ellipse_axis_ratio: Option<f64>,
     /// Engine sight/fix store root. Defaults to a temp dir per
     /// run so replays don't pollute the operator's `.bris/`.
     #[arg(long)]
@@ -1375,6 +1389,15 @@ fn build_engine_config(
     cfg.ml_gravity_model_path = ml_gravity_path;
     if let Some(names) = args.horizon_providers.as_ref() {
         cfg.horizon_provider_set = parse_horizon_provider_set(names).map_err(anyhow::Error::msg)?;
+    }
+    if let Some(v) = args.max_position_sigma_nm {
+        cfg.publication_gate.max_position_sigma_nm = v;
+    }
+    if let Some(v) = args.min_azimuth_spread_rad {
+        cfg.publication_gate.min_azimuth_spread_rad = v;
+    }
+    if let Some(v) = args.max_ellipse_axis_ratio {
+        cfg.publication_gate.max_ellipse_axis_ratio = v;
     }
     Ok(cfg)
 }
