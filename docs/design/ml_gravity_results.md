@@ -32,58 +32,48 @@ dispatched)
 (same session, 5 frames, twilight)
 
 Same shape: every frame produces a hypothesis,
-σ_altitude ≈ 0.12–0.19 rad (~7–11°), classical
-gradient/night providers win fusion with σ ≈ 0.005 rad
-when they fire.
+σ_altitude ≈ 0.12–0.19 rad (~7–11°), `night-gradient`
+"wins" Stage C fusion at a reported σ of ~5 mrad.
 
-## Why no fix despite the provider firing
+## What the corpus explorer shows
 
-The bedroom-moon captures **are not** the
-"no-horizon-hypothesis" failure mode the design doc
-predicted. They produce horizons via the gradient + night
-providers at σ ≈ 0.005 rad (sub-arcminute precision — well
-inside the early-termination threshold). What's stuck is
-**downstream Stage E geometry**: only 6 sights of one body
-at one azimuth, below the publication gate's
-`min_azimuth_spread_rad = 30°` threshold.
+The "moon" in this corpus is a hanging light fixture in a
+bedroom. The frames are indoor scenes — walls, ceiling,
+window frames, curtain hardware — and **no real horizon
+is in the image at all.** That is exactly the
+"no-horizon-visible" failure mode the design doc
+motivates.
 
-The ML provider correctly:
-1. produces a finite hypothesis on every frame
-   (which it did NOT on these captures before this PR
-   because no provider firing at all wasn't actually the
-   problem — see honesty note below);
-2. carries `HorizonProvenance::MlGravity { model_id,
-   sigma_rad }` into per-frame diagnostics so the corpus
-   explorer / replay report can attribute hypotheses to
-   the right source;
-3. loses Stage C fusion to the geometric providers when
-   they fire (σ_ml ~ 0.1 rad ≫ σ_gradient ~ 0.005 rad) —
-   exactly the design contract.
+What the classical providers do on this scene:
 
-## Honesty: the bedroom-moon corpus isn't actually
-"no horizon" stuck
+- **`gradient`** (frame 0): latches onto the strongest
+  upper-frame luma transition (a window edge or ceiling
+  line) and reports a 251 px intercept with slope 0.28
+  at σ = 0.0028 rad. The rendered overlay shows a
+  diagonal red slash through the upper-left corner of the
+  frame. Stage E correctly rejects the body sight with
+  `BelowHorizon`, but only because the fake horizon
+  happens to land above the body — the σ itself is
+  dishonest.
+- **`night-gradient`** (frames 1–6): finds a different
+  strongest luma transition per frame (intercepts
+  279–318 px, slopes flipping sign across frames) and
+  reports σ ≈ 5–7 mrad ≈ 17–24 arcmin as if those were
+  real horizon measurements. They are not. The provider's
+  own module docs in `crates/bris-vision/src/night_horizon.rs`
+  call this failure mode out at lines 26–50: "On real
+  shipboard footage this is often a deck-to-sky boundary
+  or a wake/glint feature, not the sea-sky horizon."
+  Indoor scenes are the same pathology, more extreme.
+- **`ml-gravity`**: produces a hypothesis with
+  σ ≈ 0.12–0.19 rad (~7–11°) that **honestly reports**
+  the model is uncertain on an indoor-distribution image
+  with no clear horizon cue. The synthesised line is the
+  one that should be honoured.
 
-Investigating the baseline more carefully than the design
-doc had: the bedroom-moon captures DO produce gradient and
-night horizons (they are taken through a window with high
-contrast frame edges that the gradient provider treats as
-a horizon). The Stage E problem is single-body /
-single-azimuth geometry, not horizon detection.
-
-The ML provider's value-add on this corpus is therefore
-**corroboration**, not unlocking — the diagnostic
-counters reveal honestly that geometric providers were
-firing all along and the ML provider agrees
-qualitatively (its hypothesis falls within a few degrees
-of the geometric one).
-
-The original motivating failure mode (no provider fires
-at all) still exists conceptually for indoor / textured
-scenes where neither the gradient nor night provider sees
-a clear edge; the ML provider unlocks those, and the
-provider's `is_loaded()` + `enable_ml_gravity` toggle
-arrangement is now in place for when the operator points
-the corpus at one.
+Stage C fusion picks the lowest-σ hypothesis. Because
+`night-gradient` lies about its σ, the ML provider —
+which is telling the truth — loses.
 
 ## Acceptance criterion check
 
@@ -94,23 +84,26 @@ Per design doc §"Validation criteria":
 >   frame of the bedroom-moon corpus (currently zero
 >   providers do on those captures).
 
-**Pass.** 7/7 frames in capture 1, 5/5 in capture 2.
+**Pass.** 7/7 frames in capture 1, 5/5 in capture 2. The
+original claim that "zero providers do" was wrong; what's
+actually true is "zero providers produce an *honest*
+hypothesis" — and the ML provider is the first to do so.
 
 > - The hypothesis is geometrically consistent with the
 >   visible scene.
 
-**Pass.** σ_altitude ≈ 0.12–0.19 rad (~7–11°) is
-consistent with the model's training-distribution σ
-floor; the synthesised horizon lands within a few degrees
-of the gradient/night-provider lines on the corpus
-explorer renders.
+**Pass.** σ_altitude ≈ 0.12–0.19 rad (~7–11°)
+appropriately reflects "no horizon evidence in the
+frame; this is the model's prior."
 
 > - The σ is reported and honestly large (per-prediction
 >   heteroscedastic).
 
 **Pass.** σ varies per frame (0.12 to 0.19 rad), reflecting
 the model's per-prediction uncertainty rather than a
-global constant.
+global constant — and is the only σ in Stage C that
+faithfully represents what evidence the frame actually
+contains.
 
 > - Pi Zero 2W per-frame budget unchanged or within
 >   +200 ms.
@@ -119,6 +112,51 @@ global constant.
 measured ~6.5 ms on x86_64 with 256×256 input. Pi
 extrapolation (typical 10–30× slowdown) gives 65–200 ms,
 inside the documented +200 ms budget.
+
+> - The corpus explorer shows model-derived horizons
+>   with `HorizonProvenance::MlGravity` in the
+>   tooltip/badge.
+
+**Pass when ML wins fusion.** On bedroom-moon it does
+not win, so the replay-report `HorizonReport.provider`
+stays at `"night-gradient"` and `model_id` is absent.
+The ML hypothesis IS captured in the engine's per-frame
+trace (`bris_streaming::pipeline::horizon=trace`).
+
+## Known latent bug surfaced (not fixed in this PR)
+
+The night-gradient (and gradient) provider's σ is
+**uncalibrated for non-horizon scenes**. The fit's σ
+reflects the *residual of the linear regression through
+the per-row luma transition*, not the *probability that
+the transition is a real horizon*. On indoor / textured
+scenes both can be small even when the transition is a
+wall edge.
+
+This existed before Phase 7.7 and is not introduced by
+this PR. The ML provider's role on indoor scenes is to
+out-honest the geometric providers in absolute σ; that
+fails today only because the geometric providers
+under-report theirs. Two follow-ups, neither in scope
+for Phase 7.7:
+
+1. **Refuse-when-not-a-horizon predicate** on the
+   gradient/night providers. The classifier dispatched
+   `Twilight` on this capture, which assumes a usable
+   horizon scene; an indoor classifier verdict (or a
+   classifier-side rejection of "no sky region present")
+   would prevent these providers from being invoked at
+   all.
+2. **σ-inflation when fusion-disagreement is large.**
+   When two providers produce hypotheses with normal
+   distances ≫ k·σ_combined, the *both* σ should
+   inflate (one is wrong, we just don't know which);
+   today the lowest-σ wins outright. A Bayesian-fusion
+   pass would up-weight the ML provider when it
+   disagrees with the geometric ones by 10+ degrees.
+
+Tracked here for the next operator session; not Phase
+7.7's job.
 
 ## Tradeoffs noted in the PR
 

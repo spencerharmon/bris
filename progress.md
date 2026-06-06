@@ -45,9 +45,17 @@ optional field.
 
 Bedroom-moon corpus smoke: provider fires on 12/12 frames
 across the two captures, inference ~6 ms on x86_64,
-hypothesis σ ~0.12-0.19 rad (~7-11°), correctly loses Stage
-C fusion to the gradient/night providers when they fire at
-σ ~0.005 rad. Full results in
+hypothesis σ ~0.12-0.19 rad (~7-11°). The ML provider
+produces the only σ-honest hypothesis on these indoor
+captures; gradient + night-gradient providers latch onto
+window / ceiling edges and report σ ~5 mrad as if they
+had measured a real sea/sky boundary, winning Stage C
+fusion against the truthful ML hypothesis. Surfaces a
+pre-existing latent bug in the classical providers'
+σ-honesty on non-horizon scenes; the Phase 7.7 PR
+documents two follow-ups (refuse-when-not-a-horizon
+predicate + fusion-disagreement σ-inflation) but does
+not fix them. Full results in
 `docs/design/ml_gravity_results.md`.
 
 Phase 7.7c (IMU coexistence), 7.7d (marine fine-tune), 7.7e
