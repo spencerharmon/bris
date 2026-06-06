@@ -163,6 +163,34 @@ pub struct EngineDiagnostics {
     /// classification gates.
     pub vanishing_point_rejected_no_cluster: u64,
 
+    /// Number of frames where the ML-gravity provider was
+    /// dispatched (`enable_ml_gravity = true` AND the model
+    /// was loaded).
+    pub ml_gravity_invoked: u64,
+    /// Frames where the provider produced a finite hypothesis.
+    pub ml_gravity_hypothesized: u64,
+    /// Frames where the provider's hypothesis won fusion.
+    pub ml_gravity_used: u64,
+    /// Frames where the IMU and ML predictions corroborated
+    /// (Phase 7.7c; remains zero until IMU × ML wiring lands).
+    pub ml_gravity_corroborated: u64,
+    /// Frames where the IMU and ML predictions disagreed
+    /// outside the configured k·σ threshold (Phase 7.7c).
+    pub ml_gravity_imu_disagreement: u64,
+    /// Frames where the model returned non-finite outputs.
+    pub ml_gravity_nan_outputs: u64,
+    /// Frames where preprocessing failed.
+    pub ml_gravity_preprocess_failed: u64,
+    /// True iff the engine was configured with
+    /// [`crate::EngineConfig::enable_ml_gravity = true`] but
+    /// `load_model` failed at startup (file missing, checksum
+    /// mismatch, convention self-test failed).
+    pub ml_gravity_load_failed: bool,
+    /// Most-recent ML-gravity inference time in milliseconds.
+    /// Reset per frame in which the provider runs; remains at
+    /// the last-observed value otherwise.
+    pub ml_gravity_inference_ms_last: f64,
+
     /// Highest cluster size produced by the horizon-fusion
     /// layer across the session.
     pub horizon_fusion_cluster_size_max: usize,

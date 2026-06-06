@@ -339,6 +339,17 @@ pub struct FfiEngineConfig {
     /// a true plumb-string rig); `Some(false)` is explicit
     /// off.
     pub enable_vertical_line_provider: Option<bool>,
+
+    /// Path to the heteroscedastic ML-gravity ONNX model. See
+    /// [`bris_streaming::EngineConfig::ml_gravity_model_path`].
+    /// `None` (default) inherits the core default of "no
+    /// model". An empty string is rejected.
+    pub ml_gravity_model_path: Option<String>,
+
+    /// Whether the ML-gravity provider is dispatched by Stage
+    /// C. `None` inherits the core default (`false`). See
+    /// [`bris_streaming::EngineConfig::enable_ml_gravity`].
+    pub enable_ml_gravity: Option<bool>,
 }
 
 impl FfiEngineConfig {
@@ -403,6 +414,17 @@ impl FfiEngineConfig {
         }
         if let Some(enable) = self.enable_vertical_line_provider {
             cfg.enable_vertical_line_provider = enable;
+        }
+        if let Some(path) = self.ml_gravity_model_path {
+            if path.is_empty() {
+                return Err(FfiError::InvalidArgument {
+                    detail: "ml_gravity_model_path must not be empty".into(),
+                });
+            }
+            cfg.ml_gravity_model_path = Some(path.into());
+        }
+        if let Some(enable) = self.enable_ml_gravity {
+            cfg.enable_ml_gravity = enable;
         }
         Ok(cfg)
     }
@@ -1944,6 +1966,8 @@ mod kinematics_overlay_tests {
             assumed_max_speed_kn: None,
             store_data_root: None,
             enable_vertical_line_provider: None,
+            ml_gravity_model_path: None,
+            enable_ml_gravity: None,
         }
     }
 

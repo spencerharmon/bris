@@ -75,8 +75,8 @@ mod stage_d;
 mod stage_e;
 
 pub(crate) use horizon::{
-    merge_reflection_pair, FusionStats, HorizonStageOutcome, ReflectionPairMerge,
-    VanishingPointDispatch,
+    merge_reflection_pair, FusionStats, HorizonStageOutcome, MlGravityDispatch,
+    ReflectionPairMerge, VanishingPointDispatch,
 };
 pub(crate) use hysteresis::ClassifierHysteresis;
 pub(crate) use queue::{FrameId, Storage};
@@ -192,6 +192,15 @@ pub(crate) struct StageOutcome {
     /// Vanishing-point provider dispatch bookkeeping for this
     /// frame.
     pub vanishing_point_dispatch: VanishingPointDispatch,
+    /// ML-gravity provider dispatch bookkeeping for this frame.
+    pub ml_gravity_dispatch: MlGravityDispatch,
+    /// Per-frame NaN counter from the ML-gravity provider.
+    pub ml_gravity_nan_outputs: u64,
+    /// Per-frame preprocess-failure counter from the ML-gravity
+    /// provider.
+    pub ml_gravity_preprocess_failed: u64,
+    /// ML-gravity inference wall-clock for this frame (ms).
+    pub ml_gravity_inference_ms: f64,
     /// Fusion-layer per-frame stats. Folded into engine
     /// diagnostics so operators can see how often providers
     /// agree / disagree.
@@ -365,8 +374,37 @@ pub(crate) fn process_frame(
         vertical_line_hypothesized: stage_c_stats.vertical_line.hypothesized,
         vertical_line_used: stage_c_stats.vertical_line.used,
         vanishing_point_dispatch: stage_c_stats.vanishing_point,
+        ml_gravity_dispatch: stage_c_stats.ml_gravity,
+        ml_gravity_nan_outputs: ml_gravity_nan_outputs_value(&stage_c_stats),
+        ml_gravity_preprocess_failed: ml_gravity_preprocess_failed_value(&stage_c_stats),
+        ml_gravity_inference_ms: ml_gravity_inference_ms_value(&stage_c_stats),
         fusion_stats: stage_c_stats.fusion,
     }
+}
+
+#[cfg(feature = "ml-gravity")]
+fn ml_gravity_nan_outputs_value(s: &horizon::StageCStats) -> u64 {
+    s.ml_gravity.stats.nan_outputs
+}
+#[cfg(not(feature = "ml-gravity"))]
+fn ml_gravity_nan_outputs_value(_: &horizon::StageCStats) -> u64 {
+    0
+}
+#[cfg(feature = "ml-gravity")]
+fn ml_gravity_preprocess_failed_value(s: &horizon::StageCStats) -> u64 {
+    s.ml_gravity.stats.preprocess_failed
+}
+#[cfg(not(feature = "ml-gravity"))]
+fn ml_gravity_preprocess_failed_value(_: &horizon::StageCStats) -> u64 {
+    0
+}
+#[cfg(feature = "ml-gravity")]
+fn ml_gravity_inference_ms_value(s: &horizon::StageCStats) -> f64 {
+    s.ml_gravity.stats.inference_ms
+}
+#[cfg(not(feature = "ml-gravity"))]
+fn ml_gravity_inference_ms_value(_: &horizon::StageCStats) -> f64 {
+    0.0
 }
 
 /// Day path: saturated-body centroiding with no mask.

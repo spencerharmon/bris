@@ -1,0 +1,27 @@
+{
+  "architecture": "resnet18-frozen + 2-layer MLP head",
+  "loss": "heteroscedastic gaussian NLL (Kendall & Gal 2017), per axis",
+  "input_size": 256,
+  "imagenet_mean": [
+    0.485,
+    0.456,
+    0.406
+  ],
+  "imagenet_std": [
+    0.229,
+    0.224,
+    0.225
+  ],
+  "epochs": 10,
+  "batch_size": 64,
+  "lr": 0.0003,
+  "n_train": 1728,
+  "n_val": 192,
+  "n_panoramas": 60,
+  "pano_source": "polyhaven.com (CC0)",
+  "expected_sigma_floor_rad": 1.141097092628479,
+  "median_sigma_roll_rad": 1.6285183429718018,
+  "median_sigma_pitch_rad": 0.1778949573636055,
+  "median_abs_residual_roll_rad": 1.4138186573982239,
+  "median_abs_residual_pitch_rad": 0.1341572180390358
+}

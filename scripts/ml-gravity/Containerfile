@@ -1,0 +1,25 @@
+# Reproducible env for heteroscedastic GeoCalib head training + ONNX export.
+# Build:  podman build -t bris-mlgrav -f scripts/ml-gravity/Containerfile .
+# Run:    podman run --rm --device nvidia.com/gpu=all \
+#           -v "$PWD":/work -w /work bris-mlgrav \
+#           python3 scripts/ml-gravity/train_heteroscedastic.py ...
+#
+# Operator confirmed at kickoff (2026-06-05):
+#   GPU: RTX 3080, CUDA 13.2, nvidia-container-toolkit 1.19.1, podman 5.8.2.
+FROM docker.io/nvidia/cuda:12.4.1-cudnn-devel-ubuntu22.04
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONUNBUFFERED=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PIP_NO_CACHE_DIR=1
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        python3 python3-pip python3-dev git ca-certificates \
+        libgl1 libglib2.0-0 wget unzip \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY scripts/ml-gravity/requirements.txt /tmp/req.txt
+RUN python3 -m pip install --upgrade pip && \
+    python3 -m pip install -r /tmp/req.txt
+
+WORKDIR /work

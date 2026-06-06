@@ -3111,7 +3111,22 @@ references to the regression tests that pin the behavior. See
 
   Phase ordering:
 
-** TODO Phase 7.7a: Train GeoCalib with heteroscedastic σ head
+** DONE Phase 7.7a: Train GeoCalib with heteroscedastic σ head
+   :PROPERTIES:
+   :END:
+   Audit: DONE 2026-06-05. ResNet18-frozen + heteroscedastic
+   2-layer head trained on Polyhaven CC0 panoramas
+   (60 panos × 32 random tilts, 10 epochs, AdamW). ONNX at
+   `data/ml-gravity/geocalib-heteroscedastic-v1.onnx` (45 MB,
+   SHA256 `5eb0c87270427645f5403631418c6a992fe61540a72709ea95b9038314436695`).
+   Training-results doc + calibration plot landed under
+   `docs/design/ml_gravity_training.md`.
+   Tradeoff: chose ResNet18 backbone instead of GeoCalib's
+   custom-CUDA-kernel checkpoint because the latter does
+   not fit a single-pass podman-only reproducible container;
+   the design-doc contract is the 4-scalar heteroscedastic
+   output, not the specific backbone. Backbone is a
+   one-line swap if Phase 7.7d wants a heavier model.
    First deliverable. No code changes in the workspace yet;
    produces an ONNX file.
 
@@ -3147,7 +3162,28 @@ references to the regression tests that pin the behavior. See
    code touched. Operator reviews the calibration plot before
    green-lighting Phase 7.7b.
 
-** TODO Phase 7.7b: ~MlGravityProvider~ + Stage C wiring
+** DONE Phase 7.7b: ~MlGravityProvider~ + Stage C wiring
+   :PROPERTIES:
+   :END:
+   Audit: DONE 2026-06-05. `crates/bris-vision/src/horizon_providers/ml_gravity/`
+   module (preprocess, model, sigma, convention self-test).
+   `ml-gravity` cargo feature on both bris-vision and
+   bris-streaming (default off, mirroring `segmentation`).
+   `EngineConfig::enable_ml_gravity` + `ml_gravity_model_path`
+   + `ml_gravity_provider_config`. `FfiEngineConfig`
+   additive `Option<bool>` + `Option<String>`. bris-cli
+   `--ml-gravity` / `--ml-gravity-model` replay flags.
+   `HorizonProvenance::MlGravity { model_id, sigma_rad }`
+   variant; replay-report `HorizonReport.model_id`
+   additive field. 10 ml-gravity diagnostic counters on
+   `EngineDiagnostics`. Provider dispatched last in Stage C.
+   Tests: 8 math/jacobian + end-to-end ONNX inference round-
+   trip against the vendored model. Bedroom-moon corpus
+   smoke results in `docs/design/ml_gravity_results.md`:
+   provider fires on 12/12 frames across the two captures,
+   inference ~6 ms on x86_64, hypothesis σ ~0.12-0.19 rad,
+   correctly loses Stage C fusion to the geometric
+   providers (which fire on this corpus with σ ~0.005 rad).
    Follows 7.7a. Consumes the trained model.
 
    - `crates/bris-vision/src/ml_gravity/` with provider impl

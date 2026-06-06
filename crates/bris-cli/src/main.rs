@@ -480,6 +480,25 @@ struct ReplayArgs {
     /// Override the engine's segmentation-model path.
     #[arg(long)]
     segmentation_model: Option<PathBuf>,
+    /// Enable the ML-gravity horizon provider for this replay.
+    /// Requires `--ml-gravity-model` to point at a heteroscedastic
+    /// ONNX file. See `docs/design/ml_gravity.md`.
+    #[arg(long)]
+    ml_gravity: bool,
+    /// Path to the ML-gravity ONNX model. Implies
+    /// `--ml-gravity` even when that flag is not also passed.
+    #[arg(long)]
+    ml_gravity_model: Option<PathBuf>,
+    /// Comma-separated subset of horizon providers to dispatch.
+    /// Names: gradient, sky-region, night, night-textured,
+    /// segmentation, reflection-pair, vertical-line,
+    /// vanishing-point, ml-gravity. Default: all (preserves
+    /// the current dispatch). Use `--horizon-providers
+    /// ml-gravity` to inspect a single provider's hypothesis
+    /// in the replay report without interference from the
+    /// others winning Stage C fusion.
+    #[arg(long, value_delimiter = ',')]
+    horizon_providers: Option<Vec<String>>,
     /// Engine sight/fix store root. Defaults to a temp dir per
     /// run so replays don't pollute the operator's `.bris/`.
     #[arg(long)]
@@ -725,14 +744,21 @@ fn render_one_frame(
     let pgm_rel = path_relative_to(&pair.pgm, bundle_dir);
     let render_rel = path_relative_to(&render_path_abs, bundle_dir);
 
-    let horizon_report = diag
-        .last_horizon_hypothesis
-        .map(|h| replay_report::HorizonReport {
+    let horizon_report = diag.last_horizon_hypothesis.map(|h| {
+        let model_id = match diag.last_horizon_provenance {
+            Some(bris_vision::HorizonProvenance::MlGravity { model_id, .. }) => {
+                Some(model_id.to_string())
+            }
+            _ => None,
+        };
+        replay_report::HorizonReport {
             provider: h.provider.to_string(),
             intercept_px: h.intercept,
             slope: h.slope,
             sigma_rad: h.altitude_sigma_rad,
-        });
+            model_id,
+        }
+    });
     let centroid_report = diag
         .last_body_centroid
         .map(|c| replay_report::BodyCentroidReport {
@@ -1339,7 +1365,51 @@ fn build_engine_config(
         let p = default_segmentation_model_path();
         p.exists().then_some(p)
     });
+    let ml_gravity_path = args.ml_gravity_model.clone().or_else(|| {
+        let p = std::path::PathBuf::from("data/ml-gravity/geocalib-heteroscedastic-v1.onnx");
+        p.exists().then_some(p)
+    });
+    if args.ml_gravity || args.ml_gravity_model.is_some() {
+        cfg.enable_ml_gravity = true;
+    }
+    cfg.ml_gravity_model_path = ml_gravity_path;
+    if let Some(names) = args.horizon_providers.as_ref() {
+        cfg.horizon_provider_set = parse_horizon_provider_set(names).map_err(anyhow::Error::msg)?;
+    }
     Ok(cfg)
+}
+
+/// Parse a list of provider names (`gradient`, `night`, ...)
+/// into a [`HorizonProviderSet`] with only those entries on.
+/// Unknown names are rejected; an empty list is rejected.
+fn parse_horizon_provider_set(
+    names: &[String],
+) -> Result<bris_streaming::HorizonProviderSet, String> {
+    let mut set = bris_streaming::HorizonProviderSet::none();
+    let mut any = false;
+    for raw in names {
+        let name = raw.trim().to_ascii_lowercase();
+        if name.is_empty() {
+            continue;
+        }
+        match name.as_str() {
+            "gradient" => set.gradient = true,
+            "sky-region" | "sky_region" | "skyregion" => set.sky_region = true,
+            "night" | "night-gradient" => set.night = true,
+            "night-textured" | "night_textured" => set.night_textured = true,
+            "segmentation" => set.segmentation = true,
+            "reflection-pair" | "reflection_pair" => set.reflection_pair = true,
+            "vertical-line" | "vertical_line" => set.vertical_line = true,
+            "vanishing-point" | "vanishing_point" => set.vanishing_point = true,
+            "ml-gravity" | "ml_gravity" => set.ml_gravity = true,
+            other => return Err(format!("unknown horizon provider name: {other}")),
+        }
+        any = true;
+    }
+    if !any {
+        return Err("--horizon-providers must list at least one provider".into());
+    }
+    Ok(set)
 }
 
 #[allow(clippy::too_many_lines)]

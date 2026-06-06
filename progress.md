@@ -9,6 +9,61 @@ For the end-to-end pipeline architecture and data flow, see
 
 ---
 
+## Phase 7.7a + 7.7b: ML-gravity provider landed (2026-06-05)
+
+Heteroscedastic gravity-regression model trained on Polyhaven
+CC0 panoramas (60 panos × 32 random tilts, ResNet18-frozen +
+2-layer head, AdamW, 10 epochs, ~2.5 min on RTX 3080).
+Exported ONNX at `data/ml-gravity/geocalib-heteroscedastic-v1.onnx`
+(45 MB, vendored in-tree under SHA-256 verification).
+
+Training pipeline reproducible from
+`scripts/ml-gravity/Containerfile` + `requirements.txt` via
+podman + nvidia-container-toolkit; no host Python/CUDA
+depended on.
+
+Provider lives under
+`crates/bris-vision/src/horizon_providers/ml_gravity/`,
+gated by `ml-gravity` cargo feature (off by default,
+mirrors `segmentation`). Dispatched last in Stage C of the
+streaming engine when `EngineConfig::enable_ml_gravity =
+true` and the model loads successfully.
+`bris-cli replay --ml-gravity` for one-shot enablement;
+`FfiEngineConfig` carries additive `Option<bool>` +
+`Option<String>` plumbing for the Android side.
+
+New per-frame counters on `EngineDiagnostics`
+(`ml_gravity_invoked`, `ml_gravity_hypothesized`,
+`ml_gravity_used`, `ml_gravity_corroborated`,
+`ml_gravity_imu_disagreement`, `ml_gravity_nan_outputs`,
+`ml_gravity_preprocess_failed`, `ml_gravity_load_failed`,
+`ml_gravity_inference_ms_last`). New
+`HorizonProvenance::MlGravity { model_id, sigma_rad }`
+variant carrying the 12-char model id + per-prediction
+altitude σ. Replay-report schema additive `model_id`
+optional field.
+
+Bedroom-moon corpus smoke: provider fires on 12/12 frames
+across the two captures, inference ~6 ms on x86_64,
+hypothesis σ ~0.12-0.19 rad (~7-11°). The ML provider
+produces the only σ-honest hypothesis on these indoor
+captures; gradient + night-gradient providers latch onto
+window / ceiling edges and report σ ~5 mrad as if they
+had measured a real sea/sky boundary, winning Stage C
+fusion against the truthful ML hypothesis. Surfaces a
+pre-existing latent bug in the classical providers'
+σ-honesty on non-horizon scenes; the Phase 7.7 PR
+documents two follow-ups (refuse-when-not-a-horizon
+predicate + fusion-disagreement σ-inflation) but does
+not fix them. Full results in
+`docs/design/ml_gravity_results.md`.
+
+Phase 7.7c (IMU coexistence), 7.7d (marine fine-tune), 7.7e
+(trainer APK) remain TODO and are explicitly out of scope
+for this landing.
+
+---
+
 ## Storage contract clarified (2026-06-01)
 
 Three rounds of clarification with the operator converged

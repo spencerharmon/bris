@@ -64,7 +64,7 @@ mod nmea;
 mod pipeline;
 mod store;
 
-pub use config::{ColdStartEngineConfig, EngineConfig, PlateSolverInit};
+pub use config::{ColdStartEngineConfig, EngineConfig, HorizonProviderSet, PlateSolverInit};
 pub use diagnostics::{
     BodyCentroidSnapshot, EngineDiagnostics, HorizonHypothesisSnapshot, PipelineStageStats,
     StageEOutcomeSnapshot,

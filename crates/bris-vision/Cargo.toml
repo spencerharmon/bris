@@ -32,6 +32,9 @@ ndarray = { workspace = true, optional = true }
 # the dependency line.
 default = []
 segmentation = ["dep:ort", "dep:ndarray"]
+# ML-based gravity estimator (Layer 2 / heteroscedastic).
+# Pulls the same ORT runtime as `segmentation`.
+ml-gravity = ["dep:ort", "dep:ndarray"]
 
 [dev-dependencies]
 proptest.workspace = true

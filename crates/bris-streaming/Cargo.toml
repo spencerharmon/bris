@@ -19,6 +19,9 @@ workspace = true
 # / desktop consumers via `features = ["segmentation"]`.
 default = []
 segmentation = ["bris-vision/segmentation"]
+# Mirrors bris-vision's ml-gravity feature; off by default for
+# the same Android-target reason. See docs/design/ml_gravity.md.
+ml-gravity = ["bris-vision/ml-gravity"]
 
 [dependencies]
 bris-core.workspace = true

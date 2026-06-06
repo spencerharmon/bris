@@ -37,6 +37,82 @@ use crate::store::StoreConfig;
 
 /// Top-level engine configuration.
 ///
+/// Per-provider Stage C dispatch enables. Default: all `true`
+/// (full dispatch matches pre-existing behaviour). Operators
+/// flip entries off to inspect a constrained provider set
+/// during diagnostic replays; the corpus explorer renders the
+/// surviving provider's hypothesis without interference.
+///
+/// `ml_gravity` here is the dispatch enable inside the
+/// provider set; the overall ML-gravity gate is the
+/// conjunction of [`EngineConfig::enable_ml_gravity`] AND
+/// `horizon_provider_set.ml_gravity`. This lets a session
+/// have ML loaded but temporarily run in (e.g.) gradient-only
+/// mode for an A/B comparison.
+#[derive(Debug, Clone, Copy)]
+#[allow(clippy::struct_excessive_bools)] // one bool per provider; enum-set would obscure the dispatch
+pub struct HorizonProviderSet {
+    /// Day gradient detector.
+    pub gradient: bool,
+    /// Day sky-region detector.
+    pub sky_region: bool,
+    /// Night brightness-boundary detector.
+    pub night: bool,
+    /// Night textured-boundary detector.
+    pub night_textured: bool,
+    /// Segmentation horizon detector
+    /// (cfg-gated by `segmentation` feature).
+    pub segmentation: bool,
+    /// Reflection-pair provider (post-Stage-B).
+    pub reflection_pair: bool,
+    /// Vertical-line provider (off by default at the engine
+    /// level via [`EngineConfig::enable_vertical_line_provider`];
+    /// this entry only matters when that flag is also set).
+    pub vertical_line: bool,
+    /// Vanishing-point provider.
+    pub vanishing_point: bool,
+    /// ML-gravity provider (cfg-gated by `ml-gravity`
+    /// feature; also requires
+    /// [`EngineConfig::enable_ml_gravity = true`] AND a
+    /// loaded model).
+    pub ml_gravity: bool,
+}
+
+impl Default for HorizonProviderSet {
+    fn default() -> Self {
+        Self {
+            gradient: true,
+            sky_region: true,
+            night: true,
+            night_textured: true,
+            segmentation: true,
+            reflection_pair: true,
+            vertical_line: true,
+            vanishing_point: true,
+            ml_gravity: true,
+        }
+    }
+}
+
+impl HorizonProviderSet {
+    /// Construct an all-false set; callers OR in the providers
+    /// they want. Use [`Default::default`] for the full set.
+    #[must_use]
+    pub fn none() -> Self {
+        Self {
+            gradient: false,
+            sky_region: false,
+            night: false,
+            night_textured: false,
+            segmentation: false,
+            reflection_pair: false,
+            vertical_line: false,
+            vanishing_point: false,
+            ml_gravity: false,
+        }
+    }
+}
+
 /// Construct with [`EngineConfig::new`] passing the observer
 /// position; override individual fields directly. The defaults are
 /// chosen to match the design-doc recommendations; nearly every
@@ -340,6 +416,47 @@ pub struct EngineConfig {
     /// may set this to `true` to opt back in.
     pub enable_vertical_line_provider: bool,
 
+    /// Per-provider Stage C enable flags. Defaults: all true
+    /// (preserves the current dispatch). Operators (or the
+    /// `bris-cli replay --horizon-providers ...` flag) flip
+    /// individual entries off to constrain Stage C to a
+    /// subset — useful for adversarial / diagnostic replays
+    /// where the operator wants to inspect one provider in
+    /// isolation. Production captures should leave these
+    /// alone; the publication-gate + fusion layer already
+    /// handles dishonest providers in the typical case.
+    pub horizon_provider_set: HorizonProviderSet,
+
+    /// Path to the heteroscedastic ML-gravity ONNX model.
+    /// `None` (default) disables the [`bris_vision::MlGravityProvider`]
+    /// dispatch entirely. The provider is *also* gated on
+    /// [`Self::enable_ml_gravity`]; both must be set for
+    /// Stage C to invoke it. See
+    /// `docs/design/ml_gravity.md`.
+    ///
+    /// Even when set, the provider is gated on the `ml-gravity`
+    /// cargo feature (default-off in `bris-vision`); building
+    /// without it makes this field inert.
+    pub ml_gravity_model_path: Option<PathBuf>,
+
+    /// Whether the [`bris_vision::MlGravityProvider`] is
+    /// dispatched by Stage C. Defaults to `false`.
+    ///
+    /// When `true` AND [`Self::ml_gravity_model_path`] is
+    /// `Some(_)` AND the `ml-gravity` cargo feature is on, the
+    /// provider runs *last* in the Stage C dispatch and
+    /// contributes a low-priority hypothesis (geometric
+    /// providers always win on real horizons because their σ
+    /// floor is tighter; the ML provider is the silent winner
+    /// when nothing else fires).
+    pub enable_ml_gravity: bool,
+
+    /// Tunables for the ML-gravity provider (σ floor / ceiling,
+    /// model-path override). Default takes the path from
+    /// [`Self::ml_gravity_model_path`].
+    #[cfg(feature = "ml-gravity")]
+    pub ml_gravity_provider_config: bris_vision::MlGravityConfig,
+
     /// Configuration for the vanishing-point horizon provider
     /// (`bris_vision::VanishingPointProvider`). The most
     /// expensive of the auto-horizon providers; dispatched
@@ -553,6 +670,11 @@ impl EngineConfig {
             // Disabled by default; see field doc + docs/design/ml_gravity.md
             // for the gravity-math bug that motivated the change.
             enable_vertical_line_provider: false,
+            horizon_provider_set: HorizonProviderSet::default(),
+            ml_gravity_model_path: None,
+            enable_ml_gravity: false,
+            #[cfg(feature = "ml-gravity")]
+            ml_gravity_provider_config: bris_vision::MlGravityConfig::default(),
             vanishing_point_provider_config: bris_vision::VanishingPointConfig::default(),
             horizon_fusion: HorizonFusionConfig::default(),
             store: StoreConfig::default(),

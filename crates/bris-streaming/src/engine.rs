@@ -219,6 +219,15 @@ struct EngineState {
     vanishing_point_hypothesized: u64,
     vanishing_point_used: u64,
     vanishing_point_rejected_no_cluster: u64,
+    ml_gravity_invoked: u64,
+    ml_gravity_hypothesized: u64,
+    ml_gravity_used: u64,
+    ml_gravity_corroborated: u64,
+    ml_gravity_imu_disagreement: u64,
+    ml_gravity_nan_outputs: u64,
+    ml_gravity_preprocess_failed: u64,
+    ml_gravity_load_failed: bool,
+    ml_gravity_inference_ms_last: f64,
     horizon_fusion_cluster_size_max: usize,
     horizon_fusion_clustered_frames: u64,
     horizon_fusion_discordant_frames: u64,
@@ -360,11 +369,39 @@ fn horizon_provider_label(p: bris_vision::HorizonProvenance) -> &'static str {
         HorizonProvenance::VerticalLine { .. } => "vertical-line",
         HorizonProvenance::VanishingPoint { .. } => "vanishing-point",
         HorizonProvenance::Fused { .. } => "fused",
+        HorizonProvenance::MlGravity { .. } => "ml-gravity",
     }
 }
 
 /// Update per-stage counters and last-classification / last-tt
 /// fields based on a freshly-completed pipeline pass. Pure
+/// Best-effort load of the ML-gravity ONNX model at engine
+/// construction. Returns true if loading was *attempted and
+/// failed* (so the diagnostics flag reflects an honest
+/// problem). Returns false if loading was skipped (feature off
+/// or path None) or succeeded.
+#[cfg(feature = "ml-gravity")]
+fn load_ml_gravity_model_at_startup(config: &EngineConfig) -> bool {
+    let Some(path) = config.ml_gravity_model_path.as_ref() else {
+        return false;
+    };
+    if !config.enable_ml_gravity {
+        return false;
+    }
+    match bris_vision::horizon_providers::ml_gravity::load_model(path) {
+        Ok(()) => false,
+        Err(e) => {
+            error!(error = %e, path = %path.display(), "ml-gravity model load failed");
+            true
+        }
+    }
+}
+
+#[cfg(not(feature = "ml-gravity"))]
+fn load_ml_gravity_model_at_startup(_config: &EngineConfig) -> bool {
+    false
+}
+
 /// function: caller holds the state lock.
 #[allow(clippy::too_many_lines)]
 fn update_stage_counters(
@@ -501,6 +538,22 @@ fn update_stage_counters(
     }
     state.vanishing_point_rejected_no_cluster += vp.stats.rejected_no_cluster;
 
+    let mg = &outcome.ml_gravity_dispatch;
+    if mg.invoked {
+        state.ml_gravity_invoked += 1;
+    }
+    if mg.hypothesized {
+        state.ml_gravity_hypothesized += 1;
+    }
+    if mg.used {
+        state.ml_gravity_used += 1;
+    }
+    state.ml_gravity_nan_outputs += outcome.ml_gravity_nan_outputs;
+    state.ml_gravity_preprocess_failed += outcome.ml_gravity_preprocess_failed;
+    if outcome.ml_gravity_inference_ms > 0.0 {
+        state.ml_gravity_inference_ms_last = outcome.ml_gravity_inference_ms;
+    }
+
     let fs = &outcome.fusion_stats;
     if fs.clustered {
         state.horizon_fusion_clustered_frames += 1;
@@ -603,6 +656,8 @@ impl StreamingEngine {
                 None
             });
 
+        let ml_gravity_load_failed_at_start = load_ml_gravity_model_at_startup(&config);
+
         Self {
             state: Mutex::new(EngineState {
                 frames_pushed: 0,
@@ -638,6 +693,15 @@ impl StreamingEngine {
                 vanishing_point_hypothesized: 0,
                 vanishing_point_used: 0,
                 vanishing_point_rejected_no_cluster: 0,
+                ml_gravity_invoked: 0,
+                ml_gravity_hypothesized: 0,
+                ml_gravity_used: 0,
+                ml_gravity_corroborated: 0,
+                ml_gravity_imu_disagreement: 0,
+                ml_gravity_nan_outputs: 0,
+                ml_gravity_preprocess_failed: 0,
+                ml_gravity_load_failed: ml_gravity_load_failed_at_start,
+                ml_gravity_inference_ms_last: 0.0,
                 horizon_fusion_cluster_size_max: 0,
                 horizon_fusion_clustered_frames: 0,
                 horizon_fusion_discordant_frames: 0,
@@ -999,6 +1063,15 @@ impl StreamingEngine {
             vanishing_point_hypothesized: state.vanishing_point_hypothesized,
             vanishing_point_used: state.vanishing_point_used,
             vanishing_point_rejected_no_cluster: state.vanishing_point_rejected_no_cluster,
+            ml_gravity_invoked: state.ml_gravity_invoked,
+            ml_gravity_hypothesized: state.ml_gravity_hypothesized,
+            ml_gravity_used: state.ml_gravity_used,
+            ml_gravity_corroborated: state.ml_gravity_corroborated,
+            ml_gravity_imu_disagreement: state.ml_gravity_imu_disagreement,
+            ml_gravity_nan_outputs: state.ml_gravity_nan_outputs,
+            ml_gravity_preprocess_failed: state.ml_gravity_preprocess_failed,
+            ml_gravity_load_failed: state.ml_gravity_load_failed,
+            ml_gravity_inference_ms_last: state.ml_gravity_inference_ms_last,
             horizon_fusion_cluster_size_max: state.horizon_fusion_cluster_size_max,
             horizon_fusion_clustered_frames: state.horizon_fusion_clustered_frames,
             horizon_fusion_discordant_frames: state.horizon_fusion_discordant_frames,

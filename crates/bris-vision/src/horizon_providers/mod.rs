@@ -144,7 +144,7 @@ pub struct DirectSight {
 /// streaming engine maps the discriminant back to its own enum
 /// at the call site (a 1:1 mapping documented in
 /// `bris-streaming::pipeline::horizon_providers`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy)]
 pub enum HorizonProvenance {
     /// Classical optical detector. The `kind` discriminant
     /// is decoded by the streaming engine.
@@ -185,6 +185,19 @@ pub enum HorizonProvenance {
     Fused {
         /// Number of hypotheses combined into the fused estimate.
         cluster_size: usize,
+    },
+    /// ML-estimated camera-frame gravity → synthesised
+    /// horizon (`docs/design/ml_gravity.md`). `model_id` is
+    /// the 12-char truncation of the loaded ONNX file's hash
+    /// so different model versions are distinguishable in
+    /// per-frame diagnostics. `sigma_rad` is the per-prediction
+    /// altitude σ that flowed into Stage C fusion.
+    MlGravity {
+        /// Stable identifier for the loaded model file.
+        model_id: &'static str,
+        /// Altitude-σ contribution carried by this hypothesis,
+        /// in radians, before any fusion-side combination.
+        sigma_rad: f64,
     },
 }
 
@@ -229,11 +242,15 @@ pub trait HorizonProvider {
 }
 
 pub mod fusion;
+#[cfg(feature = "ml-gravity")]
+pub mod ml_gravity;
 pub mod reflection_pair;
 pub mod vanishing_point;
 pub mod vertical_line;
 
 pub use fusion::{fuse_horizon_hypotheses, FusionMode, FusionOutcome, HorizonFusionConfig};
+#[cfg(feature = "ml-gravity")]
+pub use ml_gravity::{MlGravityConfig, MlGravityProvider, MlGravityStats};
 pub use reflection_pair::{ReflectionPairConfig, ReflectionPairProvider, ReflectionPairStats};
 pub use vanishing_point::{VanishingPointConfig, VanishingPointProvider, VanishingPointStats};
 pub use vertical_line::{VerticalLineConfig, VerticalLineProvider, VerticalLineStats};

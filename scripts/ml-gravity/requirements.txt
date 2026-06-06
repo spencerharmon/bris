@@ -1,0 +1,14 @@
+# Pinned for reproducibility (operator-approved 2026-06-05).
+# CUDA 12.4 wheels match the container base image; the RTX 3080
+# host (CUDA 13.2 driver) is forward-compatible.
+torch==2.4.1
+torchvision==0.19.1
+numpy==1.26.4
+pillow==10.4.0
+onnx==1.16.2
+onnxruntime==1.19.2
+onnxsim==0.4.36
+matplotlib==3.9.2
+scipy==1.13.1
+tqdm==4.66.5
+requests==2.32.3
