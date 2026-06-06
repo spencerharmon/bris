@@ -1133,18 +1133,27 @@ fn run_replay_session(args: &ReplayArgs, session_id: uuid::Uuid) -> anyhow::Resu
     }
 
     if args.render_frames {
-        if let Some(default_reports) = per_mode_capture_reports.remove(&ReplayMode::Default) {
+        // Choose which mode's reports get written. Prefer
+        // Default; fall back to the first mode in the
+        // dispatched list (e.g. --ap-seed-truth alone has
+        // no Default to fall back to).
+        let chosen_mode = if per_mode_capture_reports.contains_key(&ReplayMode::Default) {
+            ReplayMode::Default
+        } else {
+            modes[0]
+        };
+        if let Some(reports) = per_mode_capture_reports.remove(&chosen_mode) {
             let report = replay_report::ReplaySessionReport {
                 schema_version: replay_report::SCHEMA_VERSION,
                 session_id: session.session_id.to_string(),
                 session_title: session.title.clone(),
                 generated_unix_ms: chrono::Utc::now().timestamp_millis(),
                 engine_build: replay_report::EngineBuild::current(),
-                captures: default_reports,
+                captures: reports,
             };
             let path = replay_report::write_session_report(&session_dir, &report)
                 .with_context(|| format!("write session report to {}", session_dir.display()))?;
-            info!(report = %path.display(), "replay: session report written");
+            info!(report = %path.display(), chosen_mode = chosen_mode.label(), "replay: session report written");
         }
     }
     Ok(())
