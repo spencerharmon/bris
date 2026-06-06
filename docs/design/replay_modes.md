@@ -121,3 +121,40 @@ Setting all three to disabling values (`inf` / `0` /
 behaviour. The published fix will carry honestly-large
 `sigma_major_nm`; downstream consumers must respect the
 reported sigma.
+
+## Render artifacts: base PNG + client-side SVG overlay
+
+`--render-frames` writes two things per frame:
+
+1. **One PNG** (`<frame>-render.png`) containing only the
+   downsampled base image. Cache-friendly + idempotent: if
+   the file already exists the CLI re-derives the geometry
+   metadata from the source frame and skips the encode.
+   Multi-mode + multi-replay loops therefore pay the per-
+   frame PNG cost exactly once across all subsequent runs.
+2. **JSON in the per-capture report** carrying everything
+   the overlay needs: classification, body centroid
+   (`x`, `y`, `sigma_px`, `area_px`), horizon
+   (`intercept_px`, `slope`, `sigma_rad`, `provider`,
+   `model_id`), Stage E outcomes, and `render_geometry`
+   (`source_width`, `source_height`, `canvas_width`,
+   `canvas_height`, `scale`).
+
+The corpus explorer (`tools/corpus-explorer/`) renders the
+horizon line, centroid marker, and HUD as SVG overlays
+layered over the cached PNG, scaled per
+`render_geometry`. The overlay redraws on every report load
+without touching the PNG. The replay engine writes ~2 KB of
+JSON per frame for the overlay metadata; replays that only
+need the JSON (re-running with different gate thresholds,
+mode selection, or provider subsets) avoid PNG encode
+entirely on the second invocation.
+
+## A note on perf
+
+Replay is much faster in release: the streaming engine runs
+5–15× faster than dev on this stack. AGENTS.md §"Build-cache
+/ disk hygiene" calls out that any per-frame perf assertion
+or multi-capture diagnostic should run with `--release`.
+The `--render-frames` cache cuts a re-replay loop further by
+elapsed PNG encode time on top of that.

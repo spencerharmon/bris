@@ -703,39 +703,10 @@ fn render_one_frame(
     session_id_short: &str,
 ) -> anyhow::Result<replay_report::FrameReport> {
     use bris_streaming::StageEOutcomeSnapshot;
-    use bris_vision::{CentroidOverlay, HorizonOverlay, OverlayData, StageEOutcomeView};
 
     let classification_label = diag
         .last_raw_classification
         .map_or_else(|| "unknown".into(), |c| format!("{c:?}"));
-
-    let centroid_overlay = diag.last_body_centroid.map(|c| CentroidOverlay {
-        x: c.x,
-        y: c.y,
-        sigma_px: c.sigma_px,
-        area_px: c.area_px,
-        secondaries: c.secondaries,
-    });
-    let horizon_overlay = diag.last_horizon_hypothesis.map(|h| HorizonOverlay {
-        slope: h.slope,
-        intercept: h.intercept,
-        provider: h.provider,
-        sigma_rad: h.altitude_sigma_rad,
-    });
-    let stage_e_view: Vec<StageEOutcomeView> = diag
-        .last_stage_e_outcomes
-        .iter()
-        .map(|o| match o {
-            StageEOutcomeSnapshot::Ok {
-                altitude_rad,
-                sigma_rad,
-            } => StageEOutcomeView::Ok {
-                altitude_rad: *altitude_rad,
-                sigma_rad: *sigma_rad,
-            },
-            StageEOutcomeSnapshot::Err { kind } => StageEOutcomeView::Err { kind: kind.clone() },
-        })
-        .collect();
 
     let stem = pair
         .pgm
@@ -748,19 +719,26 @@ fn render_one_frame(
         |d| d.join(&render_filename),
     );
 
-    let utc_string = captured_utc.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string();
-    let overlay = OverlayData {
-        frame_seq: pair.sidecar_data.seq,
-        captured_utc: utc_string,
-        classification: &classification_label,
-        centroid: centroid_overlay,
-        horizon: horizon_overlay,
-        stage_e_outcomes: stage_e_view,
-        capture_id_short: capture_id_short.to_string(),
-        session_id_short: session_id_short.to_string(),
+    // Idempotent: skip the PNG encode when the cached base
+    // image already exists. Multi-mode replays therefore pay
+    // the per-frame PNG cost exactly once across all modes
+    // (the overlay is rendered SVG-on-image client-side in
+    // the corpus explorer, driven by the JSON we emit below).
+    let metadata = if render_path_abs.exists() {
+        // Re-derive metadata from the source frame so the
+        // JSON stays correct; the file itself isn't re-encoded.
+        let (out_w, out_h, scale) = bris_vision_canvas_dims(frame.width(), frame.height());
+        bris_vision::RenderMetadata {
+            source_width: frame.width(),
+            source_height: frame.height(),
+            canvas_width: out_w,
+            canvas_height: out_h,
+            scale,
+        }
+    } else {
+        bris_vision::render_base_image(frame, &render_path_abs).context("render base image PNG")?
     };
-    bris_vision::render_debug_overlay(frame, &overlay, &render_path_abs)
-        .context("render debug overlay PNG")?;
+    let _ = (capture_id_short, session_id_short, captured_utc);
 
     let pgm_rel = path_relative_to(&pair.pgm, bundle_dir);
     let render_rel = path_relative_to(&render_path_abs, bundle_dir);
@@ -815,12 +793,36 @@ fn render_one_frame(
         captured_unix_ms: pair.sidecar_data.captured_unix_ms,
         render_path: Some(render_rel),
         pgm_path: pgm_rel,
+        render_geometry: Some(replay_report::RenderGeometry {
+            source_width: metadata.source_width,
+            source_height: metadata.source_height,
+            canvas_width: metadata.canvas_width,
+            canvas_height: metadata.canvas_height,
+            scale: metadata.scale,
+        }),
         classification: classification_label,
         horizon: horizon_report,
         body_centroid: centroid_report,
         stage_e_outcomes: stage_e_report,
         sight_emitted,
     })
+}
+
+/// Mirror of `bris_vision`'s internal `scaled_dims`. Used when
+/// the cached base PNG already exists and we want the metadata
+/// without re-encoding.
+fn bris_vision_canvas_dims(src_w: u32, src_h: u32) -> (u32, u32, f64) {
+    let max_side = bris_vision::RENDER_MAX_SIDE_PX;
+    let long = src_w.max(src_h).max(1);
+    if long <= max_side {
+        return (src_w, src_h, 1.0);
+    }
+    let s = f64::from(max_side) / f64::from(long);
+    #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
+    let out_w = ((f64::from(src_w) * s).round() as u32).max(1);
+    #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
+    let out_h = ((f64::from(src_h) * s).round() as u32).max(1);
+    (out_w, out_h, s)
 }
 
 /// String path of `target` relative to `base`; falls back to

@@ -20,7 +20,11 @@
       </section>
     </main>
     <div id="lightbox" hidden>
-      <img id="lightbox-img" alt="" />
+      <div id="lightbox-stage">
+        <img id="lightbox-img" alt="" />
+        <svg id="lightbox-svg" xmlns="http://www.w3.org/2000/svg"></svg>
+        <div id="lightbox-hud"></div>
+      </div>
       <button id="lightbox-close" aria-label="close">×</button>
     </div>
     <script type="module" src="explorer.js"></script>

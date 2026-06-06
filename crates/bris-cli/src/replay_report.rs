@@ -135,6 +135,12 @@ pub(crate) struct FrameReport {
     pub render_path: Option<String>,
     /// Path to the source PGM relative to the corpus root.
     pub pgm_path: String,
+    /// Render geometry: lets the corpus explorer overlay
+    /// horizon / centroid SVG client-side onto the cached
+    /// base PNG without re-rendering. Absent on reports
+    /// generated before this field shipped.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub render_geometry: Option<RenderGeometry>,
     /// Classification label
     /// (`"Day"`, `"Twilight"`, `"Night"`, `"Unusable"`).
     pub classification: String,
@@ -151,6 +157,23 @@ pub(crate) struct FrameReport {
     /// True iff at least one Stage E attempt succeeded on this
     /// frame.
     pub sight_emitted: bool,
+}
+
+/// Per-frame render geometry mirroring
+/// [`bris_vision::RenderMetadata`].
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub(crate) struct RenderGeometry {
+    /// Source frame width in pixels.
+    pub source_width: u32,
+    /// Source frame height in pixels.
+    pub source_height: u32,
+    /// Base-image canvas width in pixels (the PNG written
+    /// to `render_path`).
+    pub canvas_width: u32,
+    /// Base-image canvas height in pixels.
+    pub canvas_height: u32,
+    /// Source-to-canvas scale: `canvas_x = source_x * scale`.
+    pub scale: f64,
 }
 
 /// Per-capture report block.
@@ -286,6 +309,13 @@ mod tests {
                         "sessions/UUID/captures/0019abc/frames/00000000-render.png".into(),
                     ),
                     pgm_path: "sessions/UUID/captures/0019abc/frames/00000000.pgm".into(),
+                    render_geometry: Some(RenderGeometry {
+                        source_width: 3024,
+                        source_height: 4032,
+                        canvas_width: 900,
+                        canvas_height: 1200,
+                        scale: 0.297_619_047_6,
+                    }),
                     classification: "Twilight".into(),
                     horizon: Some(HorizonReport {
                         provider: "vertical-line".into(),
