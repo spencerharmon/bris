@@ -57,3 +57,67 @@ stale-prior triggers is to course-correct a bad AP. The lock
 exists only to *bisect* an error budget offline. Forbid in
 production code paths; the engine surface advertises this in
 the field docstring and `EngineConfig::new`'s doc comment.
+
+## Session-engine vs. per-capture engine lifetimes
+
+`bris-cli replay` builds one engine instance per **session**,
+not per **capture**, when invoked with `--session` or
+`--all-sessions`. All captures in a session share the same
+`StreamingEngine`: the `SightWindow`, cold-start state, and
+last-published-fix continuity are preserved across
+capture boundaries.
+
+This matches what the APK does in production via
+`SessionHolder` (engine constructed when the active session
+is acquired; reused across capture start/stop cycles; rebuilt
+only when the active session UUID changes). The CLI's prior
+behaviour — fresh engine per capture inside `--session` — was
+a replay-only bug: it systematically under-produced fixes vs.
+what the device would have published live, by wiping the
+sight-window and forcing a fresh cold-start each capture.
+For an adversarial corpus with degenerate single-azimuth
+body geometry, the bug *over*-produced fixes (cold-start
+happily committed once per capture; the session-engine
+refuses because it sees the degeneracy across all captures).
+Either direction is a quiet-corruption-of-evidence pattern
+AGENTS.md rule zero exists to prevent.
+
+The `--bundle` path (single capture, no session context)
+still builds a fresh engine per invocation. That is correct:
+there is no other capture for the engine to maintain
+continuity with.
+
+Mode selection in `--session --all-modes` runs **one engine
+per mode** for the full session (default → ap_seed_truth →
+ap_lock_truth → no_ap). Per-capture mode comparison is not
+meaningful when captures share an engine: you can't lock AP
+to truth on capture 1 and run default on capture 2 inside
+one engine.
+
+AP comes from the **first capture's manifest** when running
+at session scope. All captures within a session share AP
+semantics by design (the operator sets AP once at session
+create; per-capture AP overrides aren't part of the
+session-engine contract).
+
+## Publication-gate overrides
+
+Three `bris-cli replay` flags expose the
+`PublicationGateConfig` knobs for diagnostic replays:
+
+- `--max-position-sigma-nm <value | inf>` (default 50.0)
+- `--min-azimuth-spread-rad <value>` (default 30°)
+- `--max-ellipse-axis-ratio <value | inf>` (default 10.0)
+
+Production captures leave these unset. The diagnostic use
+case is "where would we be if we accepted this sigma" on
+adversarial or low-evidence corpora (single-body /
+single-azimuth, indoor-with-no-real-horizon, etc.) where
+the gate honestly refuses to publish but the operator wants
+to see the underlying LSQ position.
+
+Setting all three to disabling values (`inf` / `0` /
+`inf`) recovers pre-gate publish-everything-the-LSQ-accepts
+behaviour. The published fix will carry honestly-large
+`sigma_major_nm`; downstream consumers must respect the
+reported sigma.

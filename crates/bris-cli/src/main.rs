@@ -428,8 +428,13 @@ struct ReplayArgs {
     frames: Option<PathBuf>,
     /// Replay every capture under
     /// `<corpus>/sessions/<UUID>/captures/` in chronological
-    /// order. Each capture runs through its own engine instance.
-    /// Cross-capture engine continuity is a Phase 9 stretch.
+    /// order, sharing one engine across the whole session.
+    /// Matches the APK's `SessionHolder` lifetime (engine
+    /// constructed when active session is acquired; reused
+    /// across capture start/stop cycles). The cross-capture
+    /// `SightWindow`, cold-start state, and last-published-
+    /// fix continuity that the engine provides are what
+    /// make a multi-capture fix possible.
     #[arg(long, conflicts_with_all = ["bundle", "frames"])]
     session: Option<uuid::Uuid>,
     /// Corpus root for `--session`. Defaults to `./bris-corpus`.
