@@ -214,6 +214,17 @@ pub(crate) struct StageEOutcome {
     /// run. Counted only when Stage E reached `try_publish`
     /// (i.e. `publish_attempted == true`); otherwise zero.
     pub sights_rejected_by_screener: u64,
+    /// Number of times the ephemeris-driven cross-frame
+    /// stitch fallback was invoked this run (Harris+NCC
+    /// declined and the fallback was enabled).
+    pub ephemeris_stitch_attempted: u64,
+    /// Number of times the ephemeris fallback accepted the
+    /// correspondence and emitted a sight this run.
+    pub ephemeris_stitch_succeeded: u64,
+    /// Number of times the ephemeris fallback had no body
+    /// candidate in the horizon frame to verify against and
+    /// so declined this run.
+    pub ephemeris_stitch_no_candidate_in_window: u64,
     /// Per-candidate reduction outcomes this run, one entry
     /// per (body, horizon) pair Stage E attempted to reduce.
     /// Diagnostic-only; the engine surfaces this verbatim in

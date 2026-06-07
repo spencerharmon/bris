@@ -310,6 +310,30 @@ pub struct EngineDiagnostics {
     /// policy is [`crate::StageDDispatchPolicy::Always`].
     pub stage_d_skipped_no_star_evidence: u64,
 
+    /// Cumulative number of times Stage E invoked the
+    /// ephemeris-driven cross-frame stitch fallback after
+    /// Harris+NCC declined. Counts every pair Stage E
+    /// attempted to stitch ephemeris-prior on (whether the
+    /// fallback ultimately accepted, rejected for
+    /// out-of-window candidate, or had no candidate to
+    /// verify against). Gated on
+    /// [`crate::EngineConfig::enable_ephemeris_stitch_fallback`].
+    pub ephemeris_stitch_attempted: u64,
+
+    /// Cumulative number of cross-frame sights the
+    /// ephemeris fallback accepted and emitted. Subset of
+    /// `ephemeris_stitch_attempted`. The corresponding
+    /// sights are *also* counted in
+    /// `cross_frame_sights_emitted`.
+    pub ephemeris_stitch_succeeded: u64,
+
+    /// Cumulative number of ephemeris-fallback attempts that
+    /// found no body candidate in the horizon frame to
+    /// verify the predicted correspondence against, and so
+    /// declined to accept. Disjoint from
+    /// `ephemeris_stitch_succeeded`.
+    pub ephemeris_stitch_no_candidate_in_window: u64,
+
     /// Snapshot of the body centroid detected on the most
     /// recent processed frame, in source-frame pixel
     /// coordinates. `None` when the frame produced no body

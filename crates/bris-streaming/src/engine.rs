@@ -258,6 +258,12 @@ struct EngineState {
     sights_rejected_by_screener: u64,
     /// See [`crate::EngineDiagnostics::stage_d_skipped_no_star_evidence`].
     stage_d_skipped_no_star_evidence: u64,
+    /// See [`crate::EngineDiagnostics::ephemeris_stitch_attempted`].
+    ephemeris_stitch_attempted: u64,
+    /// See [`crate::EngineDiagnostics::ephemeris_stitch_succeeded`].
+    ephemeris_stitch_succeeded: u64,
+    /// See [`crate::EngineDiagnostics::ephemeris_stitch_no_candidate_in_window`].
+    ephemeris_stitch_no_candidate_in_window: u64,
 }
 
 /// Nautical mile in metres; for converting Fix sigma (nm) to
@@ -768,6 +774,9 @@ impl StreamingEngine {
                 cross_frame_sights_emitted: 0,
                 sights_rejected_by_screener: 0,
                 stage_d_skipped_no_star_evidence: 0,
+                ephemeris_stitch_attempted: 0,
+                ephemeris_stitch_succeeded: 0,
+                ephemeris_stitch_no_candidate_in_window: 0,
             }),
             config,
             fix_tx,
@@ -997,6 +1006,10 @@ impl StreamingEngine {
         }
         state.cross_frame_sights_emitted += stage_e_outcome.cross_frame_sights_emitted;
         state.sights_rejected_by_screener += stage_e_outcome.sights_rejected_by_screener;
+        state.ephemeris_stitch_attempted += stage_e_outcome.ephemeris_stitch_attempted;
+        state.ephemeris_stitch_succeeded += stage_e_outcome.ephemeris_stitch_succeeded;
+        state.ephemeris_stitch_no_candidate_in_window +=
+            stage_e_outcome.ephemeris_stitch_no_candidate_in_window;
         state
             .last_stage_e_outcomes
             .clone_from(&stage_e_outcome.attempts);
@@ -1163,6 +1176,10 @@ impl StreamingEngine {
             cross_frame_sights_emitted: state.cross_frame_sights_emitted,
             sights_rejected_by_screener: state.sights_rejected_by_screener,
             stage_d_skipped_no_star_evidence: state.stage_d_skipped_no_star_evidence,
+            ephemeris_stitch_attempted: state.ephemeris_stitch_attempted,
+            ephemeris_stitch_succeeded: state.ephemeris_stitch_succeeded,
+            ephemeris_stitch_no_candidate_in_window: state
+                .ephemeris_stitch_no_candidate_in_window,
         }
     }
 
