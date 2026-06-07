@@ -696,6 +696,23 @@ references to the regression tests that pin the behavior. See
    sidereal motion correction are documented as follow-ups; lens
    distortion compensation across the chain is approximate (acceptable
    for non-fisheye lenses).
+   *Resolved 2026-06-07 (cross-frame ephemeris fallback):*
+   sidereal-motion-aware stitching prior added as a Stage E
+   fallback. When Harris+NCC declines, Stage E projects the
+   body's expected ray at both timestamps via
+   ~bris_almanac::body_apparent_place~ and accepts the
+   correspondence under an identity-rotation assumption if a
+   horizon-frame body candidate lies within 3·σ of the
+   ephemeris-predicted point. New module
+   ~bris-streaming/src/pipeline/ephemeris_stitch~; new
+   diagnostics ~ephemeris_stitch_{attempted,succeeded,
+   no_candidate_in_window}~; gated on
+   ~EngineConfig::enable_ephemeris_stitch_fallback~ (default
+   true). Tests:
+   ~bris-streaming/tests/ephemeris_stitch_fallback.rs~ on a
+   synthetic 2-frame J2000 Sun sequence. Docs:
+   ~docs/design/pipeline.md~ Stage E section. IMU/gyro prior
+   still TODO; cross-chain lens-distortion still approximate.
 ** DONE Angle measurement pipeline
    *Audit 2026-06-03 — shortcuts:*
    ~crates/bris-vision/src/measure.rs:71~ uses

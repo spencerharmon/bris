@@ -67,6 +67,7 @@ use bris_vision::{
 };
 use tracing::{debug, trace, warn};
 
+mod ephemeris_stitch;
 mod horizon;
 mod horizon_providers;
 mod hysteresis;

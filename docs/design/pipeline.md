@@ -205,6 +205,72 @@ it's ~30 seconds. Configurable. The current
 5 s and the streaming engine should compute it from the user's
 accuracy target.
 
+### Stage E ephemeris-driven stitch fallback
+
+The primary cross-frame stitcher
+(`bris_vision::panorama_altitude_for_pair`) uses Harris corners
++ NCC to recover the camera rotation between two frames. On
+indoor / low-contrast / motion-blurred captures the corner
+detector frequently fails to produce ≥ 8 reliable
+correspondences and the stitcher returns
+`PanoramaError::TrackingFailed`. The bedroom-moon corpus is the
+motivating example.
+
+When the operator is stationary and the camera is held roughly
+still, the body's apparent motion between two frames is
+well-predicted by the ephemeris alone (Earth rotates at ~15°/h
+≈ 0.0042°/s, plus the body's own apparent motion). Stage E
+falls back to an ephemeris-driven correspondence prior
+(`bris_streaming::pipeline::ephemeris_stitch`) when Harris+NCC
+declines and `EngineConfig::enable_ephemeris_stitch_fallback`
+is `true` (default).
+
+The fallback:
+
+1. Projects the body's expected camera-frame ray at the body
+   frame's timestamp and at the horizon frame's timestamp via
+   `bris_almanac::body_apparent_place` at the engine's
+   configured observer.
+2. Converts the angular delta to a pixel delta in the body
+   frame's intrinsics under a no-roll assumption, with an
+   honest σ that combines almanac uncertainty, parallax
+   sensitivity to the observer-position σ (re-evaluated at a
+   perturbed observer latitude), and a roll-uncertainty
+   contribution.
+3. Looks up a body candidate in the horizon frame's body
+   record (Day centroid, Night peak positions, or
+   IdentifiedStars positions). Picks the one closest to the
+   ephemeris-predicted point.
+4. If the closest candidate's residual to the prediction is
+   within 3·σ_px, accepts the correspondence under an
+   identity-rotation (stationary-camera) assumption. Lifts
+   the body centroid to a camera-space ray in body_frame's
+   intrinsics, treats it as already in horizon_frame's
+   coordinates, and composes with the horizon plane lifted
+   from horizon_frame via `altitude_from_rays`.
+5. Inflates the body-ray direction σ by
+   `STITCH_SIGMA_PER_SECOND_RAD × Δt` (matches the cheap
+   pair-selection stitch σ for honest accounting; the
+   verification step bounds residual camera motion tighter
+   than this, but using the existing constant keeps Stage E's
+   per-sight σ consistent regardless of which stitcher
+   accepted).
+
+When no body candidate exists in the horizon frame, or the
+closest candidate's residual is outside the 3·σ window, the
+fallback declines and Stage E records the original Stitch
+error. Three diagnostic counters surface the path's behavior:
+`ephemeris_stitch_attempted`, `ephemeris_stitch_succeeded`,
+`ephemeris_stitch_no_candidate_in_window` (the third covers
+both "no candidate exists" and "closest candidate outside
+window" — the candidate isn't *in the window* in either case).
+
+The fallback is honest about its assumptions: it only accepts
+when the verification candidate matches the ephemeris
+prediction, which rules out cases where the camera moved
+between frames or the brightest spot in the horizon frame is
+not the same body.
+
 ### Single-LOP vs. multi-LOP fix
 
 A single sight (one body, one moment) gives a line of position, not

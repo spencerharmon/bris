@@ -119,6 +119,7 @@ impl HorizonProviderSet {
 /// real deployment will want to override at least the
 /// [`Observer`].
 #[derive(Debug, Clone)]
+#[allow(clippy::struct_excessive_bools)]
 pub struct EngineConfig {
     /// Observer position, eye height, and atmospheric model.
     /// Drives almanac apparent-place computations and horizon-dip
@@ -515,6 +516,22 @@ pub struct EngineConfig {
     /// `docs/design/observer_motion_staleness.md`.
     pub publication_gate: PublicationGateConfig,
 
+    /// Enable the ephemeris-driven Stage E cross-frame stitch
+    /// fallback. When the Harris+NCC stitcher
+    /// ([`bris_vision::panorama_altitude_for_pair`]) declines
+    /// on a cross-frame pair, Stage E falls back to the
+    /// ephemeris predictor in
+    /// `pipeline::ephemeris_stitch`: if a body candidate
+    /// detected in the horizon frame lies within 3·σ of the
+    /// ephemeris-predicted displacement from the body frame's
+    /// centroid, Stage E accepts the correspondence under an
+    /// identity-rotation (stationary-camera) assumption and
+    /// emits a sight whose stitch σ is the *angular* prediction
+    /// σ (≈ `STITCH_SIGMA_PER_SECOND_RAD × Δt`). Default `true`;
+    /// operators may set to `false` for A/B comparison against
+    /// the Harris+NCC-only baseline.
+    pub enable_ephemeris_stitch_fallback: bool,
+
     /// **Diagnostic-only.** When `true`, the engine accepts the
     /// `ApInput` baked into its initial [`Observer`] and refuses
     /// to re-derive the assumed position from any other source for
@@ -706,6 +723,7 @@ impl EngineConfig {
                 stale_prior_intercept_threshold_nm: 60.0,
             },
             publication_gate: PublicationGateConfig::default(),
+            enable_ephemeris_stitch_fallback: true,
             // Production default: never lock. See the field docs;
             // only `bris-cli replay --ap-lock-truth` flips this on.
             lock_ap_for_replay: false,

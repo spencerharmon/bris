@@ -108,6 +108,7 @@
 //! `moon_geographic_position_matches_skyfield_reference` in the
 //! tests module.
 
+use super::ephemeris_stitch::{predict_body_pixel_motion, EphemerisError};
 use super::queue::{BodyRecord, FrameId, HorizonRecord, Storage};
 use crate::config::EngineConfig;
 use crate::fix::{DominantSource, FixProvenance, PublishedFix};
@@ -124,7 +125,8 @@ use bris_nav::{
     ColdStartConfig, ColdStartError, ColdStartResult, FixError, LineOfPosition, ScreeningConfig,
 };
 use bris_vision::{
-    measure_altitude, panorama_altitude_for_pair, Centroid, HorizonLine, PanoramaError, TrackConfig,
+    altitude_from_rays, measure_altitude, panorama_altitude_for_pair, BodyRay, Centroid,
+    HorizonLine, HorizonRay, PanoramaError, TrackConfig,
 };
 use std::time::{Duration, Instant};
 use tracing::{debug, info, trace};
@@ -142,7 +144,7 @@ use tracing::{debug, info, trace};
 /// the actual stitch σ from the Kabsch per-correspondence RMS
 /// residual; that executed σ supersedes this estimate for the
 /// reported sight σ.
-const STITCH_SIGMA_PER_SECOND_RAD: f64 = 0.5 * std::f64::consts::PI / (60.0 * 180.0);
+pub(super) const STITCH_SIGMA_PER_SECOND_RAD: f64 = 0.5 * std::f64::consts::PI / (60.0 * 180.0);
 
 /// Outcome of one Stage E run.
 #[allow(clippy::struct_excessive_bools)]
@@ -214,6 +216,17 @@ pub(crate) struct StageEOutcome {
     /// run. Counted only when Stage E reached `try_publish`
     /// (i.e. `publish_attempted == true`); otherwise zero.
     pub sights_rejected_by_screener: u64,
+    /// Number of times the ephemeris-driven cross-frame
+    /// stitch fallback was invoked this run (Harris+NCC
+    /// declined and the fallback was enabled).
+    pub ephemeris_stitch_attempted: u64,
+    /// Number of times the ephemeris fallback accepted the
+    /// correspondence and emitted a sight this run.
+    pub ephemeris_stitch_succeeded: u64,
+    /// Number of times the ephemeris fallback had no body
+    /// candidate in the horizon frame to verify against and
+    /// so declined this run.
+    pub ephemeris_stitch_no_candidate_in_window: u64,
     /// Per-candidate reduction outcomes this run, one entry
     /// per (body, horizon) pair Stage E attempted to reduce.
     /// Diagnostic-only; the engine surfaces this verbatim in
@@ -459,7 +472,7 @@ pub(crate) fn run(
             // window; don't re-emit.
             continue;
         }
-        match reduce_to_sight(&cand, storage, cfg) {
+        match reduce_to_sight(&cand, storage, cfg, &mut out) {
             Ok(reduced) => {
                 let is_cross = !is_same_frame(&cand);
                 for r in reduced {
@@ -632,11 +645,17 @@ fn pick_direct_sight_for(
     // altitude) are both domain-standard names; renaming
     // either is worse than the lint.
     clippy::similar_names,
+    // Ephemeris-stitch fallback added ~30 lines of branching
+    // to the cross-frame arm; the function is still linear
+    // and phase-by-phase, splitting just to placate the lint
+    // obscures the structure.
+    clippy::too_many_lines,
 )]
 fn reduce_to_sight(
     c: &PairCandidate<'_>,
     storage: &Storage,
     cfg: &EngineConfig,
+    out: &mut StageEOutcome,
 ) -> Result<Vec<ReducedSight>, ReduceError> {
     let observer = cfg.observer;
     // Look up intrinsics once; both same-frame paths need
@@ -689,14 +708,46 @@ fn reduce_to_sight(
                 // once we have empirical guidance for the
                 // streaming engine's frame regime.
                 let track_cfg = TrackConfig::default();
-                panorama_altitude_for_pair(
+                match panorama_altitude_for_pair(
                     ring_frame.frame(),
                     *centroid,
                     horizon_frame.frame(),
                     c.horizon.line,
                     track_cfg,
-                )
-                .map_err(ReduceError::Stitch)?
+                ) {
+                    Ok(u) => u,
+                    Err(panorama_err) => {
+                        if !cfg.enable_ephemeris_stitch_fallback {
+                            return Err(ReduceError::Stitch(panorama_err));
+                        }
+                        out.ephemeris_stitch_attempted += 1;
+                        match try_ephemeris_stitch(
+                            SightBody::SolarSystem(body),
+                            c,
+                            storage,
+                            cfg,
+                            *centroid,
+                            ring_frame.frame(),
+                            horizon_frame.frame(),
+                        ) {
+                            Ok(Some(u)) => {
+                                out.ephemeris_stitch_succeeded += 1;
+                                u
+                            }
+                            Ok(None) => {
+                                out.ephemeris_stitch_no_candidate_in_window += 1;
+                                return Err(ReduceError::Stitch(panorama_err));
+                            }
+                            Err(e) => {
+                                debug!(
+                                    error = %e,
+                                    "Stage E: ephemeris-stitch fallback declined",
+                                );
+                                return Err(ReduceError::Stitch(panorama_err));
+                            }
+                        }
+                    }
+                }
             };
             let computed = Uncertain::new(apparent.direction.altitude, apparent.altitude_sigma);
             let lop = line_of_position(
@@ -867,6 +918,204 @@ fn reduce_error_kind(e: &ReduceError) -> &'static str {
         ReduceError::Lop(_) => "Lop",
         ReduceError::Stitch(_) => "Stitch",
     }
+}
+
+/// Observer-position 1σ used by the ephemeris-stitch
+/// fallback when calling [`predict_body_pixel_motion`].
+///
+/// The streaming engine doesn't track an observer-position
+/// σ (the `Observer` type carries position only). 100 km
+/// covers "operator picked the wrong city" cold-start but
+/// keeps Moon-parallax σ well sub-pixel at typical focal
+/// lengths; the verification window therefore stays
+/// usefully tight.
+///
+/// When the engine eventually plumbs the last-published
+/// fix's `sigma_major_nm` to this call (follow-up), replace
+/// this constant with the real σ.
+const EPHEMERIS_STITCH_OBSERVER_POSITION_SIGMA_M: f64 = 100_000.0;
+
+/// Try the ephemeris-driven cross-frame stitch fallback.
+///
+/// Invoked by [`reduce_to_sight`] when
+/// [`bris_vision::panorama_altitude_for_pair`] declines on a
+/// cross-frame Day pair and
+/// [`EngineConfig::enable_ephemeris_stitch_fallback`] is
+/// `true`.
+///
+/// Returns:
+///
+/// - `Ok(Some(uncertain_altitude))` when the fallback found a
+///   body candidate in the horizon frame whose pixel offset
+///   from the body-frame centroid matches the
+///   ephemeris-predicted offset within 3·σ, and accepts the
+///   correspondence under an identity-rotation (stationary
+///   camera) assumption. The returned altitude is composed
+///   from the body ray in `body_frame` and the horizon ray
+///   in `horizon_frame` via [`altitude_from_rays`], with the
+///   body-ray direction σ inflated by `STITCH_SIGMA_PER_SECOND_RAD
+///   × Δt` to reflect the cross-frame stitching uncertainty.
+///   This matches the cheap pair-selection σ estimate so the
+///   per-sight σ stays consistent regardless of which stitcher
+///   accepted.
+/// - `Ok(None)` when no body candidate exists in the horizon
+///   frame (the verification step requires one), or when the
+///   candidate fell outside the 3·σ prediction window.
+///   `reduce_to_sight` reports this as `Stitch` failure.
+/// - `Err(EphemerisError)` when the almanac declined (typically
+///   the body is below the horizon at the supplied observer
+///   guess; rare for actively-detected bodies).
+#[allow(clippy::similar_names)]
+fn try_ephemeris_stitch(
+    body: SightBody,
+    c: &PairCandidate<'_>,
+    storage: &Storage,
+    cfg: &EngineConfig,
+    body_centroid: Centroid,
+    body_frame: &bris_vision::Frame,
+    horizon_frame: &bris_vision::Frame,
+) -> Result<Option<bris_core::Uncertain<f64>>, EphemerisError> {
+    // Find body-candidate positions in the horizon frame to
+    // verify the ephemeris-predicted correspondence against.
+    // Day -> the saturated centroid. Night -> the peak
+    // positions (the moon at twilight often presents as a
+    // single brightest peak rather than as a saturated
+    // centroid; we accept the closest-to-prediction peak
+    // as the verification candidate). IdentifiedStars /
+    // None -> nothing to verify against.
+    let horizon_frame_candidates: Vec<(f64, f64)> = storage
+        .body_records()
+        .find(|r| r.frame_id == c.horizon.frame_id)
+        .map_or_else(Vec::new, |r| match &r.detection {
+            super::BodyDetection::Day(centroid, secondaries) => {
+                let mut v = Vec::with_capacity(1 + secondaries.len());
+                v.push((centroid.x, centroid.y));
+                for s in secondaries {
+                    v.push((s.x, s.y));
+                }
+                v
+            }
+            super::BodyDetection::Night(peaks) => peaks.iter().map(|p| (p.x, p.y)).collect(),
+            super::BodyDetection::IdentifiedStars(result) => result
+                .identified
+                .iter()
+                .map(|s| (s.pixel_x, s.pixel_y))
+                .collect(),
+            super::BodyDetection::None => Vec::new(),
+        });
+    if horizon_frame_candidates.is_empty() {
+        return Ok(None);
+    }
+
+    // Roll uncertainty: we have a horizon line in
+    // horizon_frame, so the camera roll is well-constrained
+    // (~0.01 rad ~ 0.5° from the horizon-fit residual). Use
+    // a conservative 0.05 rad floor.
+    let roll_uncertainty_rad = 0.05_f64;
+
+    // Observer position σ: see
+    // EPHEMERIS_STITCH_OBSERVER_POSITION_SIGMA_M.
+    let prediction = predict_body_pixel_motion(
+        body,
+        c.body.frame_tt,
+        c.horizon.frame_tt,
+        cfg.observer,
+        &body_frame.intrinsics,
+        EPHEMERIS_STITCH_OBSERVER_POSITION_SIGMA_M,
+        roll_uncertainty_rad,
+    )?;
+
+    // Verification: of all body-candidate positions in the
+    // horizon frame, find the one closest to the
+    // ephemeris-predicted point and check if its residual is
+    // within 3·σ. Accepting the closest match (rather than
+    // any candidate) keeps the test honest when Stage B
+    // produced multiple peaks (Night path): only the
+    // best-matching one is allowed to claim the body
+    // correspondence.
+    let predicted_x = body_centroid.x + prediction.dx_px;
+    let predicted_y = body_centroid.y + prediction.dy_px;
+    let (closest_x, closest_y, residual_px) = horizon_frame_candidates
+        .iter()
+        .map(|&(cx, cy)| (cx, cy, (cx - predicted_x).hypot(cy - predicted_y)))
+        .min_by(|a, b| a.2.partial_cmp(&b.2).unwrap_or(std::cmp::Ordering::Equal))
+        .expect("non-empty checked above");
+    let actual_dx = closest_x - body_centroid.x;
+    let actual_dy = closest_y - body_centroid.y;
+    let window_px = 3.0 * prediction.sigma_px;
+    if !residual_px.is_finite() || residual_px > window_px {
+        trace!(
+            residual_px,
+            window_px,
+            predicted_dx_px = prediction.dx_px,
+            predicted_dy_px = prediction.dy_px,
+            actual_dx,
+            actual_dy,
+            n_candidates = horizon_frame_candidates.len(),
+            "ephemeris stitch: closest candidate outside 3·σ window",
+        );
+        return Ok(None);
+    }
+
+    debug!(
+        residual_px,
+        window_px,
+        angular_delta_rad = prediction.angular_delta_rad,
+        angular_sigma_rad = prediction.angular_sigma_rad,
+        "ephemeris stitch: accepted cross-frame correspondence",
+    );
+
+    // Identity-rotation composition: lift the body centroid
+    // to a camera-space ray in body_frame's intrinsics, treat
+    // it as already in horizon_frame's coordinates (the
+    // verification just confirmed no significant camera
+    // motion), and compose with the horizon plane lifted
+    // from horizon_frame.
+    //
+    // Stitch σ inflation on the body ray: the time-gap
+    // proportional rate constant. Honest per AGENTS.md: the
+    // verification step bounds the camera-motion residual
+    // *tighter* than this (the cheap rate estimate is
+    // conservative), but we use the existing constant for
+    // consistency with the pair-selection σ and to avoid
+    // surfacing a sight whose σ disagrees with what
+    // pair-selection promised it.
+    let body_ray = BodyRay::from_pixel(
+        &body_frame.intrinsics,
+        body_centroid.x,
+        body_centroid.y,
+        body_centroid.position_sigma_px,
+    );
+    let delta_t = time_gap_seconds(c.body.frame_tt, c.horizon.frame_tt);
+    let stitch_sigma_rad = STITCH_SIGMA_PER_SECOND_RAD * delta_t;
+    let combined_body_sigma_rad =
+        (body_ray.direction_sigma.value().powi(2) + stitch_sigma_rad.powi(2)).sqrt();
+    let inflated_body_sigma =
+        bris_core::Sigma::new(combined_body_sigma_rad).unwrap_or(body_ray.direction_sigma);
+    let inflated_body_ray = BodyRay {
+        ray: body_ray.ray,
+        direction_sigma: inflated_body_sigma,
+    };
+
+    let horizon_ray = HorizonRay::from_line(
+        &c.horizon.line,
+        &horizon_frame.intrinsics,
+        horizon_frame.width(),
+    );
+    let Some(horizon_ray) = horizon_ray else {
+        // Degenerate horizon line for ray lifting. Treat as a
+        // fallback decline rather than an almanac error.
+        return Ok(None);
+    };
+
+    let measurement = altitude_from_rays(&inflated_body_ray, &horizon_ray);
+    if !measurement.altitude_rad.is_finite() {
+        return Ok(None);
+    }
+    Ok(Some(bris_core::Uncertain {
+        value: measurement.altitude_rad,
+        sigma: measurement.altitude_sigma,
+    }))
 }
 
 /// Run `multi_sight_fix` over the current window; build a
