@@ -122,6 +122,41 @@ behaviour. The published fix will carry honestly-large
 `sigma_major_nm`; downstream consumers must respect the
 reported sigma.
 
+## Pre-fix sight screener (k·σ-honest)
+
+Before `multi_sight_fix` runs in Stage E, the sight window
+is run through `bris_nav::screen_sights`. Three gates fire:
+
+1. **Absolute-intercept gate.** Disabled inside Stage E
+   (`max_abs_intercept_nm = f64::INFINITY`) because the
+   stale-prior cold-start trigger needs large intercepts to
+   survive the screener so it can re-derive the AP. Tuning
+   this in `EngineConfig::screening` is a no-op.
+2. **Azimuth-disagreement gate.** Two sights whose
+   azimuths agree within `same_look_direction_delta_rad`
+   (default 5°) but whose intercepts have opposite signs
+   are geometrically inconsistent regardless of σ; the
+   larger-magnitude offender is dropped. Sign-based, not
+   σ-scaled.
+3. **Consensus outlier (k·σ).** With ≥ 3 sights, a sight
+   whose intercept lies more than `outlier_k_sigma` from
+   the leave-one-out median is dropped. The σ used is
+   `max(1.4826·MAD_of_others, per-sight σ_intercept)` —
+   the per-sight σ floor is **load-bearing**, so a sight
+   whose own σ honestly explains a large residual is
+   kept. A wide-σ ML-gravity horizon never gets rejected
+   just for sitting far from a tight optical consensus.
+
+Default `outlier_k_sigma = 3.0` (standard 3-σ rejection).
+Tune via `EngineConfig::screening.outlier_k_sigma` (no CLI
+flag yet — add one if a replay session genuinely needs it).
+
+The screener operates on sights **already in the window**;
+it cannot create sights that Stage E's pair-reduction
+declined to produce. A capture that lands 0 sights in the
+window has a pre-screener problem (classifier, body
+detection, or plate-solve failure), not a screener problem.
+
 ## Render artifacts: base PNG + client-side SVG overlay
 
 `--render-frames` writes two things per frame:

@@ -1155,7 +1155,7 @@ fn try_publish(
     // independent of AP quality.
     let screen_cfg = ScreeningConfig {
         max_abs_intercept_nm: f64::INFINITY,
-        ..ScreeningConfig::default()
+        ..cfg.screening
     };
     let screening = screen_sights(&all_lops, screen_cfg);
     let rejected_positions: std::collections::BTreeSet<usize> =

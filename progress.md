@@ -146,6 +146,48 @@ scene; expected).
 
 ---
 
+## bris-nav: sight screener k·σ-honesty audit (2026-06-07)
+
+Audit of the pre-fix sight screener (PR #60 vintage) per
+`plan.org` Phase 7.5 #15. The screener was already k·σ-gated
+by design: the consensus-outlier rule uses `σ =
+max(1.4826·MAD_of_others, per-sight σ_intercept)`, so a
+wide-σ ML-gravity sight is never rejected for sitting far
+from a tight optical consensus, and the absolute-intercept
+gate is explicitly disabled at the Stage E call site
+(`max_abs_intercept_nm = f64::INFINITY`) so the stale-prior
+cold-start trigger can fire.
+
+Changes:
+
+- `ScreeningConfig::outlier_k_sigma` default dropped from
+  5.0 to 3.0 (standard 3-σ rejection convention).
+- `EngineConfig::screening: bris_nav::ScreeningConfig`
+  added so an operator can tune k per replay; Stage E now
+  reads `cfg.screening` instead of `ScreeningConfig::
+  default()`.
+- Boundary unit tests in `bris-nav::screen`: a sight whose
+  residual = 2·σ is accepted, residual = 4·σ is rejected
+  under k=3; the configurable-k contract is verified by a
+  k=3-keeps / k=2-rejects pair on the same 2.5·σ sight.
+- `docs/design/replay_modes.md` documents the three
+  screener gates and the per-sight σ floor.
+
+Bedroom-moon (session
+508197ac-09ab-49d9-a430-a9c8556155f8) reproduction:
+`replay --ml-gravity --horizon-providers ml-gravity
+--ap-seed-truth` still lands `sight_window_depth=0`. The
+screener is not the cause: 0 sights are ever inserted into
+the window, so the screener never runs on them. Root cause
+is upstream — the day/night classifier (correctly) dispatches
+Night at Austin, plate-solve declines on every moon-glare
+frame, and the Day-path body identification is hardcoded to
+Sun — so no Moon-as-Moon body record reaches `reduce_to_
+sight`. Tracked separately; the screener change here does
+not regress or improve that capture.
+
+---
+
 ## bris-cli: cross-capture session-engine continuity (2026-06-05)
 
 `bris-cli replay --session` and `--all-sessions` now reuse one
