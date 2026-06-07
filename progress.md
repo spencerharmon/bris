@@ -9,6 +9,43 @@ For the end-to-end pipeline architecture and data flow, see
 
 ---
 
+## bris-streaming: Stage D dispatch policy (2026-06-07)
+
+New `EngineConfig::stage_d_dispatch_policy` knob
+(`StageDDispatchPolicy::{Always, WhenStarsExpected, Never}`)
+with default `WhenStarsExpected`. Gates Stage D (plate solve)
+dispatch on the conjunction (dispatched verdict == `Night`) AND
+(≥ 3 peaks); refuses Day frames and Night frames with too few
+peaks to form the geometric-hash matcher's minimum triangle.
+
+Motivation: on indoor / no-stars-visible scenes every
+Night-classified frame burns ~30–50 ms in release on a
+`StarHashDb` lookup structurally guaranteed to return nothing.
+Smoke timing on the 74-frame moon-session bedroom capture
+(`captures/bris-debug-0019e81949871b04d95eca66057d5`) in
+release, ml-gravity on:
+
+- `--stage-d-dispatch always`  : 57.8 s wall
+- default (`WhenStarsExpected`): 49.8 s wall (−14 %)
+
+Lazy plate-solver database build (`PlateSolverInit::Lazy`) is
+also suppressed when the gate refuses, so the ~10–30 s build
+is no longer triggered by frames that wouldn't have plate-
+solved anyway.
+
+New diagnostics: `EngineDiagnostics::stage_d_skipped_no_star_evidence`
+(gate-specific) plus the existing `stages[STAGE_D].skipped`
+bump on every refusal.
+
+CLI: `bris replay --stage-d-dispatch <always|when-stars-expected|never>`;
+default unset = inherit `EngineConfig`. Use `always` to recover
+the pre-gate behaviour for diagnostic replays.
+
+`docs/design/pipeline.md` §"Stage D dispatch policy"
+documents the rule + diagnostics.
+
+---
+
 ## bris-cli: cross-capture session-engine continuity (2026-06-05)
 
 `bris-cli replay --session` and `--all-sessions` now reuse one
