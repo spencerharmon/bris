@@ -1777,6 +1777,11 @@ fn run_one_mode(
         ephemeris_stitch_succeeded = diag.ephemeris_stitch_succeeded,
         ephemeris_stitch_no_candidate_in_window =
             diag.ephemeris_stitch_no_candidate_in_window,
+        gradient_refused_no_sky = diag.gradient_refused_no_sky,
+        sky_region_refused_no_sky = diag.sky_region_refused_no_sky,
+        night_refused_no_sky = diag.night_refused_no_sky,
+        night_textured_refused_no_sky = diag.night_textured_refused_no_sky,
+        reflection_pair_refused_no_sky = diag.reflection_pair_refused_no_sky,
         "replay: engine diagnostics"
     );
     Ok(ModeResult {
