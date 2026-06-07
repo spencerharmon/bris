@@ -453,8 +453,6 @@ function escapeHtml(s) {
 
 // ---------- fix list + map modal ----------
 
-const SVG_NS = "http://www.w3.org/2000/svg";
-
 function renderFixesListHtml(sessionId, captureId, fixes) {
   if (!fixes || fixes.length === 0) return "";
   let html = `<div class="fixlist"><h4>${fixes.length} published fix${fixes.length === 1 ? "" : "es"}</h4><ul>`;
