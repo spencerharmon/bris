@@ -1169,4 +1169,97 @@ mod tests {
             "gate must allow gradient/sky-region to run when sky_fraction is None"
         );
     }
+
+    /// Composition between PR #75 (`UseCaseProfile` dispatch) and
+    /// PR #78 (seg-fraction eligibility gate): the profile picks
+    /// which providers are eligible at all, and the seg gate then
+    /// refuses *at runtime* any of them that don't have enough sky.
+    ///
+    /// Aeronautical drops `night` and `night_textured` from its
+    /// `HorizonProviderSet` entirely. With a sky-starved seg mask
+    /// (3 % sky), Night-condition dispatch must therefore never
+    /// even *attempt* those two providers — so their
+    /// `*_refused_no_sky` counters stay at zero, distinct from the
+    /// default-profile case where they would each have been
+    /// refused once.
+    ///
+    /// Conversely Aeronautical keeps `gradient` and `sky_region`,
+    /// so a Day-condition dispatch on the same sky-starved mask
+    /// must still refuse them exactly once each (the gate runs
+    /// inside the profile's eligible set).
+    #[cfg(feature = "segmentation")]
+    #[test]
+    fn seg_gate_composes_with_aeronautical_profile() {
+        use crate::profile::apply_profile;
+        use bris_bundle::UseCaseProfile;
+
+        let mut cfg = EngineConfig::new(Observer::default_dev());
+        apply_profile(&mut cfg, UseCaseProfile::Aeronautical);
+        assert!(
+            cfg.horizon_provider_set.gradient && cfg.horizon_provider_set.sky_region,
+            "Aeronautical must keep day providers in its set"
+        );
+        assert!(
+            !cfg.horizon_provider_set.night && !cfg.horizon_provider_set.night_textured,
+            "Aeronautical must drop night providers from its set"
+        );
+        assert!(
+            !cfg.horizon_provider_set.reflection_pair,
+            "Aeronautical must drop reflection-pair from its set"
+        );
+
+        let frame = synthetic_horizon(32);
+        let mask = synthetic_seg_mask(0.03);
+        let sky_fraction = sky_fraction_from_seg_mask(Some(&mask));
+
+        // Day dispatch: gradient + sky_region are in-set AND
+        // hit the gate — each refused exactly once.
+        let (_, _, stats_day) = detect(
+            &FramePyramid::new(frame.clone()),
+            Condition::Day,
+            &cfg,
+            &[],
+            None,
+            frame.capture_tt,
+            Some(&mask),
+            sky_fraction,
+        );
+        assert_eq!(
+            stats_day.sky_gate.gradient_refused, 1,
+            "Aeronautical keeps gradient: low sky must refuse it once"
+        );
+        assert_eq!(
+            stats_day.sky_gate.sky_region_refused, 1,
+            "Aeronautical keeps sky-region: low sky must refuse it once"
+        );
+
+        // Night dispatch: night + night_textured are NOT in the
+        // profile's set, so the dispatch loop never reaches the
+        // gate — refusal counters stay at zero. This is the
+        // composition guarantee: the gate cannot refuse a
+        // provider the profile already excluded.
+        let (_, _, stats_night) = detect(
+            &FramePyramid::new(frame.clone()),
+            Condition::Night,
+            &cfg,
+            &[],
+            None,
+            frame.capture_tt,
+            Some(&mask),
+            sky_fraction,
+        );
+        assert_eq!(
+            stats_night.sky_gate.night_refused, 0,
+            "Aeronautical drops night: gate must not run, counter stays zero"
+        );
+        assert_eq!(
+            stats_night.sky_gate.night_textured_refused, 0,
+            "Aeronautical drops night-textured: gate must not run, counter stays zero"
+        );
+        assert_eq!(
+            stats_night.sky_gate.reflection_pair_refused, 0,
+            "reflection-pair is dispatched from Stage C entry in pipeline/mod.rs, \
+             not from this `detect()` path; counter must be zero here"
+        );
+    }
 }
