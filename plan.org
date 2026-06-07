@@ -1045,6 +1045,18 @@ references to the regression tests that pin the behavior. See
    almanac call once per batch. Wired into the regression harness
    via ~[expected_classifier]~ in ~case.toml~.
 
+   - 2026-06-07: gained ~classify_with_masks~ entry point that
+     consumes an optional sky-allow mask + body-exclude mask
+     for the ambient-luma estimator. Streaming engine now feeds
+     it the cached segmentation sky mask + the cheap bright-blob
+     mask via a Stage 0 pass that runs once per frame. Same
+     cached segmentation mask threads through
+     ~HorizonProviderContext::seg_mask~ so providers share one
+     inference. Adds a seg-fraction gate that refuses
+     sky-dependent providers when the scene has insufficient sky
+     (counters: ~<provider>_refused_no_sky~ on EngineDiagnostics).
+     See ~docs/design/pre_classification_masking.md~.
+
 ** DONE Load-time rotation infrastructure (opt-in)
    ~Rotation~ enum + ~rotate_pixels~ primitive + ~Frame::source_rotation~
    + ~load_frame_from_path_with_rotation~ + ~segment_with_rotation~.

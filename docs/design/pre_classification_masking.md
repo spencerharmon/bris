@@ -1,7 +1,19 @@
 # Pre-classification masking & pipeline reordering
 
-Status: **design draft** (operator review pending). No code
-changes proposed here are implemented yet.
+Status: **live as of 4a69240** (2026-06-07). All four steps of
+the implementation order below are wired in production. The
+remaining items (motion-gated seg caching, fast-path gates) are
+follow-up work and tracked separately.
+
+**Results note.** Smoke replay of
+`bris-corpus/sessions/508197ac.../captures/0019e87174c5f9ba9bc3cde06f32e`
+(7-frame bedroom-moon, no actual horizon in any frame): every
+geometric horizon provider was refused by the seg-fraction gate
+(`gradient_refused_no_sky=7`, `sky_region_refused_no_sky=7`,
+`night_refused_no_sky=7`, `night_textured_refused_no_sky=7`,
+`reflection_pair_refused_no_sky=0`). Pre-PR the same capture
+produced 7 spurious horizon hypotheses; post-PR
+`horizon_queue_depth=0` for the run.
 
 Related docs:
 - `pipeline.md` — current per-frame pipeline ordering.

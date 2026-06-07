@@ -9,6 +9,48 @@ For the end-to-end pipeline architecture and data flow, see
 
 ---
 
+## Pipeline: pre-classification masking + seg-cached horizon dispatch (2026-06-07)
+
+Reorders the per-frame pipeline so that segmentation runs ONCE
+per frame, before the classifier, and is cached on a per-frame
+context for every horizon provider that needs it. The cheap
+`compute_bright_blob_mask` also runs in this Stage 0 pass.
+Classifier consumes both via `bris_vision::classify_with_masks`
+(sky-allow mask + body-exclude mask), so ambient luma is no
+longer biased upward by a saturated moon disc on an otherwise
+night scene — the Austin pond Twilight→Night fail-mode that
+motivated `docs/design/pre_classification_masking.md`.
+
+Stage C dispatch gains a seg-fraction eligibility gate:
+providers that depend on sky/sea regions (gradient,
+sky-region, night, night-textured, reflection-pair) refuse to
+run when the cached sky-fraction is below their
+`MIN_SKY_FRACTION`. Vanishing-point and ML-gravity bypass.
+When the seg mask is unavailable (feature off, model load
+failed, inference failed) the gate falls back to today's
+unconditional dispatch — it is never a silent disabler.
+
+New `EngineDiagnostics` counters: `gradient_refused_no_sky`,
+`sky_region_refused_no_sky`, `night_refused_no_sky`,
+`night_textured_refused_no_sky`,
+`reflection_pair_refused_no_sky`. CLI surfaces all five in the
+`replay: engine diagnostics` log line.
+
+Smoke replay on `bris-corpus/sessions/508197ac.../captures/0019e87174c5f9ba9bc3cde06f32e`
+(7-frame bedroom-moon scene): finishes with every gradient /
+sky-region / night / night-textured invocation refused
+(`gradient_refused_no_sky=7`, `sky_region_refused_no_sky=7`,
+`night_refused_no_sky=7`, `night_textured_refused_no_sky=7`,
+`reflection_pair_refused_no_sky=0`). Pre-PR the bedroom-moon
+frames returned `horizon_queue_depth=7` of spurious indoor-edge
+horizons; post-PR the queue is empty.
+
+See `docs/design/pre_classification_masking.md` for the
+design and `docs/design/ml_gravity_results.md` for the
+"known latent bug" the gate addresses.
+
+---
+
 ## bris-streaming: ephemeris-driven Stage E stitch fallback (2026-06-07)
 
 New correspondence prior for Stage E cross-frame stitching.
@@ -143,6 +185,7 @@ horizon hypotheses per capture vs 7 under Custom / Marine /
 LandBased / Urban, and `fix_publish_attempts` drops from 4 to
 3 in tandem. All five profiles publish 0 fixes (adversarial
 scene; expected).
+
 
 ---
 
