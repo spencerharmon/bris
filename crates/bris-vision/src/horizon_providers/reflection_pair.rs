@@ -652,6 +652,8 @@ mod tests {
             body_candidates: cands,
             position_prior: prior,
             timestamp: Tt::from_julian_date(JD_J2000),
+            #[cfg(feature = "segmentation")]
+            seg_mask: None,
         }
     }
 

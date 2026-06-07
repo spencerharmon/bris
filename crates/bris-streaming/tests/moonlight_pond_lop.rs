@@ -289,6 +289,8 @@ fn moonlight_pond_produces_moon_lop() {
         body_candidates: &candidates,
         position_prior: Some(position_prior),
         timestamp: tt,
+        #[cfg(feature = "segmentation")]
+        seg_mask: None,
     };
     let provider = ReflectionPairProvider::default();
     let mut stats = ReflectionPairStats::default();

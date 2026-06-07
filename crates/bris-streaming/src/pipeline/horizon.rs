@@ -170,6 +170,8 @@ pub(crate) fn detect(
     body_candidates: &[BodyCandidate],
     position_prior: Option<PositionPrior>,
     timestamp: Tt,
+    #[cfg(feature = "segmentation")] seg_mask: Option<&bris_vision::SegmentationMask>,
+    #[cfg(not(feature = "segmentation"))] _seg_mask: Option<&()>,
 ) -> (HorizonStageOutcome, (u32, u32), StageCStats) {
     let analyzed_size_full = (pyramid.full_width(), pyramid.full_height());
     if matches!(condition, Condition::Unusable) {
@@ -207,6 +209,8 @@ pub(crate) fn detect(
         body_candidates,
         position_prior,
         timestamp,
+        #[cfg(feature = "segmentation")]
+        seg_mask,
     };
 
     let early_term = cfg.horizon_early_termination_sigma_rad;
@@ -661,6 +665,10 @@ mod tests {
             &[],
             None,
             frame.capture_tt,
+            #[cfg(feature = "segmentation")]
+            None,
+            #[cfg(not(feature = "segmentation"))]
+            None,
         );
         match outcome {
             HorizonStageOutcome::Detected { detector, line, .. } => {
@@ -699,6 +707,10 @@ mod tests {
             &[],
             None,
             frame.capture_tt,
+            #[cfg(feature = "segmentation")]
+            None,
+            #[cfg(not(feature = "segmentation"))]
+            None,
         );
         assert!(matches!(outcome, HorizonStageOutcome::None));
     }
@@ -714,6 +726,10 @@ mod tests {
             &[],
             None,
             frame.capture_tt,
+            #[cfg(feature = "segmentation")]
+            None,
+            #[cfg(not(feature = "segmentation"))]
+            None,
         );
         match outcome {
             HorizonStageOutcome::Detected { detector, .. } => {
@@ -790,6 +806,10 @@ mod tests {
             &[],
             None,
             frame.capture_tt,
+            #[cfg(feature = "segmentation")]
+            None,
+            #[cfg(not(feature = "segmentation"))]
+            None,
         );
         assert!(
             !stats.vertical_line.invoked,
@@ -821,6 +841,10 @@ mod tests {
             &[],
             None,
             frame.capture_tt,
+            #[cfg(feature = "segmentation")]
+            None,
+            #[cfg(not(feature = "segmentation"))]
+            None,
         );
         assert!(
             stats.vertical_line.invoked,
@@ -844,6 +868,10 @@ mod tests {
             &[],
             None,
             frame.capture_tt,
+            #[cfg(feature = "segmentation")]
+            None,
+            #[cfg(not(feature = "segmentation"))]
+            None,
         );
         assert!(
             matches!(outcome_off, HorizonStageOutcome::None),
@@ -860,6 +888,10 @@ mod tests {
             &[],
             None,
             frame.capture_tt,
+            #[cfg(feature = "segmentation")]
+            None,
+            #[cfg(not(feature = "segmentation"))]
+            None,
         );
         assert!(
             stats_on.vertical_line.hypothesized,

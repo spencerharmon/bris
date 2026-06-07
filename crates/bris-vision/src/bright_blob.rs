@@ -216,6 +216,8 @@ fn dilate(mask: &[bool], w: usize, h: usize, radius: usize) -> Vec<bool> {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::cast_possible_wrap)]
+
     use super::*;
     use crate::frame::{Frame, Intrinsics};
     use bris_core::time::{Tt, JD_J2000};
@@ -238,9 +240,10 @@ mod tests {
 
     fn paint_disk(pixels: &mut [u16], w: u32, cx: i32, cy: i32, r: i32, value: u16) {
         let r2 = r * r;
-        let h = pixels.len() / w as usize;
-        for y in 0..h as i32 {
-            for x in 0..w as i32 {
+        let h = (pixels.len() / w as usize) as i32;
+        let w_i = w as i32;
+        for y in 0..h {
+            for x in 0..w_i {
                 let dx = x - cx;
                 let dy = y - cy;
                 if dx * dx + dy * dy <= r2 {
@@ -310,11 +313,11 @@ mod tests {
         // the contract is "nothing meaningful". We accept
         // up to ~1% in case dilation of a single edge pixel
         // creates a small region; in practice it's zero.
+        let total = (w as usize) * (h as usize);
         assert!(
-            count_true(&mask) < (w * h) as usize / 100,
-            "all-dark frame produced a large mask: {} / {}",
+            count_true(&mask) < total / 100,
+            "all-dark frame produced a large mask: {} / {total}",
             count_true(&mask),
-            w * h
         );
     }
 

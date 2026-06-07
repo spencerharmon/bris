@@ -92,6 +92,13 @@ pub struct PositionPrior {
 /// Holds the working analysis frame, intrinsics, the per-frame
 /// body candidates (a narrow view of `BodyDetection`), an
 /// optional position prior, and the frame's capture instant.
+///
+/// When the `segmentation` feature is enabled, `seg_mask` carries
+/// the per-frame segmentation result (precomputed once by the
+/// pipeline so multiple providers can share it without re-running
+/// inference). `None` means "seg unavailable on this frame" —
+/// either the feature is off, the model isn't loaded, the frame
+/// lacks a `source_path`, or inference failed.
 #[derive(Debug, Clone, Copy)]
 pub struct HorizonProviderContext<'a> {
     /// Working-resolution analysis frame.
@@ -105,6 +112,11 @@ pub struct HorizonProviderContext<'a> {
     pub position_prior: Option<PositionPrior>,
     /// Capture instant of the frame.
     pub timestamp: Tt,
+    /// Per-frame segmentation result, precomputed by the
+    /// pipeline. Providers that consume sky / sea masks read
+    /// from here instead of running inference themselves.
+    #[cfg(feature = "segmentation")]
+    pub seg_mask: Option<&'a crate::SegmentationMask>,
 }
 
 /// A horizon hypothesis produced by a provider.

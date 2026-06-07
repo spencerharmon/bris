@@ -167,17 +167,18 @@ impl HorizonProvider for SegmentationProvider<'_> {
         TemporalScope::IntraFrame
     }
     fn detect(&self, ctx: &HorizonProviderContext<'_>) -> Option<HorizonHypothesis> {
-        use bris_vision::{detect_horizon_via_segmentation, load_model};
-        let model_path = self.cfg.segmentation_model_path.as_ref()?;
-        if let Err(e) = load_model(model_path) {
-            tracing::debug!(
-                path = %model_path.display(),
-                error = %e,
-                "Stage C: segmentation model load failed; will not retry per-frame"
-            );
-            return None;
-        }
-        match detect_horizon_via_segmentation(ctx.frame, self.cfg.horizon_cfg) {
+        use bris_vision::detect_horizon_via_segmentation_with_mask;
+        // The pipeline pre-computes the segmentation mask once
+        // per frame (`process_frame::precompute_seg_mask`) and
+        // threads it through the provider context. When the
+        // pre-compute didn't produce a mask (feature disabled,
+        // model failed to load, frame lacks a `source_path`,
+        // inference failed), this provider declines for this
+        // frame rather than running inference in-line — doing
+        // so would defeat the once-per-frame cache.
+        let mask = ctx.seg_mask?;
+        match detect_horizon_via_segmentation_with_mask(ctx.frame, self.cfg.horizon_cfg, mask, None)
+        {
             Ok(line) => Some(HorizonHypothesis {
                 line,
                 provenance: HorizonProvenance::Optical(OpticalKind::Segmentation),
@@ -188,5 +189,127 @@ impl HorizonProvider for SegmentationProvider<'_> {
                 None
             }
         }
+    }
+}
+
+#[cfg(all(test, feature = "segmentation"))]
+mod seg_cache_tests {
+    //! Structural tests proving the segmentation provider
+    //! reads from the pipeline-supplied cache rather than
+    //! running its own inference pass. The "seg runs once
+    //! per frame" guarantee falls out of this contract:
+    //! since the provider declines when `ctx.seg_mask` is
+    //! `None`, the only inference call site is the
+    //! pipeline's `precompute_seg_mask`, which runs at
+    //! most once per `process_frame`.
+
+    #![allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+
+    use super::*;
+    use bris_almanac::Observer;
+    use bris_core::time::{Tt, JD_J2000};
+    use bris_vision::horizon_providers::{HorizonProvider, HorizonProviderContext};
+    use bris_vision::segment::{CLASS_SEA, CLASS_SKY, INFERENCE_SIZE};
+    use bris_vision::{Frame, Intrinsics, SegmentationMask};
+
+    fn frame(w: u32, h: u32) -> Frame {
+        let pixels = vec![0u16; (w * h) as usize];
+        Frame::new(
+            w,
+            h,
+            pixels,
+            Tt::from_julian_date(JD_J2000),
+            0,
+            Intrinsics::placeholder(w, h),
+        )
+        .unwrap()
+    }
+
+    /// Build a synthetic segmentation mask whose top half is
+    /// `CLASS_SKY` and bottom half is `CLASS_SEA` — enough for
+    /// the finalize step to fit a horizon line. Inference-resolution.
+    fn synthetic_sky_sea_mask() -> SegmentationMask {
+        let n = INFERENCE_SIZE;
+        let mut labels = vec![0u32; n * n];
+        for y in 0..n {
+            let cls = if y < n / 2 { CLASS_SKY } else { CLASS_SEA };
+            for x in 0..n {
+                labels[y * n + x] = cls;
+            }
+        }
+        SegmentationMask {
+            width: n as u32,
+            height: n as u32,
+            labels,
+        }
+    }
+
+    fn ctx_with<'a>(
+        f: &'a Frame,
+        mask: Option<&'a SegmentationMask>,
+    ) -> HorizonProviderContext<'a> {
+        HorizonProviderContext {
+            frame: f,
+            intrinsics: &f.intrinsics,
+            body_candidates: &[],
+            position_prior: None,
+            timestamp: f.capture_tt,
+            seg_mask: mask,
+        }
+    }
+
+    #[test]
+    fn segmentation_provider_declines_when_seg_mask_is_none() {
+        // No cached mask -> provider must NOT run inference
+        // in-line. Returns None without touching the model.
+        let cfg = EngineConfig::new(Observer::default_dev());
+        let f = frame(256, 256);
+        let ctx = ctx_with(&f, None);
+        let provider = SegmentationProvider { cfg: &cfg };
+        assert!(
+            provider.detect(&ctx).is_none(),
+            "SegmentationProvider must decline without a cached seg mask",
+        );
+    }
+
+    #[test]
+    fn segmentation_provider_uses_cached_mask_without_loading_model() {
+        // load_model has not been called. The synthetic mask
+        // makes the finalize step produce a horizon. If the
+        // provider tried to run its own inference it would
+        // fail with "model not loaded".
+        let cfg = EngineConfig::new(Observer::default_dev());
+        let f = frame(256, 256);
+        let mask = synthetic_sky_sea_mask();
+        let ctx = ctx_with(&f, Some(&mask));
+        let provider = SegmentationProvider { cfg: &cfg };
+        let hyp = provider
+            .detect(&ctx)
+            .expect("cached mask should drive a horizon hypothesis");
+        // Sky/sea boundary at mid-frame; check intercept is
+        // roughly halfway down (256 / 2 = 128).
+        assert!(
+            (hyp.line.intercept - 128.0).abs() < 16.0,
+            "expected horizon near y=128, got {}",
+            hyp.line.intercept,
+        );
+    }
+
+    #[test]
+    fn multiple_provider_invocations_share_one_cached_mask() {
+        // Two back-to-back detect() calls with the SAME
+        // cached mask must each succeed without invoking
+        // inference (model is not loaded in this test).
+        // This is the structural guarantee that the
+        // segmentation pass runs at most once per frame
+        // regardless of how many horizon providers consult
+        // the mask.
+        let cfg = EngineConfig::new(Observer::default_dev());
+        let f = frame(256, 256);
+        let mask = synthetic_sky_sea_mask();
+        let ctx = ctx_with(&f, Some(&mask));
+        let provider = SegmentationProvider { cfg: &cfg };
+        assert!(provider.detect(&ctx).is_some());
+        assert!(provider.detect(&ctx).is_some());
     }
 }

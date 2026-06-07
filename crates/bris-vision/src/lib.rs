@@ -84,8 +84,9 @@ pub use ray::{
 };
 #[cfg(feature = "segmentation")]
 pub use segment::{
-    detect_horizon_via_segmentation, detect_horizon_via_segmentation_with_column_mask, load_model,
-    segment, segment_with_rotation, SegmentError, SegmentationMask,
+    detect_horizon_via_segmentation, detect_horizon_via_segmentation_with_column_mask,
+    detect_horizon_via_segmentation_with_mask, load_model, segment, segment_with_rotation,
+    SegmentError, SegmentationMask,
 };
 pub use track::{
     detect_corners, track, track_peaks, track_rotation, Corner, RigidTransform,

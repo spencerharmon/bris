@@ -480,6 +480,8 @@ mod tests {
             body_candidates: &[],
             position_prior: None,
             timestamp: Tt::from_julian_date(JD_J2000),
+            #[cfg(feature = "segmentation")]
+            seg_mask: None,
         }
     }
 
