@@ -62,7 +62,7 @@ use bris_almanac::{body_apparent_place, Observer, SolarSystemBody};
 use bris_core::time::Tt;
 use bris_core::{Latitude, Longitude, Sigma, Uncertain};
 use bris_vision::{
-    classify, detect_peaks, detect_peaks_above_horizon, Centroid, Classification, Condition, Frame,
+    detect_peaks, detect_peaks_above_horizon, Centroid, Classification, Condition, Frame,
     HorizonLine, Peak, SaturatedBodyConfig,
 };
 use tracing::{debug, trace, warn};
@@ -76,8 +76,9 @@ mod stage_d;
 mod stage_e;
 
 pub(crate) use horizon::{
-    merge_reflection_pair, FusionStats, HorizonStageOutcome, MlGravityDispatch,
-    ReflectionPairMerge, VanishingPointDispatch,
+    merge_reflection_pair, sky_fraction_from_seg_mask, sky_gate_allows, FusionStats,
+    HorizonStageOutcome, MlGravityDispatch, ReflectionPairMerge, SkyGateStats,
+    VanishingPointDispatch, MIN_SKY_FRACTION_REFLECTION_PAIR,
 };
 pub(crate) use hysteresis::ClassifierHysteresis;
 pub(crate) use queue::{FrameId, Storage};
@@ -206,6 +207,10 @@ pub(crate) struct StageOutcome {
     /// diagnostics so operators can see how often providers
     /// agree / disagree.
     pub fusion_stats: FusionStats,
+    /// Per-frame seg-fraction gate counters. Folded into
+    /// [`crate::EngineDiagnostics`]'s per-provider
+    /// `*_refused_no_sky` fields.
+    pub sky_gate_stats: SkyGateStats,
 }
 
 /// Process one frame through Stages A, B, and C synchronously.
@@ -224,9 +229,33 @@ pub(crate) fn process_frame(
     position_prior: Option<bris_vision::PositionPrior>,
 ) -> StageOutcome {
     let frame = pyramid.full();
+
+    // ---- Stage 0: pre-classification masking (seg + bright-blob) ----
+    //
+    // Run segmentation (when enabled) and the cheap bright-blob
+    // mask BEFORE the classifier so it samples ambient sky luma
+    // instead of middle-band-everywhere. Seg mask is cached on
+    // the per-frame stage context so every horizon provider that
+    // needs it reuses the same inference output — the
+    // segmentation model runs at most once per frame.
+    //
+    // See docs/design/pre_classification_masking.md for the
+    // rationale (Austin-pond Twilight→Night flip, et al).
+    let seg_mask = precompute_seg_mask(frame, cfg);
+    let bright_blob =
+        bris_vision::compute_bright_blob_mask(frame, bris_vision::BrightBlobConfig::default());
+    let sky_mask = seg_sky_mask(seg_mask.as_ref(), frame.width(), frame.height());
+    let sky_fraction = sky_fraction_from_seg_mask(seg_mask_ref(seg_mask.as_ref()));
+
     // ---- Stage A: classify (raw) + apply hysteresis ----
     let sun_alt_deg = sun_altitude_deg(cfg.observer, frame.capture_tt);
-    let classification = classify(frame, sun_alt_deg, cfg.condition_cfg);
+    let classification = bris_vision::classify_with_masks(
+        frame,
+        sun_alt_deg,
+        cfg.condition_cfg,
+        sky_mask.as_deref(),
+        Some(&bright_blob),
+    );
     let dispatched_condition =
         hysteresis.update(classification.condition, cfg.classifier_hysteresis_frames);
     trace!(
@@ -235,7 +264,9 @@ pub(crate) fn process_frame(
         confidence = classification.confidence,
         sun_alt_deg = ?sun_alt_deg,
         disagreement = classification.disagreement,
-        "Stage A: classifier (with hysteresis)"
+        sky_mask = sky_mask.is_some(),
+        seg_mask = seg_mask_some(seg_mask.as_ref()),
+        "Stage A: classifier (with masks + hysteresis)"
     );
 
     // ---- Stage C: horizon detection (cheap-first, dispatched verdict) ----
@@ -264,6 +295,8 @@ pub(crate) fn process_frame(
         &[],
         position_prior,
         frame.capture_tt,
+        seg_mask_ref(seg_mask.as_ref()),
+        sky_fraction,
     );
     if let HorizonStageOutcome::Detected { detector, line, .. } = &horizon {
         trace!(
@@ -337,27 +370,43 @@ pub(crate) fn process_frame(
             Condition::Day | Condition::Night | Condition::Twilight
         )
     {
-        let ctx = bris_vision::HorizonProviderContext {
-            frame,
-            intrinsics: &frame.intrinsics,
-            body_candidates: &body_candidates,
-            position_prior,
-            timestamp: frame.capture_tt,
-        };
-        reflection_pair_invoked = true;
-        let merge = merge_reflection_pair(horizon, &ctx, cfg);
-        let ReflectionPairMerge {
-            outcome,
-            stats,
-            hypothesized,
-            used,
-            fusion,
-        } = merge;
-        horizon = outcome;
-        reflection_pair_stats = stats;
-        reflection_pair_hypothesized = hypothesized;
-        reflection_pair_used = used;
-        stage_c_stats.fusion = fusion;
+        if sky_gate_allows(sky_fraction, MIN_SKY_FRACTION_REFLECTION_PAIR) {
+            let ctx = bris_vision::HorizonProviderContext {
+                frame,
+                intrinsics: &frame.intrinsics,
+                body_candidates: &body_candidates,
+                position_prior,
+                timestamp: frame.capture_tt,
+                #[cfg(feature = "segmentation")]
+                seg_mask: seg_mask.as_ref(),
+            };
+            reflection_pair_invoked = true;
+            let merge = merge_reflection_pair(horizon, &ctx, cfg);
+            let ReflectionPairMerge {
+                outcome,
+                stats,
+                hypothesized,
+                used,
+                fusion,
+            } = merge;
+            horizon = outcome;
+            reflection_pair_stats = stats;
+            reflection_pair_hypothesized = hypothesized;
+            reflection_pair_used = used;
+            stage_c_stats.fusion = fusion;
+        } else {
+            // Reflection-pair refused by the seg-fraction gate.
+            // Counter is updated through `stage_c_stats` so the
+            // engine's `update_stage_counters` folds it into
+            // `EngineDiagnostics::reflection_pair_refused_no_sky`.
+            stage_c_stats.sky_gate.reflection_pair_refused += 1;
+            trace!(
+                provider = "reflection-pair",
+                sky_fraction = ?sky_fraction,
+                min_required = MIN_SKY_FRACTION_REFLECTION_PAIR,
+                "Stage C (2nd pass): refused (insufficient sky)"
+            );
+        }
     }
 
     StageOutcome {
@@ -380,6 +429,7 @@ pub(crate) fn process_frame(
         ml_gravity_preprocess_failed: ml_gravity_preprocess_failed_value(&stage_c_stats),
         ml_gravity_inference_ms: ml_gravity_inference_ms_value(&stage_c_stats),
         fusion_stats: stage_c_stats.fusion,
+        sky_gate_stats: stage_c_stats.sky_gate,
     }
 }
 
@@ -685,6 +735,81 @@ fn sun_predicted_altitude(
         place.direction.altitude,
         place.altitude_sigma,
     ))
+}
+
+// ---- Pre-classification segmentation cache helpers ----
+//
+// `precompute_seg_mask` runs the segmentation model at most
+// once per frame. The result lives on the stack of
+// `process_frame` and is borrowed by both the classifier
+// (via `sky_mask`) and Stage C providers (via
+// `HorizonProviderContext::seg_mask`). With the `segmentation`
+// feature disabled both helpers degrade to no-ops; the
+// classifier falls back to its middle-band path and any
+// horizon provider that wanted a sky mask declines.
+
+/// Result type for the cached segmentation mask. Always
+/// `Option<bris_vision::SegmentationMask>` under the
+/// `segmentation` feature; `Option<()>` otherwise so the
+/// surrounding code can stay feature-agnostic at the
+/// call-site level.
+#[cfg(feature = "segmentation")]
+type CachedSegMask = bris_vision::SegmentationMask;
+#[cfg(not(feature = "segmentation"))]
+type CachedSegMask = ();
+
+#[cfg(feature = "segmentation")]
+fn precompute_seg_mask(frame: &Frame, cfg: &EngineConfig) -> Option<CachedSegMask> {
+    if !cfg.horizon_provider_set.segmentation {
+        return None;
+    }
+    let path = cfg.segmentation_model_path.as_ref()?;
+    if let Err(e) = bris_vision::load_model(path) {
+        debug!(
+            error = %e,
+            path = %path.display(),
+            "Stage 0: segmentation model load failed; classifier falls back to middle-band"
+        );
+        return None;
+    }
+    let source = frame.source_path.as_ref()?;
+    match bris_vision::segment_with_rotation(source, frame.source_rotation) {
+        Ok(m) => Some(m),
+        Err(e) => {
+            trace!(error = %e, "Stage 0: segmentation inference failed");
+            None
+        }
+    }
+}
+
+#[cfg(not(feature = "segmentation"))]
+fn precompute_seg_mask(_frame: &Frame, _cfg: &EngineConfig) -> Option<CachedSegMask> {
+    None
+}
+
+#[cfg(feature = "segmentation")]
+fn seg_sky_mask(seg: Option<&CachedSegMask>, w: u32, h: u32) -> Option<Vec<bool>> {
+    seg.map(|m| m.sky_mask(w, h))
+}
+
+#[cfg(not(feature = "segmentation"))]
+fn seg_sky_mask(_seg: Option<&CachedSegMask>, _w: u32, _h: u32) -> Option<Vec<bool>> {
+    None
+}
+
+#[cfg(feature = "segmentation")]
+fn seg_mask_ref(seg: Option<&CachedSegMask>) -> Option<&CachedSegMask> {
+    seg
+}
+
+#[cfg(not(feature = "segmentation"))]
+#[allow(clippy::needless_pass_by_value)]
+fn seg_mask_ref(_seg: Option<&CachedSegMask>) -> Option<&CachedSegMask> {
+    None
+}
+
+fn seg_mask_some(seg: Option<&CachedSegMask>) -> bool {
+    seg.is_some()
 }
 
 fn sun_altitude_deg(observer: Observer, tt: Tt) -> Option<f64> {

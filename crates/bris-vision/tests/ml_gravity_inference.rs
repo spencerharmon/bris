@@ -56,6 +56,8 @@ fn load_real_model_and_run_inference() {
         body_candidates: &[],
         position_prior: None,
         timestamp: frame.capture_tt,
+        #[cfg(feature = "segmentation")]
+        seg_mask: None,
     };
     let provider = MlGravityProvider::new(MlGravityConfig {
         model_path: path,

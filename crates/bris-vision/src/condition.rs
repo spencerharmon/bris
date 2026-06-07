@@ -40,7 +40,8 @@
 #![allow(
     clippy::cast_possible_truncation,
     clippy::cast_precision_loss,
-    clippy::cast_sign_loss
+    clippy::cast_sign_loss,
+    clippy::cast_possible_wrap
 )]
 
 use crate::frame::Frame;
@@ -208,13 +209,52 @@ impl Default for ConditionConfig {
 /// classification, possibly [`Condition::Unusable`] with low
 /// confidence when neither evidence source produces a clear answer.
 /// The caller decides what to do about that.
+///
+/// Equivalent to [`classify_with_masks`] with both mask arguments
+/// set to `None` — the pre-mask middle-band fallback path.
 #[must_use]
 pub fn classify(
     frame: &Frame,
     sun_altitude_deg: Option<f64>,
     cfg: ConditionConfig,
 ) -> Classification {
-    let image_evidence = compute_image_evidence(frame, cfg);
+    classify_with_masks(frame, sun_altitude_deg, cfg, None, None)
+}
+
+/// As [`classify`], but with optional pre-classification masks
+/// for the ambient-luma estimator.
+///
+/// - `sky_mask`, when `Some`, restricts mean-luma sampling to
+///   pixels marked `true`. Intended to be the sky-class mask from
+///   the segmentation pass; supersedes the middle-band heuristic
+///   when supplied. Length must equal `frame.width() * frame.height()`;
+///   a length mismatch is silently treated as "no mask" (defensive).
+/// - `body_exclude_mask`, when `Some`, *removes* pixels marked
+///   `true` from the mean-luma sample. Intended to be the cheap
+///   [`crate::compute_bright_blob_mask`] output so bright compact
+///   regions (saturated moon disc, lit hardware, lens flare) don't
+///   inflate ambient luma.
+///
+/// Both masks default to `None` to preserve the existing
+/// middle-band-only behaviour. When `sky_mask` is `Some` but every
+/// allowed pixel is excluded by `body_exclude_mask` (or by both
+/// masks the sample is empty), the function falls back to the
+/// middle-band path so the classifier never returns a verdict
+/// against zero samples.
+///
+/// Saturated-pixel fraction is always computed over the full
+/// frame and is *not* affected by either mask: the saturation
+/// signal is meant to detect a bright body anywhere in frame, not
+/// the ambient sky.
+#[must_use]
+pub fn classify_with_masks(
+    frame: &Frame,
+    sun_altitude_deg: Option<f64>,
+    cfg: ConditionConfig,
+    sky_mask: Option<&[bool]>,
+    body_exclude_mask: Option<&[bool]>,
+) -> Classification {
+    let image_evidence = compute_image_evidence(frame, cfg, sky_mask, body_exclude_mask);
     let image_condition = classify_from_image(image_evidence, cfg);
     let astronomical_evidence = sun_altitude_deg.map(|alt| AstronomicalEvidence {
         sun_altitude_deg: alt,
@@ -340,27 +380,113 @@ fn astronomical_confidence(astro: AstronomicalEvidence) -> f64 {
     (0.5 + 0.075 * nearest_boundary).clamp(0.5, 0.95)
 }
 
-/// Compute mean luma over the middle horizontal band, plus the
-/// saturated-pixel fraction.
-fn compute_image_evidence(frame: &Frame, cfg: ConditionConfig) -> ImageEvidence {
+/// Compute mean luma plus the saturated-pixel fraction.
+///
+/// Mean luma sampling rules (in priority order):
+///
+/// 1. If `sky_mask` is provided and length-matches the frame,
+///    sample only pixels where `sky_mask[i] && !body_exclude_mask[i]`.
+///    (Mismatched lengths fall through silently.)
+/// 2. Else if `body_exclude_mask` is provided and length-matches,
+///    sample every middle-band pixel that is NOT in the exclude
+///    mask.
+/// 3. Else, sample the middle horizontal band (legacy path).
+///
+/// If the chosen sample set is empty (e.g. sky mask says "no sky"
+/// or every middle-band pixel is excluded), fall back to the
+/// middle-band-only path so the classifier always produces a
+/// finite mean luma.
+///
+/// Saturation is always computed over the full unmasked frame.
+fn compute_image_evidence(
+    frame: &Frame,
+    cfg: ConditionConfig,
+    sky_mask: Option<&[bool]>,
+    body_exclude_mask: Option<&[bool]>,
+) -> ImageEvidence {
     const SAT_THRESHOLD: u16 = (u16::MAX as u32 * 95 / 100) as u16;
 
+    let pixels = frame.pixels();
+    let total_px = pixels.len();
+
+    // Validate mask shapes; drop silently on mismatch (this is a
+    // caller bug but per pipeline contract `classify` never errors).
+    let sky = sky_mask.filter(|m| m.len() == total_px);
+    let exclude = body_exclude_mask.filter(|m| m.len() == total_px);
+
+    // Pass 1: full-frame saturation (always).
+    let mut saturated: u64 = 0;
+    for &p in pixels {
+        if p >= SAT_THRESHOLD {
+            saturated += 1;
+        }
+    }
+    let saturated_fraction = if total_px == 0 {
+        0.0
+    } else {
+        (saturated as f64) / (total_px as f64)
+    };
+
+    // Pass 2: mean luma. Sky mask wins; else body-only exclusion
+    // over the middle band; else legacy middle-band-only.
+    let mean_luma = if sky.is_some() || exclude.is_some() {
+        let (sum, count) = sample_luma_with_masks(pixels, sky, exclude);
+        if count == 0 {
+            // Sample set empty (e.g. sky mask said "no sky" or
+            // exclusions consumed every middle-band pixel).
+            // Fall back to legacy middle-band so the classifier
+            // produces a finite luma rather than 0.
+            sample_luma_middle_band(frame, cfg)
+        } else {
+            (sum as f64) / (count as f64) / f64::from(u16::MAX)
+        }
+    } else {
+        sample_luma_middle_band(frame, cfg)
+    };
+
+    ImageEvidence {
+        mean_luma,
+        saturated_fraction,
+    }
+}
+
+fn sample_luma_with_masks(
+    pixels: &[u16],
+    sky: Option<&[bool]>,
+    exclude: Option<&[bool]>,
+) -> (u64, u64) {
+    let mut sum: u64 = 0;
+    let mut count: u64 = 0;
+    for (i, &p) in pixels.iter().enumerate() {
+        // Sky mask is the *allow* mask when provided.
+        if let Some(m) = sky {
+            if !m[i] {
+                continue;
+            }
+        }
+        // Body-exclude is always exclusion.
+        if let Some(m) = exclude {
+            if m[i] {
+                continue;
+            }
+        }
+        sum += u64::from(p);
+        count += 1;
+    }
+    (sum, count)
+}
+
+fn sample_luma_middle_band(frame: &Frame, cfg: ConditionConfig) -> f64 {
     let h = frame.height();
+    let w = frame.width();
+    let pixels = frame.pixels();
     let band_height = ((f64::from(h) * cfg.middle_band_fraction).round() as u32).max(1);
     let y_start = h.saturating_sub(band_height) / 2;
     let y_end = (y_start + band_height).min(h);
-
-    let w = frame.width();
-    let pixels = frame.pixels();
     let row_stride = w as usize;
 
     let mut sum: u64 = 0;
     let mut count: u64 = 0;
-    let mut saturated: u64 = 0;
-    let mut total: u64 = 0;
-
-    // Mean luma is computed over the middle band only — top/bottom
-    // bands are typically biased by sky / deck respectively.
     for y in y_start..y_end {
         let row = &pixels[(y as usize) * row_stride..(y as usize + 1) * row_stride];
         for &p in row {
@@ -368,31 +494,10 @@ fn compute_image_evidence(frame: &Frame, cfg: ConditionConfig) -> ImageEvidence 
             count += 1;
         }
     }
-
-    // Saturation, on the other hand, is computed over the full
-    // frame: a saturated body high in the sky shouldn't be missed
-    // because the band cropped it out.
-    for &p in pixels {
-        total += 1;
-        if p >= SAT_THRESHOLD {
-            saturated += 1;
-        }
-    }
-
-    let mean_luma = if count == 0 {
+    if count == 0 {
         0.0
     } else {
         (sum as f64) / (count as f64) / f64::from(u16::MAX)
-    };
-    let saturated_fraction = if total == 0 {
-        0.0
-    } else {
-        (saturated as f64) / (total as f64)
-    };
-
-    ImageEvidence {
-        mean_luma,
-        saturated_fraction,
     }
 }
 
@@ -413,6 +518,149 @@ mod tests {
             Intrinsics::placeholder(w, h),
         )
         .unwrap()
+    }
+
+    #[test]
+    fn body_exclude_mask_flips_moon_in_dark_frame_from_twilight_to_night() {
+        // Synthetic: mostly-dark frame (mean luma in the
+        // Night band), with a single saturated "moon" disk
+        // bright enough that its inclusion in mean luma
+        // pushes the average into the Twilight band.
+        //
+        // Background luma: ~0.01 of u16::MAX = 655.
+        // Disk: u16::MAX over ~700 pixels (r=15 disk on a
+        // 64×64 = 4096 pixel frame).
+        //
+        // Unmasked mean luma:
+        //   total = 655 * (4096 - ~707) + 65535 * 707
+        //         ≈ 2_220_995 + 46_333_245 = 48_554_240
+        //   mean = 48_554_240 / 4096 / 65535 ≈ 0.181 → Twilight
+        //
+        // With the disk excluded:
+        //   mean = 655 / 65535 ≈ 0.01 → Night.
+        let w: u32 = 64;
+        let h: u32 = 64;
+        let r: i32 = 8;
+        let bg: u16 = 655;
+        let mut pixels = vec![bg; (w * h) as usize];
+        let cx = w as i32 / 2;
+        let cy = h as i32 / 2;
+        let r2 = r * r;
+        let mut exclude = vec![false; (w * h) as usize];
+        for y in 0..h as i32 {
+            for x in 0..w as i32 {
+                let dx = x - cx;
+                let dy = y - cy;
+                if dx * dx + dy * dy <= r2 {
+                    let idx = (y as usize) * (w as usize) + (x as usize);
+                    pixels[idx] = u16::MAX;
+                    exclude[idx] = true;
+                }
+            }
+        }
+        let frame = Frame::new(
+            w,
+            h,
+            pixels,
+            Tt::from_julian_date(JD_J2000),
+            0,
+            Intrinsics::placeholder(w, h),
+        )
+        .unwrap();
+
+        // Force saturation_force_day off (saturated disk would
+        // otherwise flip image-only verdict to Day on its own,
+        // independent of the mean-luma path we're testing).
+        let cfg = ConditionConfig {
+            saturation_force_day: 1.1,
+            ..ConditionConfig::default()
+        };
+
+        let unmasked = classify(&frame, None, cfg);
+        assert_eq!(
+            unmasked.condition,
+            Condition::Twilight,
+            "unmasked moon-in-dark-frame should land in Twilight, got {unmasked:?}"
+        );
+
+        let masked = classify_with_masks(&frame, None, cfg, None, Some(&exclude));
+        assert_eq!(
+            masked.condition,
+            Condition::Night,
+            "body_exclude_mask should drag mean luma back into Night; got {masked:?}"
+        );
+    }
+
+    #[test]
+    fn sky_mask_restricts_luma_to_sky_pixels() {
+        // Frame split: top half dark sky (luma 200),
+        // bottom half bright deck (luma 60_000). Middle-band
+        // sample sees a mix and lands somewhere in Twilight.
+        // Sky-only sample sees just the dark top -> Night.
+        let w: u32 = 64;
+        let h: u32 = 64;
+        let mut pixels = vec![0u16; (w * h) as usize];
+        let mut sky = vec![false; (w * h) as usize];
+        for y in 0..h {
+            let v = if y < h / 2 { 200u16 } else { 60_000u16 };
+            for x in 0..w {
+                let idx = (y as usize) * (w as usize) + (x as usize);
+                pixels[idx] = v;
+                if y < h / 2 {
+                    sky[idx] = true;
+                }
+            }
+        }
+        let frame = Frame::new(
+            w,
+            h,
+            pixels,
+            Tt::from_julian_date(JD_J2000),
+            0,
+            Intrinsics::placeholder(w, h),
+        )
+        .unwrap();
+        let cfg = ConditionConfig {
+            // Disable saturation force; bottom half is
+            // saturated and would force Day independent of
+            // the mean-luma path.
+            saturation_force_day: 1.1,
+            ..ConditionConfig::default()
+        };
+
+        let unmasked = classify(&frame, None, cfg);
+        // Middle band averages dark+bright equally; mean
+        // luma ≈ 0.46 → Day. Without saturation_force we
+        // still expect a non-Night verdict.
+        assert_ne!(unmasked.condition, Condition::Night);
+
+        let with_sky = classify_with_masks(&frame, None, cfg, Some(&sky), None);
+        assert_eq!(
+            with_sky.condition,
+            Condition::Night,
+            "sky-only sample is dark; should be Night"
+        );
+    }
+
+    #[test]
+    fn empty_mask_sample_falls_back_to_middle_band() {
+        // Sky mask all-false: classifier must fall back to
+        // middle-band rather than divide-by-zero or report
+        // an Unusable.
+        let frame = frame_uniform(u16::MAX / 2, 64, 64);
+        let sky = vec![false; 64 * 64];
+        let c = classify_with_masks(&frame, None, ConditionConfig::default(), Some(&sky), None);
+        assert_eq!(c.condition, Condition::Day);
+    }
+
+    #[test]
+    fn mismatched_mask_length_is_silently_ignored() {
+        // Mask of wrong length: classifier discards it and
+        // uses the middle-band fallback.
+        let frame = frame_uniform(u16::MAX / 2, 64, 64);
+        let wrong = vec![false; 7]; // length != 64*64
+        let c = classify_with_masks(&frame, None, ConditionConfig::default(), Some(&wrong), None);
+        assert_eq!(c.condition, Condition::Day);
     }
 
     #[test]

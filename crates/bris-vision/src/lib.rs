@@ -4,6 +4,7 @@
 //! All algorithms are classical (no ML inference runtime). See `plan.org`
 //! Phase 2 for design.
 
+pub mod bright_blob;
 pub mod centroid;
 pub mod centroid_refine;
 pub mod condition;
@@ -24,6 +25,7 @@ pub mod ray;
 pub mod segment;
 pub mod track;
 
+pub use bright_blob::{compute_bright_blob_mask, BrightBlobConfig};
 pub use centroid::{
     centroid_brightest_body, centroid_brightest_body_in_mask, centroid_saturated_body_in_mask,
     extract_multi_saturated_centroids, Centroid, CentroidConfig, CentroidError,
@@ -34,8 +36,8 @@ pub use centroid_refine::{
     DEFAULT_GAIN_E_PER_ADU,
 };
 pub use condition::{
-    classify, AstronomicalEvidence, Classification, Condition, ConditionConfig, ImageEvidence,
-    TwilightBand,
+    classify, classify_with_masks, AstronomicalEvidence, Classification, Condition,
+    ConditionConfig, ImageEvidence, TwilightBand,
 };
 pub use debug_render::{
     render_base_image, render_debug_overlay, CentroidOverlay, HorizonOverlay, OverlayData,
@@ -82,8 +84,9 @@ pub use ray::{
 };
 #[cfg(feature = "segmentation")]
 pub use segment::{
-    detect_horizon_via_segmentation, detect_horizon_via_segmentation_with_column_mask, load_model,
-    segment, segment_with_rotation, SegmentError, SegmentationMask,
+    detect_horizon_via_segmentation, detect_horizon_via_segmentation_with_column_mask,
+    detect_horizon_via_segmentation_with_mask, load_model, segment, segment_with_rotation,
+    SegmentError, SegmentationMask,
 };
 pub use track::{
     detect_corners, track, track_peaks, track_rotation, Corner, RigidTransform,

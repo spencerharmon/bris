@@ -368,14 +368,43 @@ pub fn detect_horizon_via_segmentation_with_column_mask(
         )
     })?;
     let mask = segment_with_rotation(path, frame.source_rotation)?;
+    detect_horizon_via_segmentation_with_mask(frame, cfg, &mask, column_mask)
+}
 
+/// Run the horizon-from-segmentation finalize step against a
+/// *precomputed* [`SegmentationMask`]. Use this when the caller
+/// has already segmented the frame (e.g. the streaming engine
+/// caches the mask so a single inference pass feeds both the
+/// classifier and any horizon providers that need it). Skips the
+/// inference call entirely.
+///
+/// `column_mask`, when supplied, must be in *frame-resolution*
+/// columns (length = `frame.width()`).
+///
+/// # Errors
+///
+/// As [`detect_horizon_via_segmentation`], minus the load /
+/// inference variants (this path never invokes the model).
+pub fn detect_horizon_via_segmentation_with_mask(
+    frame: &Frame,
+    cfg: HorizonConfig,
+    mask: &SegmentationMask,
+    column_mask: Option<&[bool]>,
+) -> Result<HorizonLine, SegmentError> {
+    if let Some(m) = column_mask {
+        if m.len() != frame.width() as usize {
+            return Err(SegmentError::Horizon(
+                crate::horizon::HorizonError::InsufficientCandidates(0),
+            ));
+        }
+    }
     // Use the obstruction-aware transition extractor and accept
     // SkyToSea + SkyToObstructionToSea (thin obstruction = distant
     // shore or distant vessel between sea and sky). Strict
     // SkyToObstructionOnly columns are not accepted by default
     // because they're frequently the foreground vessel (boat top
     // edge) rather than horizon.
-    let raw_candidates = sky_to_sea_transitions_with_obstruction(&mask);
+    let raw_candidates = sky_to_sea_transitions_with_obstruction(mask);
     let candidates: Vec<HorizonCandidate> = raw_candidates
         .into_iter()
         .filter(|c| {

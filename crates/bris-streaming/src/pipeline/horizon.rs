@@ -159,10 +159,51 @@ pub(crate) struct StageCStats {
     pub vertical_line: VerticalLineDispatch,
     pub vanishing_point: VanishingPointDispatch,
     pub ml_gravity: MlGravityDispatch,
+    pub sky_gate: SkyGateStats,
 }
 
+/// Per-frame counters from the seg-fraction eligibility gate.
+/// Increment by 1 each time the gate refuses to invoke a
+/// provider because the cached seg sky-fraction is below that
+/// provider's `MIN_SKY_FRACTION`. Stays at zero on frames where
+/// the seg mask is unavailable (feature off, model not loaded,
+/// inference failed) — unavailability falls back to today's
+/// unconditional dispatch, see
+/// `docs/design/pre_classification_masking.md`.
+#[derive(Debug, Clone, Copy, Default)]
+#[allow(clippy::struct_field_names)] // common "_refused" postfix is the entire point of the struct
+pub(crate) struct SkyGateStats {
+    pub gradient_refused: u64,
+    pub sky_region_refused: u64,
+    pub night_refused: u64,
+    pub night_textured_refused: u64,
+    pub reflection_pair_refused: u64,
+}
+
+/// Minimum sky-fraction (fraction of seg-mask cells classified
+/// as sky) below which Stage C refuses to invoke the named
+/// provider. Empirical defaults sized for the Austin / bedroom
+/// indoor-scene fail-modes that motivated the gate:
+///
+/// - daytime gradient / sky-region edge detectors collapse on a
+///   no-sky frame and return brightness gradients of unrelated
+///   regions (sailcloth, ceiling tile);
+/// - the night gradient / night-textured pair similarly overfit
+///   to lit indoor edges when no real sky exists;
+/// - reflection-pair geometry needs two specular hits, which
+///   requires *some* sky for the body to appear in.
+///
+/// Vanishing-point and ML-gravity are gravity-from-edges /
+/// gravity-from-pixels respectively and do not consume sky;
+/// they bypass the gate.
+pub(crate) const MIN_SKY_FRACTION_GRADIENT: f64 = 0.10;
+pub(crate) const MIN_SKY_FRACTION_SKY_REGION: f64 = 0.15;
+pub(crate) const MIN_SKY_FRACTION_NIGHT: f64 = 0.10;
+pub(crate) const MIN_SKY_FRACTION_NIGHT_TEXTURED: f64 = 0.10;
+pub(crate) const MIN_SKY_FRACTION_REFLECTION_PAIR: f64 = 0.05;
+
 /// Run Stage C on one frame.
-#[allow(clippy::too_many_lines)] // dispatch fan-out is inherently long; refactoring fragments the per-condition flow
+#[allow(clippy::too_many_lines, clippy::too_many_arguments)] // dispatch fan-out is inherently long; refactoring fragments the per-condition flow
 pub(crate) fn detect(
     pyramid: &FramePyramid,
     condition: Condition,
@@ -170,6 +211,9 @@ pub(crate) fn detect(
     body_candidates: &[BodyCandidate],
     position_prior: Option<PositionPrior>,
     timestamp: Tt,
+    #[cfg(feature = "segmentation")] seg_mask: Option<&bris_vision::SegmentationMask>,
+    #[cfg(not(feature = "segmentation"))] _seg_mask: Option<&()>,
+    sky_fraction_opt: Option<f64>,
 ) -> (HorizonStageOutcome, (u32, u32), StageCStats) {
     let analyzed_size_full = (pyramid.full_width(), pyramid.full_height());
     if matches!(condition, Condition::Unusable) {
@@ -207,67 +251,118 @@ pub(crate) fn detect(
         body_candidates,
         position_prior,
         timestamp,
+        #[cfg(feature = "segmentation")]
+        seg_mask,
     };
 
     let early_term = cfg.horizon_early_termination_sigma_rad;
     let day_first = matches!(condition, Condition::Day | Condition::Twilight);
     let night_first = matches!(condition, Condition::Night | Condition::Twilight);
 
+    // Seg-fraction gate: when a precomputed segmentation mask
+    // is available, refuse to invoke a sky/sea-dependent provider
+    // if its share of the frame doesn't clear the provider's
+    // MIN_SKY_FRACTION threshold. `None` means "seg unavailable"
+    // and *every* provider falls back to today's unconditional
+    // dispatch — the gate cannot be a silent disabler when the
+    // mask is missing.
+    let sky_fraction = sky_fraction_opt;
+
     let mut hypotheses: Vec<HorizonHypothesis> = Vec::with_capacity(6);
     let mut stats = StageCStats::default();
 
     if day_first {
         if cfg.horizon_provider_set.gradient {
-            run_provider(&GradientProvider { cfg }, &ctx, &mut hypotheses);
-            if best_below(&hypotheses, early_term) {
-                return finish(
-                    &hypotheses,
-                    &intrinsics,
-                    frame.width(),
-                    cfg,
-                    analyzed_size,
-                    stats,
+            if sky_gate_allows(sky_fraction, MIN_SKY_FRACTION_GRADIENT) {
+                run_provider(&GradientProvider { cfg }, &ctx, &mut hypotheses);
+                if best_below(&hypotheses, early_term) {
+                    return finish(
+                        &hypotheses,
+                        &intrinsics,
+                        frame.width(),
+                        cfg,
+                        analyzed_size,
+                        stats,
+                    );
+                }
+            } else {
+                stats.sky_gate.gradient_refused += 1;
+                trace!(
+                    provider = "gradient",
+                    sky_fraction = sky_fraction,
+                    min_required = MIN_SKY_FRACTION_GRADIENT,
+                    "Stage C: refused (insufficient sky)"
                 );
             }
         }
         if cfg.horizon_provider_set.sky_region {
-            run_provider(&SkyRegionProvider { cfg }, &ctx, &mut hypotheses);
-            if best_below(&hypotheses, early_term) {
-                return finish(
-                    &hypotheses,
-                    &intrinsics,
-                    frame.width(),
-                    cfg,
-                    analyzed_size,
-                    stats,
+            if sky_gate_allows(sky_fraction, MIN_SKY_FRACTION_SKY_REGION) {
+                run_provider(&SkyRegionProvider { cfg }, &ctx, &mut hypotheses);
+                if best_below(&hypotheses, early_term) {
+                    return finish(
+                        &hypotheses,
+                        &intrinsics,
+                        frame.width(),
+                        cfg,
+                        analyzed_size,
+                        stats,
+                    );
+                }
+            } else {
+                stats.sky_gate.sky_region_refused += 1;
+                trace!(
+                    provider = "sky-region",
+                    sky_fraction = sky_fraction,
+                    min_required = MIN_SKY_FRACTION_SKY_REGION,
+                    "Stage C: refused (insufficient sky)"
                 );
             }
         }
     }
     if night_first {
         if cfg.horizon_provider_set.night {
-            run_provider(&NightProvider { cfg }, &ctx, &mut hypotheses);
-            if best_below(&hypotheses, early_term) {
-                return finish(
-                    &hypotheses,
-                    &intrinsics,
-                    frame.width(),
-                    cfg,
-                    analyzed_size,
-                    stats,
+            if sky_gate_allows(sky_fraction, MIN_SKY_FRACTION_NIGHT) {
+                run_provider(&NightProvider { cfg }, &ctx, &mut hypotheses);
+                if best_below(&hypotheses, early_term) {
+                    return finish(
+                        &hypotheses,
+                        &intrinsics,
+                        frame.width(),
+                        cfg,
+                        analyzed_size,
+                        stats,
+                    );
+                }
+            } else {
+                stats.sky_gate.night_refused += 1;
+                trace!(
+                    provider = "night",
+                    sky_fraction = sky_fraction,
+                    min_required = MIN_SKY_FRACTION_NIGHT,
+                    "Stage C: refused (insufficient sky)"
                 );
             }
         }
         if cfg.horizon_provider_set.night_textured {
-            run_provider(&NightTexturedProvider { cfg }, &ctx, &mut hypotheses);
-            if best_below(&hypotheses, early_term) {
-                return finish(
-                    &hypotheses,
-                    &intrinsics,
-                    frame.width(),
-                    cfg,
-                    analyzed_size,
-                    stats,
+            if sky_gate_allows(sky_fraction, MIN_SKY_FRACTION_NIGHT_TEXTURED) {
+                run_provider(&NightTexturedProvider { cfg }, &ctx, &mut hypotheses);
+                if best_below(&hypotheses, early_term) {
+                    return finish(
+                        &hypotheses,
+                        &intrinsics,
+                        frame.width(),
+                        cfg,
+                        analyzed_size,
+                        stats,
+                    );
+                }
+            } else {
+                stats.sky_gate.night_textured_refused += 1;
+                trace!(
+                    provider = "night-textured",
+                    sky_fraction = sky_fraction,
+                    min_required = MIN_SKY_FRACTION_NIGHT_TEXTURED,
+                    "Stage C: refused (insufficient sky)"
                 );
             }
         }
@@ -355,6 +450,47 @@ fn best_below(hypotheses: &[HorizonHypothesis], early_term_sigma_rad: f64) -> bo
         .map(|h| h.line.altitude_sigma.value())
         .fold(f64::INFINITY, f64::min)
         <= early_term_sigma_rad
+}
+
+/// Sky-fraction gate decision. `None` means the segmentation
+/// mask is unavailable on this frame; fall back to today's
+/// unconditional behaviour (allow the provider to run). When
+/// the mask IS available, only allow the provider when its
+/// share of the frame meets the configured minimum.
+pub(crate) fn sky_gate_allows(sky_fraction: Option<f64>, min_required: f64) -> bool {
+    match sky_fraction {
+        None => true,
+        Some(f) => f >= min_required,
+    }
+}
+
+/// Compute the sky fraction of the cached segmentation mask
+/// in `ctx.seg_mask`. Returns `None` when the cache is empty
+/// (segmentation feature off, model not loaded, frame had no
+/// source path, inference failed). The fraction is the count
+/// of `CLASS_SKY` labels divided by total label count — a
+/// single linear pass over the inference-resolution mask.
+#[cfg(feature = "segmentation")]
+#[allow(clippy::cast_precision_loss)]
+pub(crate) fn sky_fraction_from_seg_mask(
+    mask: Option<&bris_vision::SegmentationMask>,
+) -> Option<f64> {
+    let mask = mask?;
+    let total = mask.labels.len();
+    if total == 0 {
+        return None;
+    }
+    let sky = mask
+        .labels
+        .iter()
+        .filter(|c| **c == bris_vision::segment::CLASS_SKY)
+        .count();
+    Some(sky as f64 / total as f64)
+}
+
+#[cfg(not(feature = "segmentation"))]
+pub(crate) fn sky_fraction_from_seg_mask(_mask: Option<&()>) -> Option<f64> {
+    None
 }
 
 fn run_provider<P: HorizonProvider>(
@@ -661,6 +797,11 @@ mod tests {
             &[],
             None,
             frame.capture_tt,
+            #[cfg(feature = "segmentation")]
+            None,
+            #[cfg(not(feature = "segmentation"))]
+            None,
+            None,
         );
         match outcome {
             HorizonStageOutcome::Detected { detector, line, .. } => {
@@ -699,6 +840,11 @@ mod tests {
             &[],
             None,
             frame.capture_tt,
+            #[cfg(feature = "segmentation")]
+            None,
+            #[cfg(not(feature = "segmentation"))]
+            None,
+            None,
         );
         assert!(matches!(outcome, HorizonStageOutcome::None));
     }
@@ -714,6 +860,11 @@ mod tests {
             &[],
             None,
             frame.capture_tt,
+            #[cfg(feature = "segmentation")]
+            None,
+            #[cfg(not(feature = "segmentation"))]
+            None,
+            None,
         );
         match outcome {
             HorizonStageOutcome::Detected { detector, .. } => {
@@ -790,6 +941,11 @@ mod tests {
             &[],
             None,
             frame.capture_tt,
+            #[cfg(feature = "segmentation")]
+            None,
+            #[cfg(not(feature = "segmentation"))]
+            None,
+            None,
         );
         assert!(
             !stats.vertical_line.invoked,
@@ -821,6 +977,11 @@ mod tests {
             &[],
             None,
             frame.capture_tt,
+            #[cfg(feature = "segmentation")]
+            None,
+            #[cfg(not(feature = "segmentation"))]
+            None,
+            None,
         );
         assert!(
             stats.vertical_line.invoked,
@@ -844,6 +1005,11 @@ mod tests {
             &[],
             None,
             frame.capture_tt,
+            #[cfg(feature = "segmentation")]
+            None,
+            #[cfg(not(feature = "segmentation"))]
+            None,
+            None,
         );
         assert!(
             matches!(outcome_off, HorizonStageOutcome::None),
@@ -860,6 +1026,11 @@ mod tests {
             &[],
             None,
             frame.capture_tt,
+            #[cfg(feature = "segmentation")]
+            None,
+            #[cfg(not(feature = "segmentation"))]
+            None,
+            None,
         );
         assert!(
             stats_on.vertical_line.hypothesized,
@@ -875,6 +1046,220 @@ mod tests {
             ),
             "enabled Stage C on a vertical-stripe-only frame must select \
              the VerticalLine detector (got {outcome_on:?})"
+        );
+    }
+
+    /// Build a [`bris_vision::SegmentationMask`] of the given
+    /// sky-fraction.
+    /// `sky_frac` of the cells get [`CLASS_SKY`]; the rest get
+    /// [`CLASS_SEA`].
+    #[cfg(feature = "segmentation")]
+    fn synthetic_seg_mask(sky_frac: f64) -> bris_vision::SegmentationMask {
+        use bris_vision::segment::{CLASS_SEA, CLASS_SKY, INFERENCE_SIZE};
+        let n = INFERENCE_SIZE;
+        let mut labels = vec![CLASS_SEA; n * n];
+        let sky_rows = ((n as f64) * sky_frac) as usize;
+        for row in labels.chunks_mut(n).take(sky_rows) {
+            for c in row {
+                *c = CLASS_SKY;
+            }
+        }
+        bris_vision::SegmentationMask {
+            width: n as u32,
+            height: n as u32,
+            labels,
+        }
+    }
+
+    /// With a seg mask whose sky fraction is well below every
+    /// provider's threshold (3% sky), Stage C must refuse the
+    /// gradient, sky-region, night, night-textured providers
+    /// and increment the matching counters.
+    #[cfg(feature = "segmentation")]
+    #[test]
+    fn seg_fraction_gate_refuses_providers_when_sky_is_scarce() {
+        let cfg = EngineConfig::new(Observer::default_dev());
+        let frame = synthetic_horizon(32);
+        let mask = synthetic_seg_mask(0.03);
+        let sky_fraction = sky_fraction_from_seg_mask(Some(&mask));
+        assert!(
+            sky_fraction.unwrap() < 0.05,
+            "test setup: synthetic sky_fraction must be below all gates"
+        );
+        // Day-first dispatch will check gradient + sky_region.
+        let (_, _, stats_day) = detect(
+            &FramePyramid::new(frame.clone()),
+            Condition::Day,
+            &cfg,
+            &[],
+            None,
+            frame.capture_tt,
+            Some(&mask),
+            sky_fraction,
+        );
+        assert_eq!(stats_day.sky_gate.gradient_refused, 1);
+        assert_eq!(stats_day.sky_gate.sky_region_refused, 1);
+        assert_eq!(stats_day.sky_gate.night_refused, 0);
+
+        // Night dispatch will check night + night_textured.
+        let (_, _, stats_night) = detect(
+            &FramePyramid::new(frame.clone()),
+            Condition::Night,
+            &cfg,
+            &[],
+            None,
+            frame.capture_tt,
+            Some(&mask),
+            sky_fraction,
+        );
+        assert_eq!(stats_night.sky_gate.night_refused, 1);
+        assert_eq!(stats_night.sky_gate.night_textured_refused, 1);
+    }
+
+    /// With a healthy 50% sky mask, the gate must let every
+    /// provider through. Counters stay at zero.
+    #[cfg(feature = "segmentation")]
+    #[test]
+    fn seg_fraction_gate_allows_providers_when_sky_is_abundant() {
+        let cfg = EngineConfig::new(Observer::default_dev());
+        let frame = synthetic_horizon(32);
+        let mask = synthetic_seg_mask(0.50);
+        let sky_fraction = sky_fraction_from_seg_mask(Some(&mask));
+        let (_, _, stats) = detect(
+            &FramePyramid::new(frame.clone()),
+            Condition::Twilight,
+            &cfg,
+            &[],
+            None,
+            frame.capture_tt,
+            Some(&mask),
+            sky_fraction,
+        );
+        assert_eq!(stats.sky_gate.gradient_refused, 0);
+        assert_eq!(stats.sky_gate.sky_region_refused, 0);
+        assert_eq!(stats.sky_gate.night_refused, 0);
+        assert_eq!(stats.sky_gate.night_textured_refused, 0);
+    }
+
+    /// When `sky_fraction` is `None` (no seg mask available),
+    /// the gate must fall back to today's unconditional
+    /// behaviour: counters stay at zero, providers run as
+    /// before.
+    #[test]
+    fn seg_fraction_gate_falls_back_when_seg_unavailable() {
+        let cfg = EngineConfig::new(Observer::default_dev());
+        let frame = synthetic_horizon(32);
+        let (outcome, _, stats) = detect(
+            &FramePyramid::new(frame.clone()),
+            Condition::Day,
+            &cfg,
+            &[],
+            None,
+            frame.capture_tt,
+            #[cfg(feature = "segmentation")]
+            None,
+            #[cfg(not(feature = "segmentation"))]
+            None,
+            None,
+        );
+        assert_eq!(stats.sky_gate.gradient_refused, 0);
+        assert_eq!(stats.sky_gate.sky_region_refused, 0);
+        assert!(
+            matches!(outcome, HorizonStageOutcome::Detected { .. }),
+            "gate must allow gradient/sky-region to run when sky_fraction is None"
+        );
+    }
+
+    /// Composition between PR #75 (`UseCaseProfile` dispatch) and
+    /// PR #78 (seg-fraction eligibility gate): the profile picks
+    /// which providers are eligible at all, and the seg gate then
+    /// refuses *at runtime* any of them that don't have enough sky.
+    ///
+    /// Aeronautical drops `night` and `night_textured` from its
+    /// `HorizonProviderSet` entirely. With a sky-starved seg mask
+    /// (3 % sky), Night-condition dispatch must therefore never
+    /// even *attempt* those two providers — so their
+    /// `*_refused_no_sky` counters stay at zero, distinct from the
+    /// default-profile case where they would each have been
+    /// refused once.
+    ///
+    /// Conversely Aeronautical keeps `gradient` and `sky_region`,
+    /// so a Day-condition dispatch on the same sky-starved mask
+    /// must still refuse them exactly once each (the gate runs
+    /// inside the profile's eligible set).
+    #[cfg(feature = "segmentation")]
+    #[test]
+    fn seg_gate_composes_with_aeronautical_profile() {
+        use crate::profile::apply_profile;
+        use bris_bundle::UseCaseProfile;
+
+        let mut cfg = EngineConfig::new(Observer::default_dev());
+        apply_profile(&mut cfg, UseCaseProfile::Aeronautical);
+        assert!(
+            cfg.horizon_provider_set.gradient && cfg.horizon_provider_set.sky_region,
+            "Aeronautical must keep day providers in its set"
+        );
+        assert!(
+            !cfg.horizon_provider_set.night && !cfg.horizon_provider_set.night_textured,
+            "Aeronautical must drop night providers from its set"
+        );
+        assert!(
+            !cfg.horizon_provider_set.reflection_pair,
+            "Aeronautical must drop reflection-pair from its set"
+        );
+
+        let frame = synthetic_horizon(32);
+        let mask = synthetic_seg_mask(0.03);
+        let sky_fraction = sky_fraction_from_seg_mask(Some(&mask));
+
+        // Day dispatch: gradient + sky_region are in-set AND
+        // hit the gate — each refused exactly once.
+        let (_, _, stats_day) = detect(
+            &FramePyramid::new(frame.clone()),
+            Condition::Day,
+            &cfg,
+            &[],
+            None,
+            frame.capture_tt,
+            Some(&mask),
+            sky_fraction,
+        );
+        assert_eq!(
+            stats_day.sky_gate.gradient_refused, 1,
+            "Aeronautical keeps gradient: low sky must refuse it once"
+        );
+        assert_eq!(
+            stats_day.sky_gate.sky_region_refused, 1,
+            "Aeronautical keeps sky-region: low sky must refuse it once"
+        );
+
+        // Night dispatch: night + night_textured are NOT in the
+        // profile's set, so the dispatch loop never reaches the
+        // gate — refusal counters stay at zero. This is the
+        // composition guarantee: the gate cannot refuse a
+        // provider the profile already excluded.
+        let (_, _, stats_night) = detect(
+            &FramePyramid::new(frame.clone()),
+            Condition::Night,
+            &cfg,
+            &[],
+            None,
+            frame.capture_tt,
+            Some(&mask),
+            sky_fraction,
+        );
+        assert_eq!(
+            stats_night.sky_gate.night_refused, 0,
+            "Aeronautical drops night: gate must not run, counter stays zero"
+        );
+        assert_eq!(
+            stats_night.sky_gate.night_textured_refused, 0,
+            "Aeronautical drops night-textured: gate must not run, counter stays zero"
+        );
+        assert_eq!(
+            stats_night.sky_gate.reflection_pair_refused, 0,
+            "reflection-pair is dispatched from Stage C entry in pipeline/mod.rs, \
+             not from this `detect()` path; counter must be zero here"
         );
     }
 }
