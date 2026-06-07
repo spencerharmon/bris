@@ -26,6 +26,7 @@ ml-gravity = ["bris-vision/ml-gravity"]
 [dependencies]
 bris-core.workspace = true
 bris-almanac.workspace = true
+bris-bundle.workspace = true
 bris-vision.workspace = true
 bris-platesolve.workspace = true
 bris-nav.workspace = true

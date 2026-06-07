@@ -711,6 +711,7 @@ version = "0.0.1"
 dependencies = [
  "approx",
  "bris-almanac",
+ "bris-bundle",
  "bris-core",
  "bris-nav",
  "bris-nmea",

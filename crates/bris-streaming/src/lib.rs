@@ -62,10 +62,12 @@ mod engine;
 mod fix;
 mod nmea;
 mod pipeline;
+mod profile;
 mod store;
 
 pub use config::{
-    ColdStartEngineConfig, EngineConfig, HorizonProviderSet, PlateSolverInit, StageDDispatchPolicy,
+    ColdStartEngineConfig, EngineConfig, HorizonProviderSet, PlateSolverInit,
+    PublicationGateConfig, StageDDispatchPolicy,
 };
 pub use diagnostics::{
     BodyCentroidSnapshot, EngineDiagnostics, HorizonHypothesisSnapshot, PipelineStageStats,
@@ -75,4 +77,5 @@ pub use engine::PoolSight;
 pub use engine::{FixReceiver, PushError, StreamingEngine};
 pub use fix::{DominantSource, FixProvenance, PublishedFix};
 pub use nmea::format_fix_as_nmea;
+pub use profile::apply_profile;
 pub use store::{SightStore, StoreConfig, StoreError};
