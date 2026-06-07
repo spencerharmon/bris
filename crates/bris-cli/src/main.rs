@@ -506,6 +506,13 @@ struct ReplayArgs {
     /// others winning Stage C fusion.
     #[arg(long, value_delimiter = ',')]
     horizon_providers: Option<Vec<String>>,
+    /// Use-case profile override for this replay. When set,
+    /// wins over `session.json`'s `profile` field. When neither
+    /// is set, defaults to `Custom` (no profile dispatch). See
+    /// `bris_streaming::apply_profile` and
+    /// `docs/design/testing_strategy.md`.
+    #[arg(long)]
+    profile: Option<ProfileArg>,
     /// Override publication-gate `max_position_sigma_nm`
     /// (default 50.0). Use `inf` to disable; large values
     /// permit a 'rough fix at honest σ' diagnostic on
@@ -1542,21 +1549,17 @@ fn apply_session_overlay(
     cfg: &mut EngineConfig,
     manifest: &BundleManifest,
     bundle_dir: Option<&Path>,
-) {
-    let Some(bundle_dir) = bundle_dir else {
-        return;
-    };
-    let Some(session_dir) = bundle_dir.parent().and_then(Path::parent) else {
-        return;
-    };
+) -> Option<UseCaseProfile> {
+    let bundle_dir = bundle_dir?;
+    let session_dir = bundle_dir.parent().and_then(Path::parent)?;
     if !session_dir.join("session.json").exists() {
-        return;
+        return None;
     }
     let session = match SessionManifest::load_from_dir(session_dir) {
         Ok(s) => s,
         Err(e) => {
             warn!(error = ?e, dir = %session_dir.display(), "replay: failed to load session.json; ignoring overlay");
-            return;
+            return None;
         }
     };
     if let Some(bundle_session_id) = manifest.session_id {
@@ -1582,8 +1585,10 @@ fn apply_session_overlay(
         sight_window_seconds = cfg.sight_window_seconds,
         sight_window_capacity = cfg.sight_window_capacity,
         assumed_max_speed_kn = cfg.publication_gate.assumed_max_speed_kn,
+        profile = ?session.profile,
         "replay: applied session.json overlay"
     );
+    Some(session.profile)
 }
 
 fn build_engine_config(
@@ -1620,7 +1625,18 @@ fn build_engine_config(
         atmosphere,
     };
     let mut cfg = EngineConfig::new(observer);
-    apply_session_overlay(&mut cfg, manifest, bundle_dir);
+    let session_profile = apply_session_overlay(&mut cfg, manifest, bundle_dir);
+    // Profile resolution: CLI flag > session.json > Custom.
+    // apply_profile runs AFTER session.json overlay so its
+    // setters can detect operator-overridden fields (they
+    // moved off the engine default) and leave them alone.
+    let effective_profile = args
+        .profile
+        .map(UseCaseProfile::from)
+        .or(session_profile)
+        .unwrap_or(UseCaseProfile::Custom);
+    bris_streaming::apply_profile(&mut cfg, effective_profile);
+    info!(profile = ?effective_profile, "replay: effective use-case profile");
     cfg.lock_ap_for_replay = matches!(mode, ReplayMode::ApLockTruth);
     cfg.store.enabled = !args.disable_store;
     cfg.store.data_root = args
