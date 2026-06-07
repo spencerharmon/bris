@@ -140,6 +140,45 @@ nav li .meta { font-size: 0.7em; color: #9aa3b2; }
   border: 0; border-radius: 50%; width: 40px; height: 40px;
   font-size: 1.5em; cursor: pointer;
 }
+.fixlist { margin-top: 0.6em; padding-top: 0.4em; border-top: 1px solid #2b2f36; }
+.fixlist h4 { margin: 0 0 0.3em; font-size: 0.8em; text-transform: uppercase; color: #9aa3b2; font-weight: normal; }
+.fixlist ul { list-style: none; padding: 0; margin: 0; }
+.fixlist li { margin: 0.15em 0; }
+.fixlist button.fix {
+  display: block; width: 100%; text-align: left;
+  background: #1a1f28; border: 1px solid #2b3340; color: #c4cad4;
+  padding: 4px 8px; border-radius: 3px;
+  font-family: monospace; font-size: 0.85em; cursor: pointer;
+}
+.fixlist button.fix:hover { background: #2b3340; border-color: #5fc9ff; color: #fff; }
+#map-modal {
+  position: fixed; inset: 0; background: rgba(0,0,0,0.92);
+  display: flex; align-items: center; justify-content: center;
+  z-index: 200;
+}
+#map-modal[hidden] { display: none !important; }
+#map-stage {
+  position: relative;
+  width: min(90vmin, 90vh, 900px);
+  height: min(90vmin, 90vh, 900px);
+}
+#map-svg {
+  display: block; width: 100%; height: 100%;
+  background: #0d1018; border: 1px solid #2b2f36; border-radius: 4px;
+}
+#map-hud {
+  position: absolute; top: 0.5em; left: 0.5em;
+  background: rgba(0,0,0,0.7); color: #e8eef8;
+  padding: 0.5em 0.7em; font-family: monospace; font-size: 0.85em;
+  line-height: 1.4; white-space: pre; border-radius: 3px;
+  pointer-events: none;
+}
+#map-close {
+  position: absolute; top: 0.5em; right: 0.5em;
+  background: rgba(255,255,255,0.15); color: #fff;
+  border: 0; border-radius: 50%; width: 36px; height: 36px;
+  font-size: 1.6em; cursor: pointer;
+}
 </style>
 </head>
 <body>
@@ -275,7 +314,8 @@ function renderCapture(sessionId, c) {
       app: ${escapeHtml(c.app_version||"?")} ·
       frames: ${c.frame_count} ·
       ${fixesPill} ${sightsPill} ${rejParts.join(" ")}
-    </div>`;
+    </div>
+    ${renderFixesListHtml(sessionId, c.capture_id, c.fixes || [])}`;
 
   if (!c.frames || c.frames.length === 0) {
     html += `<p class="hint">No per-frame data.</p></div>`;
@@ -410,6 +450,274 @@ function buildHudText(f) {
 function escapeHtml(s) {
   return String(s).replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 }
+
+// ---------- fix list + map modal ----------
+
+const SVG_NS = "http://www.w3.org/2000/svg";
+
+function renderFixesListHtml(sessionId, captureId, fixes) {
+  if (!fixes || fixes.length === 0) return "";
+  let html = `<div class="fixlist"><h4>${fixes.length} published fix${fixes.length === 1 ? "" : "es"}</h4><ul>`;
+  for (let i = 0; i < fixes.length; i++) {
+    const f = fixes[i];
+    const lat = fmtLat(f.lat_deg);
+    const lon = fmtLon(f.lon_deg);
+    const smaj = f.sigma_major_nm.toFixed(1);
+    const smin = f.sigma_minor_nm.toFixed(1);
+    let line = `${lat} ${lon} · σ ${smaj} × ${smin} nm · ${f.sight_count} sights`;
+    if (typeof f.gps_truth_error_nm === "number") {
+      line += ` · Δ${f.gps_truth_error_nm.toFixed(1)} nm vs truth`;
+    }
+    html += `<li><button type="button" class="fix" data-fix="${escapeHtml(sessionId)}|${escapeHtml(captureId)}|${i}">${escapeHtml(line)}</button></li>`;
+  }
+  html += `</ul></div>`;
+  return html;
+}
+
+function fmtLat(d) {
+  const hemi = d >= 0 ? "N" : "S";
+  return `${Math.abs(d).toFixed(4)}°${hemi}`;
+}
+function fmtLon(d) {
+  const hemi = d >= 0 ? "E" : "W";
+  return `${Math.abs(d).toFixed(4)}°${hemi}`;
+}
+
+function ensureMapModal() {
+  let m = document.getElementById("map-modal");
+  if (m) return m;
+  m = document.createElement("div");
+  m.id = "map-modal"; m.hidden = true;
+  m.innerHTML = `<div id="map-stage">
+    <svg id="map-svg" xmlns="http://www.w3.org/2000/svg"></svg>
+    <div id="map-hud"></div>
+    <button id="map-close" aria-label="close">×</button>
+  </div>`;
+  document.body.appendChild(m);
+  m.addEventListener("click", (e) => {
+    if (e.target === m || e.target.id === "map-close") closeMapModal();
+  });
+  return m;
+}
+
+function closeMapModal() {
+  const m = document.getElementById("map-modal");
+  if (!m) return;
+  m.hidden = true;
+  document.getElementById("map-svg").innerHTML = "";
+  document.getElementById("map-hud").textContent = "";
+}
+
+function openMapModal(fix) {
+  const m = ensureMapModal();
+  m.hidden = false;
+  const svg = document.getElementById("map-svg");
+  const hud = document.getElementById("map-hud");
+  svg.innerHTML = "";
+  const halfNmFromSigma = Math.max(3 * fix.sigma_major_nm, 1);
+  let halfNm = halfNmFromSigma;
+  if (typeof fix.gps_truth_error_nm === "number") {
+    halfNm = Math.max(halfNm, fix.gps_truth_error_nm * 1.3);
+  }
+  halfNm = Math.max(halfNm, 0.5);
+  const project = makeEquirectProjector(fix.lat_deg, fix.lon_deg, halfNm);
+  drawMapBackground(svg, project, halfNm);
+  draw1And2SigmaEllipse(svg, fix, project);
+  drawFixPoint(svg, fix, project);
+  if (typeof fix.gps_truth_error_nm === "number" &&
+      typeof fix.gps_truth_bearing_deg === "number") {
+    const truth = projectFromFix(fix, fix.gps_truth_error_nm, fix.gps_truth_bearing_deg);
+    drawTruthMarker(svg, truth, project);
+    drawErrorLine(svg, fix, truth, project);
+  }
+  hud.textContent = buildFixHud(fix);
+}
+
+function makeEquirectProjector(lat0, lon0, halfNm) {
+  const VIEW = 800;
+  const cosLat = Math.cos((lat0 * Math.PI) / 180);
+  const pxPerNm = (VIEW / 2) / halfNm;
+  const project = (lat, lon) => {
+    const dLat = lat - lat0;
+    const dLon = lon - lon0;
+    const nmN = dLat * 60;
+    const nmE = dLon * 60 * Math.max(cosLat, 1e-6);
+    return [VIEW / 2 + nmE * pxPerNm, VIEW / 2 - nmN * pxPerNm];
+  };
+  project.pxPerNm = pxPerNm;
+  project.view = VIEW;
+  project.lat0 = lat0; project.lon0 = lon0;
+  project.halfNm = halfNm;
+  return project;
+}
+
+function drawMapBackground(svg, project, halfNm) {
+  const VIEW = project.view;
+  svg.setAttribute("viewBox", `0 0 ${VIEW} ${VIEW}`);
+  svg.setAttribute("preserveAspectRatio", "xMidYMid meet");
+  const bg = document.createElementNS(SVG_NS, "rect");
+  bg.setAttribute("x", 0); bg.setAttribute("y", 0);
+  bg.setAttribute("width", VIEW); bg.setAttribute("height", VIEW);
+  bg.setAttribute("fill", "#0d1018"); svg.appendChild(bg);
+  const nmStep = niceStep(halfNm * 2 / 5);
+  const grid = document.createElementNS(SVG_NS, "g");
+  grid.setAttribute("stroke", "#252b35"); grid.setAttribute("stroke-width", "1");
+  for (let n = -10; n <= 10; n++) {
+    const nm = n * nmStep;
+    if (Math.abs(nm) > halfNm) continue;
+    const off = nm * project.pxPerNm;
+    const xv = VIEW / 2 + off;
+    const lnv = document.createElementNS(SVG_NS, "line");
+    lnv.setAttribute("x1", xv); lnv.setAttribute("y1", 0);
+    lnv.setAttribute("x2", xv); lnv.setAttribute("y2", VIEW);
+    grid.appendChild(lnv);
+    const yh = VIEW / 2 - off;
+    const lnh = document.createElementNS(SVG_NS, "line");
+    lnh.setAttribute("x1", 0); lnh.setAttribute("y1", yh);
+    lnh.setAttribute("x2", VIEW); lnh.setAttribute("y2", yh);
+    grid.appendChild(lnh);
+  }
+  svg.appendChild(grid);
+  const sbY = VIEW - 22, sbX0 = 18;
+  const sbX1 = sbX0 + nmStep * project.pxPerNm;
+  const sb = document.createElementNS(SVG_NS, "line");
+  sb.setAttribute("x1", sbX0); sb.setAttribute("y1", sbY);
+  sb.setAttribute("x2", sbX1); sb.setAttribute("y2", sbY);
+  sb.setAttribute("stroke", "#e6e9ee"); sb.setAttribute("stroke-width", "3");
+  svg.appendChild(sb);
+  const sbT = document.createElementNS(SVG_NS, "text");
+  sbT.setAttribute("x", sbX0); sbT.setAttribute("y", sbY - 6);
+  sbT.setAttribute("fill", "#e6e9ee"); sbT.setAttribute("font-family", "monospace");
+  sbT.setAttribute("font-size", "14"); sbT.textContent = `${nmStep} nm`;
+  svg.appendChild(sbT);
+  const naX = VIEW - 30, naY = 25;
+  const arr = document.createElementNS(SVG_NS, "polygon");
+  arr.setAttribute("points", `${naX},${naY - 12} ${naX - 6},${naY + 6} ${naX + 6},${naY + 6}`);
+  arr.setAttribute("fill", "#e6e9ee"); svg.appendChild(arr);
+  const naT = document.createElementNS(SVG_NS, "text");
+  naT.setAttribute("x", naX); naT.setAttribute("y", naY + 22);
+  naT.setAttribute("fill", "#e6e9ee"); naT.setAttribute("font-family", "monospace");
+  naT.setAttribute("font-size", "12"); naT.setAttribute("text-anchor", "middle");
+  naT.textContent = "N"; svg.appendChild(naT);
+}
+
+function niceStep(approxNm) {
+  if (approxNm <= 0) return 1;
+  const k = Math.floor(Math.log10(approxNm));
+  const base = Math.pow(10, k);
+  const mant = approxNm / base;
+  let snap;
+  if (mant < 1.5) snap = 1;
+  else if (mant < 3.5) snap = 2;
+  else if (mant < 7.5) snap = 5;
+  else snap = 10;
+  return snap * base;
+}
+
+function draw1And2SigmaEllipse(svg, fix, project) {
+  const [cx, cy] = project(fix.lat_deg, fix.lon_deg);
+  const orientDeg = (fix.orientation_rad * 180) / Math.PI;
+  const rotDeg = orientDeg - 90;
+  const rxPx = fix.sigma_major_nm * project.pxPerNm;
+  const ryPx = fix.sigma_minor_nm * project.pxPerNm;
+  for (const [mult, dash, opacity] of [
+    [2, "6 4", 0.4],
+    [1, null, 0.85],
+  ]) {
+    const e = document.createElementNS(SVG_NS, "ellipse");
+    e.setAttribute("cx", cx); e.setAttribute("cy", cy);
+    e.setAttribute("rx", rxPx * mult); e.setAttribute("ry", ryPx * mult);
+    e.setAttribute("transform", `rotate(${rotDeg} ${cx} ${cy})`);
+    e.setAttribute("fill", "none"); e.setAttribute("stroke", "#5fc9ff");
+    e.setAttribute("stroke-width", "2"); e.setAttribute("stroke-opacity", opacity);
+    if (dash) e.setAttribute("stroke-dasharray", dash);
+    svg.appendChild(e);
+  }
+}
+
+function drawFixPoint(svg, fix, project) {
+  const [x, y] = project(fix.lat_deg, fix.lon_deg);
+  const dot = document.createElementNS(SVG_NS, "circle");
+  dot.setAttribute("cx", x); dot.setAttribute("cy", y); dot.setAttribute("r", 5);
+  dot.setAttribute("fill", "#5fc9ff"); dot.setAttribute("stroke", "#0d1018");
+  dot.setAttribute("stroke-width", "1.5"); svg.appendChild(dot);
+}
+
+function drawTruthMarker(svg, truth, project) {
+  const [x, y] = project(truth.lat, truth.lon);
+  for (const [x1,y1,x2,y2] of [[x-7,y,x+7,y],[x,y-7,x,y+7]]) {
+    const ln = document.createElementNS(SVG_NS, "line");
+    ln.setAttribute("x1", x1); ln.setAttribute("y1", y1);
+    ln.setAttribute("x2", x2); ln.setAttribute("y2", y2);
+    ln.setAttribute("stroke", "#4caf50"); ln.setAttribute("stroke-width", "2");
+    svg.appendChild(ln);
+  }
+  const lab = document.createElementNS(SVG_NS, "text");
+  lab.setAttribute("x", x + 10); lab.setAttribute("y", y - 6);
+  lab.setAttribute("fill", "#4caf50"); lab.setAttribute("font-family", "monospace");
+  lab.setAttribute("font-size", "12"); lab.textContent = "GPS";
+  svg.appendChild(lab);
+}
+
+function drawErrorLine(svg, fix, truth, project) {
+  const [x1, y1] = project(fix.lat_deg, fix.lon_deg);
+  const [x2, y2] = project(truth.lat, truth.lon);
+  const ln = document.createElementNS(SVG_NS, "line");
+  ln.setAttribute("x1", x1); ln.setAttribute("y1", y1);
+  ln.setAttribute("x2", x2); ln.setAttribute("y2", y2);
+  ln.setAttribute("stroke", "#ffb840"); ln.setAttribute("stroke-width", "1.5");
+  ln.setAttribute("stroke-dasharray", "3 3"); svg.appendChild(ln);
+}
+
+function projectFromFix(fix, nm, brgDeg) {
+  const brg = (brgDeg * Math.PI) / 180;
+  const dN = nm * Math.cos(brg);
+  const dE = nm * Math.sin(brg);
+  const cosLat = Math.cos((fix.lat_deg * Math.PI) / 180);
+  return {
+    lat: fix.lat_deg + dN / 60,
+    lon: fix.lon_deg + dE / (60 * Math.max(cosLat, 1e-6)),
+  };
+}
+
+function buildFixHud(fix) {
+  const lines = [];
+  lines.push(`FIX  ${fmtLat(fix.lat_deg)} ${fmtLon(fix.lon_deg)}`);
+  lines.push(
+    `σ    major ${fix.sigma_major_nm.toFixed(2)} nm ` +
+    `minor ${fix.sigma_minor_nm.toFixed(2)} nm ` +
+    `orient ${((fix.orientation_rad * 180) / Math.PI).toFixed(1)}° T`
+  );
+  lines.push(`SIGHTS ${fix.sight_count}`);
+  if (typeof fix.chi_square === "number") {
+    lines.push(`χ²/dof ${fix.chi_square.toFixed(2)}`);
+  }
+  if (typeof fix.gps_truth_error_nm === "number") {
+    lines.push(
+      `vs GPS truth: ${fix.gps_truth_error_nm.toFixed(2)} nm ` +
+      `@ ${fix.gps_truth_bearing_deg.toFixed(1)}° T`
+    );
+  }
+  if (fix.timestamp_unix_ms) {
+    lines.push(`UTC  ${new Date(fix.timestamp_unix_ms).toISOString()}`);
+  }
+  return lines.join("\n");
+}
+
+// Wire fix-button clicks via delegation: capture-report
+// renderers emit data-fix="sid|cid|index".
+document.addEventListener("click", (e) => {
+  const b = e.target.closest("button.fix[data-fix]");
+  if (!b) return;
+  const [sid, cid, idxStr] = b.dataset.fix.split("|");
+  const rep = REPORTS[sid];
+  if (!rep || rep.error) return;
+  const cap = rep.captures.find(x => x.capture_id === cid);
+  if (!cap || !cap.fixes) return;
+  const fix = cap.fixes[parseInt(idxStr, 10)];
+  if (!fix) return;
+  openMapModal(fix);
+});
 
 renderSidebar();
 </script>

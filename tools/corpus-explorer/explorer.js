@@ -161,6 +161,10 @@ function renderCapture(cap, sessionDir) {
 
   const hist = renderHistogram(cap.stage_e_rejection_counts || {});
   if (hist) header.appendChild(hist);
+
+  const fixesList = renderFixesList(cap.fixes || []);
+  if (fixesList) header.appendChild(fixesList);
+
   section.appendChild(header);
 
   const grid = document.createElement("div");
@@ -402,3 +406,325 @@ function fmtTs(ms) {
 }
 
 loadIndex();
+
+// ---------- fix-list + map modal ----------
+
+function renderFixesList(fixes) {
+  if (!fixes || fixes.length === 0) return null;
+  const wrap = document.createElement("div");
+  wrap.className = "fixlist";
+  const h = document.createElement("h4");
+  h.textContent = `${fixes.length} published fix${fixes.length === 1 ? "" : "es"}`;
+  wrap.appendChild(h);
+  const ul = document.createElement("ul");
+  for (const f of fixes) {
+    const li = document.createElement("li");
+    const button = document.createElement("button");
+    button.className = "fix";
+    button.type = "button";
+    const lat = fmtLat(f.lat_deg);
+    const lon = fmtLon(f.lon_deg);
+    const smaj = f.sigma_major_nm.toFixed(1);
+    const smin = f.sigma_minor_nm.toFixed(1);
+    let line = `${lat} ${lon} · σ ${smaj} × ${smin} nm · ${f.sight_count} sights`;
+    if (typeof f.gps_truth_error_nm === "number") {
+      line += ` · Δ${f.gps_truth_error_nm.toFixed(1)} nm vs truth`;
+    }
+    button.textContent = line;
+    button.addEventListener("click", () => openMapModal(f));
+    li.appendChild(button);
+    ul.appendChild(li);
+  }
+  wrap.appendChild(ul);
+  return wrap;
+}
+
+function fmtLat(d) {
+  const hemi = d >= 0 ? "N" : "S";
+  const a = Math.abs(d);
+  return `${a.toFixed(4)}°${hemi}`;
+}
+function fmtLon(d) {
+  const hemi = d >= 0 ? "E" : "W";
+  const a = Math.abs(d);
+  return `${a.toFixed(4)}°${hemi}`;
+}
+
+const mapModal = (() => {
+  let m = document.getElementById("map-modal");
+  if (m) return m;
+  m = document.createElement("div");
+  m.id = "map-modal";
+  m.hidden = true;
+  m.innerHTML = `
+    <div id="map-stage">
+      <svg id="map-svg" xmlns="http://www.w3.org/2000/svg"></svg>
+      <div id="map-hud"></div>
+      <button id="map-close" aria-label="close">×</button>
+    </div>`;
+  document.body.appendChild(m);
+  m.addEventListener("click", (e) => {
+    if (e.target === m || e.target.id === "map-close") closeMapModal();
+  });
+  return m;
+})();
+
+function closeMapModal() {
+  mapModal.hidden = true;
+  const svg = document.getElementById("map-svg");
+  if (svg) svg.innerHTML = "";
+  const hud = document.getElementById("map-hud");
+  if (hud) hud.textContent = "";
+}
+
+function openMapModal(fix) {
+  mapModal.hidden = false;
+  const svg = document.getElementById("map-svg");
+  const hud = document.getElementById("map-hud");
+  svg.innerHTML = "";
+  // Choose a viewport: encompass 3·σ_major around the fix
+  // plus the GPS truth point (if present), with sane minimum
+  // extent so a tiny fix is still visible.
+  const halfNmFromSigma = Math.max(3 * fix.sigma_major_nm, 1);
+  let halfNm = halfNmFromSigma;
+  if (typeof fix.gps_truth_error_nm === "number") {
+    halfNm = Math.max(halfNm, fix.gps_truth_error_nm * 1.3);
+  }
+  halfNm = Math.max(halfNm, 0.5);
+  const project = makeEquirectProjector(fix.lat_deg, fix.lon_deg, halfNm);
+  drawMapBackground(svg, project, halfNm);
+  draw1And2SigmaEllipse(svg, fix, project);
+  drawFixPoint(svg, fix, project);
+  if (typeof fix.gps_truth_error_nm === "number" &&
+      typeof fix.gps_truth_bearing_deg === "number") {
+    const truth = projectFromFix(fix, fix.gps_truth_error_nm, fix.gps_truth_bearing_deg);
+    drawTruthMarker(svg, truth, project);
+    drawErrorLine(svg, fix, truth, project);
+  }
+  hud.textContent = buildFixHud(fix);
+}
+
+// Equirectangular projection centered on (lat0, lon0).
+// Returns a function (lat, lon) -> (svg_x, svg_y) in a
+// 800×800 viewBox. nm-per-degree-latitude is 60; nm-per-
+// degree-longitude scales by cos(lat0).
+function makeEquirectProjector(lat0, lon0, halfNm) {
+  const VIEW = 800;
+  const nmPerDegLat = 60;
+  const cosLat = Math.cos((lat0 * Math.PI) / 180);
+  const nmPerDegLon = 60 * Math.max(cosLat, 1e-6);
+  // Scale: nm -> svg px so that ranging ±halfNm fills the
+  // viewport.
+  const pxPerNm = (VIEW / 2) / halfNm;
+  const project = (lat, lon) => {
+    const dLat = lat - lat0;
+    const dLon = lon - lon0;
+    const nmN = dLat * nmPerDegLat;
+    const nmE = dLon * nmPerDegLon;
+    const x = VIEW / 2 + nmE * pxPerNm;
+    const y = VIEW / 2 - nmN * pxPerNm;
+    return [x, y];
+  };
+  project.pxPerNm = pxPerNm;
+  project.view = VIEW;
+  project.lat0 = lat0;
+  project.lon0 = lon0;
+  project.halfNm = halfNm;
+  return project;
+}
+
+function drawMapBackground(svg, project, halfNm) {
+  const VIEW = project.view;
+  svg.setAttribute("viewBox", `0 0 ${VIEW} ${VIEW}`);
+  svg.setAttribute("preserveAspectRatio", "xMidYMid meet");
+  // Backdrop.
+  const bg = document.createElementNS(SVG_NS, "rect");
+  bg.setAttribute("x", 0); bg.setAttribute("y", 0);
+  bg.setAttribute("width", VIEW); bg.setAttribute("height", VIEW);
+  bg.setAttribute("fill", "#0d1018");
+  svg.appendChild(bg);
+  // Lat/lon grid: roughly 5 lines across viewport, in nice
+  // round nm intervals.
+  const nmStep = niceStep(halfNm * 2 / 5);
+  const gridGroup = document.createElementNS(SVG_NS, "g");
+  gridGroup.setAttribute("stroke", "#252b35");
+  gridGroup.setAttribute("stroke-width", "1");
+  for (let n = -10; n <= 10; n++) {
+    const nm = n * nmStep;
+    if (Math.abs(nm) > halfNm) continue;
+    const offsetPx = nm * project.pxPerNm;
+    // vertical (constant longitude offset)
+    const xv = VIEW / 2 + offsetPx;
+    const lnv = document.createElementNS(SVG_NS, "line");
+    lnv.setAttribute("x1", xv); lnv.setAttribute("y1", 0);
+    lnv.setAttribute("x2", xv); lnv.setAttribute("y2", VIEW);
+    gridGroup.appendChild(lnv);
+    // horizontal (constant latitude offset; remember svg y inverted)
+    const yh = VIEW / 2 - offsetPx;
+    const lnh = document.createElementNS(SVG_NS, "line");
+    lnh.setAttribute("x1", 0); lnh.setAttribute("y1", yh);
+    lnh.setAttribute("x2", VIEW); lnh.setAttribute("y2", yh);
+    gridGroup.appendChild(lnh);
+  }
+  svg.appendChild(gridGroup);
+  // Scale bar bottom-left: one nmStep.
+  const sbY = VIEW - 22;
+  const sbX0 = 18;
+  const sbX1 = sbX0 + nmStep * project.pxPerNm;
+  const sb = document.createElementNS(SVG_NS, "line");
+  sb.setAttribute("x1", sbX0); sb.setAttribute("y1", sbY);
+  sb.setAttribute("x2", sbX1); sb.setAttribute("y2", sbY);
+  sb.setAttribute("stroke", "#e6e9ee"); sb.setAttribute("stroke-width", "3");
+  svg.appendChild(sb);
+  const sbT = document.createElementNS(SVG_NS, "text");
+  sbT.setAttribute("x", sbX0); sbT.setAttribute("y", sbY - 6);
+  sbT.setAttribute("fill", "#e6e9ee");
+  sbT.setAttribute("font-family", "monospace");
+  sbT.setAttribute("font-size", "14");
+  sbT.textContent = `${nmStep} nm`;
+  svg.appendChild(sbT);
+  // North arrow top-right.
+  const naX = VIEW - 30;
+  const naY = 25;
+  const arrow = document.createElementNS(SVG_NS, "polygon");
+  arrow.setAttribute("points",
+    `${naX},${naY - 12} ${naX - 6},${naY + 6} ${naX + 6},${naY + 6}`);
+  arrow.setAttribute("fill", "#e6e9ee");
+  svg.appendChild(arrow);
+  const naT = document.createElementNS(SVG_NS, "text");
+  naT.setAttribute("x", naX); naT.setAttribute("y", naY + 22);
+  naT.setAttribute("fill", "#e6e9ee");
+  naT.setAttribute("font-family", "monospace");
+  naT.setAttribute("font-size", "12");
+  naT.setAttribute("text-anchor", "middle");
+  naT.textContent = "N";
+  svg.appendChild(naT);
+}
+
+function niceStep(approxNm) {
+  // Snap to {1,2,5} × 10^k.
+  if (approxNm <= 0) return 1;
+  const k = Math.floor(Math.log10(approxNm));
+  const base = Math.pow(10, k);
+  const mant = approxNm / base;
+  let snap;
+  if (mant < 1.5) snap = 1;
+  else if (mant < 3.5) snap = 2;
+  else if (mant < 7.5) snap = 5;
+  else snap = 10;
+  return snap * base;
+}
+
+// Draw 1σ (solid) and 2σ (dashed) ellipses oriented by
+// orientation_rad (major axis from north, clockwise).
+// SVG rotation is clockwise from east, so we convert.
+function draw1And2SigmaEllipse(svg, fix, project) {
+  const [cx, cy] = project(fix.lat_deg, fix.lon_deg);
+  // orientation_rad is from north clockwise; SVG ellipse rx
+  // axis aligns with the x axis (east). Rotation that takes
+  // east -> north-clockwise(θ) is (θ - 90°). We want the
+  // major axis along (north clockwise θ): that's a rotation
+  // of (orientation_deg - 90) about the centre, since SVG
+  // angles are clockwise too.
+  const orientDeg = (fix.orientation_rad * 180) / Math.PI;
+  const rotDeg = orientDeg - 90;
+  const rxNm = fix.sigma_major_nm;
+  const ryNm = fix.sigma_minor_nm;
+  const rxPx = rxNm * project.pxPerNm;
+  const ryPx = ryNm * project.pxPerNm;
+  // 2σ ellipse first so 1σ sits on top.
+  for (const [mult, stroke, dash, opacity] of [
+    [2, "#5fc9ff", "6 4", 0.4],
+    [1, "#5fc9ff", null, 0.85],
+  ]) {
+    const e = document.createElementNS(SVG_NS, "ellipse");
+    e.setAttribute("cx", cx); e.setAttribute("cy", cy);
+    e.setAttribute("rx", rxPx * mult); e.setAttribute("ry", ryPx * mult);
+    e.setAttribute("transform", `rotate(${rotDeg} ${cx} ${cy})`);
+    e.setAttribute("fill", "none");
+    e.setAttribute("stroke", stroke);
+    e.setAttribute("stroke-width", "2");
+    e.setAttribute("stroke-opacity", opacity);
+    if (dash) e.setAttribute("stroke-dasharray", dash);
+    svg.appendChild(e);
+  }
+}
+
+function drawFixPoint(svg, fix, project) {
+  const [x, y] = project(fix.lat_deg, fix.lon_deg);
+  const dot = document.createElementNS(SVG_NS, "circle");
+  dot.setAttribute("cx", x); dot.setAttribute("cy", y); dot.setAttribute("r", 5);
+  dot.setAttribute("fill", "#5fc9ff");
+  dot.setAttribute("stroke", "#0d1018");
+  dot.setAttribute("stroke-width", "1.5");
+  svg.appendChild(dot);
+}
+
+function drawTruthMarker(svg, truth, project) {
+  const [x, y] = project(truth.lat, truth.lon);
+  // Cross marker.
+  for (const [x1,y1,x2,y2] of [[x-7,y,x+7,y],[x,y-7,x,y+7]]) {
+    const ln = document.createElementNS(SVG_NS, "line");
+    ln.setAttribute("x1", x1); ln.setAttribute("y1", y1);
+    ln.setAttribute("x2", x2); ln.setAttribute("y2", y2);
+    ln.setAttribute("stroke", "#4caf50");
+    ln.setAttribute("stroke-width", "2");
+    svg.appendChild(ln);
+  }
+  const lab = document.createElementNS(SVG_NS, "text");
+  lab.setAttribute("x", x + 10); lab.setAttribute("y", y - 6);
+  lab.setAttribute("fill", "#4caf50");
+  lab.setAttribute("font-family", "monospace");
+  lab.setAttribute("font-size", "12");
+  lab.textContent = "GPS";
+  svg.appendChild(lab);
+}
+
+function drawErrorLine(svg, fix, truth, project) {
+  const [x1, y1] = project(fix.lat_deg, fix.lon_deg);
+  const [x2, y2] = project(truth.lat, truth.lon);
+  const ln = document.createElementNS(SVG_NS, "line");
+  ln.setAttribute("x1", x1); ln.setAttribute("y1", y1);
+  ln.setAttribute("x2", x2); ln.setAttribute("y2", y2);
+  ln.setAttribute("stroke", "#ffb840");
+  ln.setAttribute("stroke-width", "1.5");
+  ln.setAttribute("stroke-dasharray", "3 3");
+  svg.appendChild(ln);
+}
+
+// Compute (lat,lon) at `nm` nautical miles on bearing
+// `brgDeg` from a starting fix. Small-displacement
+// equirectangular inverse (consistent with the projector).
+function projectFromFix(fix, nm, brgDeg) {
+  const brg = (brgDeg * Math.PI) / 180;
+  const dN = nm * Math.cos(brg);
+  const dE = nm * Math.sin(brg);
+  const cosLat = Math.cos((fix.lat_deg * Math.PI) / 180);
+  const dLat = dN / 60;
+  const dLon = dE / (60 * Math.max(cosLat, 1e-6));
+  return { lat: fix.lat_deg + dLat, lon: fix.lon_deg + dLon };
+}
+
+function buildFixHud(fix) {
+  const lines = [];
+  lines.push(`FIX  ${fmtLat(fix.lat_deg)} ${fmtLon(fix.lon_deg)}`);
+  lines.push(
+    `σ    major ${fix.sigma_major_nm.toFixed(2)} nm ` +
+    `minor ${fix.sigma_minor_nm.toFixed(2)} nm ` +
+    `orient ${((fix.orientation_rad * 180) / Math.PI).toFixed(1)}° T`
+  );
+  lines.push(`SIGHTS ${fix.sight_count}`);
+  if (typeof fix.chi_square === "number") {
+    lines.push(`χ²/dof ${fix.chi_square.toFixed(2)}`);
+  }
+  if (typeof fix.gps_truth_error_nm === "number") {
+    lines.push(
+      `vs GPS truth: ${fix.gps_truth_error_nm.toFixed(2)} nm ` +
+      `@ ${fix.gps_truth_bearing_deg.toFixed(1)}° T`
+    );
+  }
+  if (fix.timestamp_unix_ms) {
+    lines.push(`UTC  ${new Date(fix.timestamp_unix_ms).toISOString()}`);
+  }
+  return lines.join("\n");
+}

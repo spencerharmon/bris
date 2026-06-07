@@ -201,6 +201,45 @@ pub(crate) struct CaptureReport {
     pub stage_e_rejection_counts: std::collections::BTreeMap<String, u64>,
     /// Per-frame records, in capture order.
     pub frames: Vec<FrameReport>,
+    /// Fixes published during this capture's feed window.
+    /// Session-engine continuity means a fix triggered by a
+    /// sight from capture N may publish a few frames into
+    /// capture N+1; that fix is attributed to N+1 here.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub fixes: Vec<PublishedFixReport>,
+}
+
+/// One published fix, serialised for the corpus explorer's
+/// map view.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub(crate) struct PublishedFixReport {
+    /// Wall-clock at the moment the fix was published, Unix
+    /// milliseconds.
+    pub timestamp_unix_ms: i64,
+    /// Observer latitude (degrees, north positive).
+    pub lat_deg: f64,
+    /// Observer longitude (degrees, east positive).
+    pub lon_deg: f64,
+    /// 1σ semi-major axis of the uncertainty ellipse, nm.
+    pub sigma_major_nm: f64,
+    /// 1σ semi-minor axis, nm.
+    pub sigma_minor_nm: f64,
+    /// Orientation of the major axis from north, radians,
+    /// clockwise, in `[0, π)`.
+    pub orientation_rad: f64,
+    /// Number of sights that contributed.
+    pub sight_count: u32,
+    /// Reduced chi-square of the LSQ residuals.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chi_square: Option<f64>,
+    /// Optional GPS-truth comparison (when the bundle
+    /// carried `gps_truth`). Distance in nautical miles
+    /// between fix and truth.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gps_truth_error_nm: Option<f64>,
+    /// Bearing from fix to GPS truth, degrees.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gps_truth_bearing_deg: Option<f64>,
 }
 
 /// Per-session report.
@@ -336,6 +375,7 @@ mod tests {
                     }],
                     sight_emitted: false,
                 }],
+                fixes: Vec::new(),
             }],
         };
         let json = serde_json::to_string(&report).unwrap();

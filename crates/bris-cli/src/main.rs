@@ -108,7 +108,7 @@ enum Command {
     /// you must specify which body the camera was pointed at and an
     /// approximate observer position; the output is the LOP refined
     /// from your assumed position.
-    Replay(ReplayArgs),
+    Replay(Box<ReplayArgs>),
     /// Manage sessions (capture groupings) on the local corpus.
     ///
     /// Sessions are the operator-facing grouping for captures
@@ -520,6 +520,16 @@ struct ReplayArgs {
     /// (default 10.0). `inf` disables.
     #[arg(long)]
     max_ellipse_axis_ratio: Option<f64>,
+    /// Cold-start hemisphere hint. Resolves the two-candidate
+    /// ambiguity inherent in two-sight cold-start `CoP`
+    /// intersections (the candidates are mirror-symmetric
+    /// about the great-circle joining the two sub-points).
+    /// Without a hint cold-start refuses to publish; setting
+    /// `north` or `south` picks the candidate on that side
+    /// of the equator. Honest only when the operator actually
+    /// knows which hemisphere they're in.
+    #[arg(long, value_parser = ["north", "south"])]
+    coarse_hemisphere: Option<String>,
     /// Engine sight/fix store root. Defaults to a temp dir per
     /// run so replays don't pollute the operator's `.bris/`.
     #[arg(long)]
@@ -937,12 +947,68 @@ fn build_capture_report(
                 f
             })
             .collect(),
+        fixes: default_result
+            .fixes
+            .iter()
+            .map(|pf| published_fix_to_report(pf, manifest.gps_truth.as_ref()))
+            .collect(),
     })
 }
 
 /// Resolve a `BundleManifest` for the run, returning it plus the
 /// directory it lives in. For `--frames` the manifest is
 /// synthesized from CLI flags only.
+/// Convert a [`bris_streaming::PublishedFix`] to the wire-
+/// shape used in the corpus replay report.
+///
+/// `gps_truth`, when present, lets the explorer compare each
+/// published fix to a recorded ground truth without
+/// re-deriving the great-circle math client-side.
+fn published_fix_to_report(
+    pf: &bris_streaming::PublishedFix,
+    gps_truth: Option<&bris_bundle::GpsTruth>,
+) -> replay_report::PublishedFixReport {
+    let lat = pf.fix.lat.degrees();
+    let lon = pf.fix.lon.degrees();
+    let (err_nm, brg_deg) = if let Some(gt) = gps_truth {
+        let (nm, brg) = great_circle_nm_and_bearing(lat, lon, gt.lat, gt.lon);
+        (Some(nm), Some(brg))
+    } else {
+        (None, None)
+    };
+    replay_report::PublishedFixReport {
+        timestamp_unix_ms: tt_to_unix_ms(pf.timestamp),
+        lat_deg: lat,
+        lon_deg: lon,
+        sigma_major_nm: pf.fix.sigma_major_nm,
+        sigma_minor_nm: pf.fix.sigma_minor_nm,
+        orientation_rad: pf.fix.orientation_rad,
+        sight_count: pf.fix.sight_count,
+        chi_square: pf.fix.chi_square,
+        gps_truth_error_nm: err_nm,
+        gps_truth_bearing_deg: brg_deg,
+    }
+}
+
+/// Approximate TT (Terrestrial Time) -> Unix-ms conversion
+/// for display purposes. TT = TAI + 32.184 s; TAI - UTC is
+/// the integer leap-second offset (37 s in 2026; bumps only
+/// on rare announced leap-second days). We use a constant
+/// 69.184 s offset here — honest for any time after
+/// 2017-01-01 and good enough for chartplotter-grade
+/// timestamps. The engine's authoritative time math stays
+/// in Tt; this is purely a display path.
+fn tt_to_unix_ms(tt: bris_core::time::Tt) -> i64 {
+    const JD_UNIX_EPOCH: f64 = 2_440_587.5;
+    const TT_MINUS_UTC_SECONDS: f64 = 69.184;
+    let jd = tt.julian_date();
+    let unix_secs_tt = (jd - JD_UNIX_EPOCH) * 86_400.0;
+    let unix_secs_utc = unix_secs_tt - TT_MINUS_UTC_SECONDS;
+    #[allow(clippy::cast_possible_truncation)]
+    let ms = (unix_secs_utc * 1000.0).round() as i64;
+    ms
+}
+
 /// Replay every capture in a session, chronological order.
 ///
 /// All captures within one mode share a single engine
@@ -1079,6 +1145,7 @@ fn run_replay_session(args: &ReplayArgs, session_id: uuid::Uuid) -> anyhow::Resu
                 mode,
             )?;
             let capture_fix_count = session_fixes.len() - pre_fix_count;
+            let capture_fixes_slice = &session_fixes[pre_fix_count..];
             let capture_frames_pushed = engine.diagnostics().frames_pushed - pre_frames_pushed;
             if let Some(render) = render {
                 let report = replay_report::CaptureReport {
@@ -1103,6 +1170,10 @@ fn run_replay_session(args: &ReplayArgs, session_id: uuid::Uuid) -> anyhow::Resu
                                 format!("captures/{}/{}", cap.manifest.bundle_id, f.pgm_path);
                             f
                         })
+                        .collect(),
+                    fixes: capture_fixes_slice
+                        .iter()
+                        .map(|pf| published_fix_to_report(pf, cap.manifest.gps_truth.as_ref()))
                         .collect(),
                 };
                 capture_reports.push(report);
@@ -1571,6 +1642,13 @@ fn build_engine_config(
     }
     if let Some(v) = args.max_ellipse_axis_ratio {
         cfg.publication_gate.max_ellipse_axis_ratio = v;
+    }
+    if let Some(h) = args.coarse_hemisphere.as_deref() {
+        cfg.cold_start.coarse_hemisphere = Some(match h {
+            "north" => bris_core::Hemisphere::North,
+            "south" => bris_core::Hemisphere::South,
+            _ => unreachable!("clap value_parser restricts to north|south"),
+        });
     }
     Ok(cfg)
 }
