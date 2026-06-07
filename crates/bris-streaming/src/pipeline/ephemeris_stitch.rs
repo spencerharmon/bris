@@ -105,7 +105,7 @@ pub(crate) struct EphemerisPrediction {
     /// position at `t2`, assuming the camera's image axes
     /// align with world up/down (no roll). Positive = right.
     pub dx_px: f64,
-    /// Pixel-y delta. Positive = down. Negative when the
+    /// `dy_px`: vertical pixel delta. Positive = down. Negative when the
     /// body climbs in altitude.
     pub dy_px: f64,
     /// Predicted angular displacement magnitude in radians,
@@ -166,7 +166,7 @@ impl std::error::Error for EphemerisError {}
 /// `observer_position_sigma_m` is the 1σ uncertainty of the
 /// observer's horizontal position, in metres. For a
 /// freshly-cold-start observer with no prior, pass a large
-/// value (e.g. 11_000_000 ≈ 6000 nm) to honestly widen the
+/// value (e.g. `11_000_000` ≈ 6000 nm) to honestly widen the
 /// returned σ; for a well-known observer with a recent
 /// published fix, pass that fix's `sigma_major_nm × 1852`.
 ///
@@ -221,8 +221,8 @@ pub(crate) fn predict_body_pixel_motion(
     // Per-axis pixel projection under the no-roll
     // assumption: pixel-x is image-right (+az direction at
     // image scale), pixel-y is image-down (-alt direction).
-    let dx_px = d_az_eff * intrinsics.fx;
-    let dy_px = -d_alt * intrinsics.fy;
+    let dx = d_az_eff * intrinsics.fx;
+    let dy = -d_alt * intrinsics.fy;
 
     // ----- σ accounting -----
     //
@@ -248,9 +248,10 @@ pub(crate) fn predict_body_pixel_motion(
     //     quadrature with the perturb undone on the second
     //     to avoid double-counting the correlated component.
     let perturb_rad = if observer_position_sigma_m.is_finite() && observer_position_sigma_m > 0.0 {
-        (observer_position_sigma_m / METRES_PER_RADIAN_LAT)
-            .min(MAX_PERTURB_LAT_RAD)
-            .max(OBSERVER_PERTURB_M / METRES_PER_RADIAN_LAT)
+        (observer_position_sigma_m / METRES_PER_RADIAN_LAT).clamp(
+            OBSERVER_PERTURB_M / METRES_PER_RADIAN_LAT,
+            MAX_PERTURB_LAT_RAD,
+        )
     } else {
         OBSERVER_PERTURB_M / METRES_PER_RADIAN_LAT
     };
@@ -290,15 +291,15 @@ pub(crate) fn predict_body_pixel_motion(
     //     roll" to recover the magnitude-only circular
     //     search.
     let f_eff = (intrinsics.fx * intrinsics.fy).sqrt().max(f64::EPSILON);
-    let mag_px = (dx_px.powi(2) + dy_px.powi(2)).sqrt();
+    let mag_px = (dx.powi(2) + dy.powi(2)).sqrt();
     let roll_sigma_factor = roll_uncertainty_rad.abs().min(std::f64::consts::FRAC_PI_2).sin();
     let sigma_px_angular = angular_sigma_rad * f_eff;
     let sigma_px_roll = mag_px * roll_sigma_factor;
     let sigma_px = (sigma_px_angular.powi(2) + sigma_px_roll.powi(2)).sqrt();
 
     Ok(EphemerisPrediction {
-        dx_px,
-        dy_px,
+        dx_px: dx,
+        dy_px: dy,
         angular_delta_rad,
         angular_sigma_rad,
         sigma_px,
@@ -391,7 +392,7 @@ mod tests {
         assert!(pred.sigma_px.is_finite() && pred.sigma_px > 0.0);
     }
 
-    /// Cold-start observer (huge σ) inflates σ_px for Moon
+    /// Cold-start observer (huge σ) inflates `sigma_px` for Moon
     /// prediction (parallax sensitive). Compare against a
     /// near-zero observer σ at the same instant.
     #[test]
@@ -418,21 +419,15 @@ mod tests {
             0.01,
         );
         // Both should succeed or both fail (e.g. Moon below
-        // horizon at this instant). If they succeed, the
+        // horizon at this instant). If both succeed, the
         // cold-start σ must dominate.
-        match (known, cold) {
-            (Ok(k), Ok(c)) => {
-                assert!(
-                    c.sigma_px > k.sigma_px * 2.0,
-                    "cold-start σ_px {} not meaningfully larger than known {}",
-                    c.sigma_px,
-                    k.sigma_px,
-                );
-            }
-            // Acceptable: Moon below horizon at the configured
-            // observer at J2000. The almanac contract is
-            // exercised by other tests.
-            _ => {}
+        if let (Ok(k), Ok(c)) = (known, cold) {
+            assert!(
+                c.sigma_px > k.sigma_px * 2.0,
+                "cold-start σ_px {} not meaningfully larger than known {}",
+                c.sigma_px,
+                k.sigma_px,
+            );
         }
     }
 

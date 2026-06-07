@@ -119,6 +119,7 @@ impl HorizonProviderSet {
 /// real deployment will want to override at least the
 /// [`Observer`].
 #[derive(Debug, Clone)]
+#[allow(clippy::struct_excessive_bools)]
 pub struct EngineConfig {
     /// Observer position, eye height, and atmospheric model.
     /// Drives almanac apparent-place computations and horizon-dip
