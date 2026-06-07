@@ -301,6 +301,15 @@ pub struct EngineDiagnostics {
     /// reason at the point of rejection.
     pub sights_rejected_by_screener: u64,
 
+    /// Cumulative number of frames where Stage D was refused
+    /// by the [`crate::StageDDispatchPolicy`] gate because
+    /// the frame carried no plausible star evidence (Day
+    /// classification, or Night with < 3 peaks). Each
+    /// increment is also reflected in `stages[3].skipped`
+    /// (Stage D is genuinely skipped). Stays at zero when the
+    /// policy is [`crate::StageDDispatchPolicy::Always`].
+    pub stage_d_skipped_no_star_evidence: u64,
+
     /// Snapshot of the body centroid detected on the most
     /// recent processed frame, in source-frame pixel
     /// coordinates. `None` when the frame produced no body
