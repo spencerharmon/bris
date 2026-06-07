@@ -65,8 +65,7 @@ mod pipeline;
 mod store;
 
 pub use config::{
-    ColdStartEngineConfig, EngineConfig, HorizonProviderSet, PlateSolverInit,
-    StageDDispatchPolicy,
+    ColdStartEngineConfig, EngineConfig, HorizonProviderSet, PlateSolverInit, StageDDispatchPolicy,
 };
 pub use diagnostics::{
     BodyCentroidSnapshot, EngineDiagnostics, HorizonHypothesisSnapshot, PipelineStageStats,

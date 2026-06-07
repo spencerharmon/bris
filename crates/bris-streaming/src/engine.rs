@@ -1349,6 +1349,158 @@ mod tests {
         }
     }
 
+    use bris_vision::{Centroid, Peak};
+
+    fn night_body(n_peaks: usize) -> BodyDetection {
+        let peaks = (0..n_peaks)
+            .map(|i| Peak {
+                #[allow(clippy::cast_precision_loss)]
+                x: 10.0 + i as f64,
+                y: 20.0,
+                intensity: 5000.0,
+            })
+            .collect();
+        BodyDetection::Night(peaks)
+    }
+
+    fn day_body() -> BodyDetection {
+        BodyDetection::Day(
+            Centroid {
+                x: 0.0,
+                y: 0.0,
+                area_px: 100,
+                mean_intensity: 50_000.0,
+                position_sigma_px: bris_core::Sigma::new(0.5).unwrap(),
+            },
+            Vec::new(),
+        )
+    }
+
+    #[test]
+    fn stage_d_gate_when_stars_expected_admits_night_with_3_plus_peaks() {
+        let p = StageDDispatchPolicy::WhenStarsExpected;
+        assert!(stage_d_dispatch_allowed(
+            p,
+            Condition::Night,
+            &night_body(3)
+        ));
+        assert!(stage_d_dispatch_allowed(
+            p,
+            Condition::Night,
+            &night_body(4)
+        ));
+    }
+
+    #[test]
+    fn stage_d_gate_when_stars_expected_refuses_night_with_fewer_than_3_peaks() {
+        let p = StageDDispatchPolicy::WhenStarsExpected;
+        assert!(!stage_d_dispatch_allowed(
+            p,
+            Condition::Night,
+            &night_body(0)
+        ));
+        assert!(!stage_d_dispatch_allowed(
+            p,
+            Condition::Night,
+            &night_body(2)
+        ));
+    }
+
+    #[test]
+    fn stage_d_gate_when_stars_expected_refuses_day_frame() {
+        let p = StageDDispatchPolicy::WhenStarsExpected;
+        // Day-classified frame even with a Day centroid: no
+        // peaks to plate-solve, never admit.
+        assert!(!stage_d_dispatch_allowed(p, Condition::Day, &day_body()));
+        // Night dispatched-condition but no body detection at
+        // all: still refuse — nothing for the solver to consume.
+        assert!(!stage_d_dispatch_allowed(
+            p,
+            Condition::Night,
+            &BodyDetection::None
+        ));
+        // Twilight dispatched-condition is also refused under
+        // the strict gate; spec says "classifier verdict is
+        // Night" only. Operators wanting Twilight + peaks
+        // solved must opt into `Always`.
+        assert!(!stage_d_dispatch_allowed(
+            p,
+            Condition::Twilight,
+            &night_body(5)
+        ));
+        assert!(!stage_d_dispatch_allowed(
+            p,
+            Condition::Unusable,
+            &night_body(5)
+        ));
+    }
+
+    #[test]
+    fn stage_d_gate_always_admits_every_condition_body_combination() {
+        let p = StageDDispatchPolicy::Always;
+        for cond in [
+            Condition::Day,
+            Condition::Night,
+            Condition::Twilight,
+            Condition::Unusable,
+        ] {
+            for body in [
+                day_body(),
+                night_body(0),
+                night_body(1),
+                night_body(50),
+                BodyDetection::None,
+            ] {
+                assert!(
+                    stage_d_dispatch_allowed(p, cond, &body),
+                    "Always must admit every (condition, body) tuple; failed on {cond:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn stage_d_gate_never_refuses_every_condition_body_combination() {
+        let p = StageDDispatchPolicy::Never;
+        for cond in [
+            Condition::Day,
+            Condition::Night,
+            Condition::Twilight,
+            Condition::Unusable,
+        ] {
+            for body in [day_body(), night_body(10), BodyDetection::None] {
+                assert!(
+                    !stage_d_dispatch_allowed(p, cond, &body),
+                    "Never must refuse every (condition, body) tuple; failed on {cond:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn engine_default_skips_stage_d_on_day_frame_and_bumps_counter() {
+        // Default policy = WhenStarsExpected. A dark default
+        // dummy frame at the J2000 epoch classifies as Day
+        // (Sun above horizon at Greenwich noon TT) — no peak
+        // payload reaches Stage D and the gate increments
+        // `stage_d_skipped_no_star_evidence`.
+        let mut cfg = EngineConfig::new(Observer::default_dev());
+        cfg.store.enabled = false;
+        let engine = StreamingEngine::new(cfg);
+        engine.push_frame(dummy_frame()).unwrap();
+        let diag = engine.diagnostics();
+        // Stage D's own skip counter went up.
+        assert_eq!(
+            diag.stages[3].skipped, 1,
+            "stages[STAGE_D].skipped should advance with every gate refusal"
+        );
+        // And the gate-specific counter went up too.
+        assert_eq!(
+            diag.stage_d_skipped_no_star_evidence, 1,
+            "gate refusal must increment stage_d_skipped_no_star_evidence"
+        );
+    }
+
     #[test]
     fn engine_constructs_with_default_config() {
         let mut cfg = EngineConfig::new(Observer::default_dev());
@@ -1727,6 +1879,15 @@ mod tests {
         let mut cfg = EngineConfig::new(Observer::default_dev());
         cfg.store.enabled = false;
         cfg.plate_solver_init = crate::PlateSolverInit::Lazy;
+        // This test's synthetic frame only yields a single
+        // surviving peak after the night-pipeline's horizon
+        // masking, so the default WhenStarsExpected gate
+        // (≥ 3 peaks) would refuse dispatch and short-
+        // circuit the lazy build. The test is asserting on
+        // the lazy-build trigger, which is orthogonal to
+        // the gate; pin to Always so the build path is
+        // exercised regardless of how many peaks survive.
+        cfg.stage_d_dispatch_policy = crate::StageDDispatchPolicy::Always;
         cfg.star_hash_db_cfg = bris_platesolve::StarHashDbConfig {
             mag_cutoff: 1.5,
             ..bris_platesolve::StarHashDbConfig::default()
