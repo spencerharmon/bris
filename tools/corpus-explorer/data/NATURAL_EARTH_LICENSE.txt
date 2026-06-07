@@ -1,0 +1,2 @@
+Natural Earth 1:110m coastline data, public domain
+https://www.naturalearthdata.com/downloads/110m-physical-vectors/

@@ -479,6 +479,7 @@ function closeMapModal() {
 
 function openMapModal(fix) {
   mapModal.hidden = false;
+  loadCoastline();
   const svg = document.getElementById("map-svg");
   const hud = document.getElementById("map-hud");
   svg.innerHTML = "";
@@ -493,6 +494,7 @@ function openMapModal(fix) {
   halfNm = Math.max(halfNm, 0.5);
   const project = makeEquirectProjector(fix.lat_deg, fix.lon_deg, halfNm);
   drawMapBackground(svg, project, halfNm);
+  drawCoastline(svg, project);
   draw1And2SigmaEllipse(svg, fix, project);
   drawFixPoint(svg, fix, project);
   if (typeof fix.gps_truth_error_nm === "number" &&
@@ -599,6 +601,62 @@ function drawMapBackground(svg, project, halfNm) {
   naT.setAttribute("text-anchor", "middle");
   naT.textContent = "N";
   svg.appendChild(naT);
+}
+
+// Coastline geojson is loaded async on first map open; cached.
+let COASTLINE = null;
+async function loadCoastline() {
+  if (COASTLINE) return COASTLINE;
+  try {
+    const res = await fetch("data/ne_110m_coastline.min.json", { cache: "force-cache" });
+    if (res.ok) COASTLINE = await res.json();
+    else COASTLINE = [];
+  } catch {
+    COASTLINE = [];
+  }
+  return COASTLINE;
+}
+
+// Same coastline-drawing logic as in build_explorer.py.
+function drawCoastline(svg, project) {
+  if (!Array.isArray(COASTLINE) || COASTLINE.length === 0) return;
+  const lon0 = project.lon0;
+  const cosLat = Math.cos((project.lat0 * Math.PI) / 180);
+  const halfLonDeg = project.halfNm / (60 * Math.max(cosLat, 1e-6));
+  const halfLatDeg = project.halfNm / 60;
+  const group = document.createElementNS(SVG_NS, "g");
+  group.setAttribute("stroke", "#3a4456");
+  group.setAttribute("stroke-width", "1.2");
+  group.setAttribute("fill", "none");
+  group.setAttribute("stroke-linejoin", "round");
+  group.setAttribute("stroke-linecap", "round");
+  for (const ls of COASTLINE) {
+    const pts = [];
+    for (const [lonRaw, lat] of ls) {
+      let lon = lonRaw;
+      while (lon - lon0 > 180) lon -= 360;
+      while (lon - lon0 < -180) lon += 360;
+      if (Math.abs(lon - lon0) > halfLonDeg * 1.5) {
+        if (pts.length > 1) emitPolyline(group, pts);
+        pts.length = 0;
+        continue;
+      }
+      if (Math.abs(lat - project.lat0) > halfLatDeg * 1.5) {
+        if (pts.length > 1) emitPolyline(group, pts);
+        pts.length = 0;
+        continue;
+      }
+      const [x, y] = project(lat, lon);
+      pts.push(`${x.toFixed(1)},${y.toFixed(1)}`);
+    }
+    if (pts.length > 1) emitPolyline(group, pts);
+  }
+  svg.appendChild(group);
+}
+function emitPolyline(group, pts) {
+  const p = document.createElementNS(SVG_NS, "polyline");
+  p.setAttribute("points", pts.join(" "));
+  group.appendChild(p);
 }
 
 function niceStep(approxNm) {

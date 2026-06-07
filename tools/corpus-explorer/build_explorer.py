@@ -207,6 +207,7 @@ nav li .meta { font-size: 0.7em; color: #9aa3b2; }
 // Data is inlined below by build_explorer.py — no fetch needed.
 const INDEX = __INDEX_JSON__;
 const REPORTS = __REPORTS_JSON__;  // { "<session_id>": {report object} | {error: "..."} }
+const COASTLINE = __COASTLINE_JSON__;  // [[[lon,lat],...], ...]
 
 const statusEl = document.getElementById("status");
 const listEl = document.getElementById("session-list");
@@ -520,6 +521,7 @@ function openMapModal(fix) {
   halfNm = Math.max(halfNm, 0.5);
   const project = makeEquirectProjector(fix.lat_deg, fix.lon_deg, halfNm);
   drawMapBackground(svg, project, halfNm);
+  drawCoastline(svg, project);
   draw1And2SigmaEllipse(svg, fix, project);
   drawFixPoint(svg, fix, project);
   if (typeof fix.gps_truth_error_nm === "number" &&
@@ -610,6 +612,58 @@ function niceStep(approxNm) {
   else if (mant < 7.5) snap = 5;
   else snap = 10;
   return snap * base;
+}
+
+// Draw Natural Earth 1:110m coastline (public domain),
+// inlined at build time as COASTLINE = [[[lon,lat],...], ...].
+// Each LineString gets a single SVG polyline. Coordinates are
+// shifted to the central-meridian window so the line doesn't
+// snake across the canvas at the antimeridian.
+function drawCoastline(svg, project) {
+  if (!Array.isArray(COASTLINE) || COASTLINE.length === 0) return;
+  const lon0 = project.lon0;
+  // Viewport half-extent in degrees longitude (cosLat for
+  // the central latitude). Use the projector's halfNm.
+  const cosLat = Math.cos((project.lat0 * Math.PI) / 180);
+  const halfLonDeg = project.halfNm / (60 * Math.max(cosLat, 1e-6));
+  const halfLatDeg = project.halfNm / 60;
+  const view = project.view;
+  const group = document.createElementNS(SVG_NS, "g");
+  group.setAttribute("stroke", "#3a4456");
+  group.setAttribute("stroke-width", "1.2");
+  group.setAttribute("fill", "none");
+  group.setAttribute("stroke-linejoin", "round");
+  group.setAttribute("stroke-linecap", "round");
+  for (const ls of COASTLINE) {
+    const pts = [];
+    let prevShifted = null;
+    for (const [lonRaw, lat] of ls) {
+      // Shift lon into [lon0-180, lon0+180].
+      let lon = lonRaw;
+      while (lon - lon0 > 180) lon -= 360;
+      while (lon - lon0 < -180) lon += 360;
+      // Cheap reject: skip vertex if comfortably out of viewport.
+      if (Math.abs(lon - lon0) > halfLonDeg * 1.5) {
+        if (pts.length > 1) emitPolyline(group, pts);
+        pts.length = 0;
+        continue;
+      }
+      if (Math.abs(lat - project.lat0) > halfLatDeg * 1.5) {
+        if (pts.length > 1) emitPolyline(group, pts);
+        pts.length = 0;
+        continue;
+      }
+      const [x, y] = project(lat, lon);
+      pts.push(`${x.toFixed(1)},${y.toFixed(1)}`);
+    }
+    if (pts.length > 1) emitPolyline(group, pts);
+  }
+  svg.appendChild(group);
+}
+function emitPolyline(group, pts) {
+  const p = document.createElementNS(SVG_NS, "polyline");
+  p.setAttribute("points", pts.join(" "));
+  group.appendChild(p);
 }
 
 function draw1And2SigmaEllipse(svg, fix, project) {
@@ -752,10 +806,17 @@ def main(argv: list[str]) -> int:
                 if rpth and not rpth.startswith(session_prefix):
                     frame["render_path"] = session_prefix + rpth
         reports[s["session_id"]] = rep
+    coastline_path = Path(__file__).resolve().parent / "data" / "ne_110m_coastline.min.json"
+    if coastline_path.is_file():
+        coastline = json.loads(coastline_path.read_text())
+    else:
+        print(f"warning: missing {coastline_path}; map view will lack coastline", file=sys.stderr)
+        coastline = []
     html = (
         HTML_TEMPLATE
         .replace("__INDEX_JSON__", json.dumps(index))
         .replace("__REPORTS_JSON__", json.dumps(reports))
+        .replace("__COASTLINE_JSON__", json.dumps(coastline, separators=(",", ":")))
     )
     out = corpus / "corpus-explorer.html"
     out.write_text(html)
