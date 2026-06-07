@@ -277,6 +277,20 @@ stack). A naive `target/` reaches 20+ GiB. Standing policy:
   `--workspace --all-features` rebuilds everything and is the
   right thing only before commit. During iteration, scope to
   the crate you're editing.
+- **Use `--release` for any per-frame perf assertion or
+  diagnostic replay.** The dev profile runs the streaming
+  engine 5–15× slower than release on this stack — enough
+  that an interactive `bris replay --session --render-frames`
+  loop is unusably slow in debug. Release is the right
+  baseline whenever you're (a) reporting per-frame timing,
+  (b) running a multi-capture session replay, (c) generating
+  corpus explorer artifacts, or (d) comparing against Pi /
+  device performance. Build the binary once with
+  `cargo build --release -p bris-cli --bin bris
+  --features bris-streaming/ml-gravity` and run
+  `./target/release/bris ...` for the iteration loop. The APK
+  is always release-built; release timing on x86_64 is the
+  honest analogue to what the device does.
 - **Delete cross-compile dirs when not in use.**
   `target/aarch64-*/` and `target/*-android/` survive
   `cargo clean -p` and add up fast. `rm -rf` them when you're

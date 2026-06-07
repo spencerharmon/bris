@@ -38,7 +38,9 @@ use bris_capture::{
 use bris_core::time::utc_to_tt;
 use bris_core::{Latitude, Longitude, SensorGain};
 use bris_nmea::QualityThresholds;
-use bris_streaming::{format_fix_as_nmea, EngineConfig, PublishedFix, StreamingEngine};
+use bris_streaming::{
+    format_fix_as_nmea, EngineConfig, FixReceiver, PublishedFix, StreamingEngine,
+};
 use bris_vision::{load_frame_from_path_with_rotation, save_frame_as_png, Intrinsics, Rotation};
 use chrono::{TimeZone, Utc};
 use clap::{Parser, Subcommand};
@@ -106,7 +108,7 @@ enum Command {
     /// you must specify which body the camera was pointed at and an
     /// approximate observer position; the output is the LOP refined
     /// from your assumed position.
-    Replay(ReplayArgs),
+    Replay(Box<ReplayArgs>),
     /// Manage sessions (capture groupings) on the local corpus.
     ///
     /// Sessions are the operator-facing grouping for captures
@@ -426,8 +428,13 @@ struct ReplayArgs {
     frames: Option<PathBuf>,
     /// Replay every capture under
     /// `<corpus>/sessions/<UUID>/captures/` in chronological
-    /// order. Each capture runs through its own engine instance.
-    /// Cross-capture engine continuity is a Phase 9 stretch.
+    /// order, sharing one engine across the whole session.
+    /// Matches the APK's `SessionHolder` lifetime (engine
+    /// constructed when active session is acquired; reused
+    /// across capture start/stop cycles). The cross-capture
+    /// `SightWindow`, cold-start state, and last-published-
+    /// fix continuity that the engine provides are what
+    /// make a multi-capture fix possible.
     #[arg(long, conflicts_with_all = ["bundle", "frames"])]
     session: Option<uuid::Uuid>,
     /// Corpus root for `--session`. Defaults to `./bris-corpus`.
@@ -499,6 +506,30 @@ struct ReplayArgs {
     /// others winning Stage C fusion.
     #[arg(long, value_delimiter = ',')]
     horizon_providers: Option<Vec<String>>,
+    /// Override publication-gate `max_position_sigma_nm`
+    /// (default 50.0). Use `inf` to disable; large values
+    /// permit a 'rough fix at honest σ' diagnostic on
+    /// adversarial corpora.
+    #[arg(long)]
+    max_position_sigma_nm: Option<f64>,
+    /// Override publication-gate `min_azimuth_spread_rad`
+    /// (default 30° = 0.524 rad). 0 disables.
+    #[arg(long)]
+    min_azimuth_spread_rad: Option<f64>,
+    /// Override publication-gate `max_ellipse_axis_ratio`
+    /// (default 10.0). `inf` disables.
+    #[arg(long)]
+    max_ellipse_axis_ratio: Option<f64>,
+    /// Cold-start hemisphere hint. Resolves the two-candidate
+    /// ambiguity inherent in two-sight cold-start `CoP`
+    /// intersections (the candidates are mirror-symmetric
+    /// about the great-circle joining the two sub-points).
+    /// Without a hint cold-start refuses to publish; setting
+    /// `north` or `south` picks the candidate on that side
+    /// of the equator. Honest only when the operator actually
+    /// knows which hemisphere they're in.
+    #[arg(long, value_parser = ["north", "south"])]
+    coarse_hemisphere: Option<String>,
     /// Engine sight/fix store root. Defaults to a temp dir per
     /// run so replays don't pollute the operator's `.bris/`.
     #[arg(long)]
@@ -611,7 +642,7 @@ fn main() -> anyhow::Result<()> {
 // ---------------------------------------------------------
 
 /// Which AP source to feed the engine for one replay run.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum ReplayMode {
     /// AP comes from `manifest.ap_input` (may be absent → cold-start).
     Default,
@@ -682,39 +713,10 @@ fn render_one_frame(
     session_id_short: &str,
 ) -> anyhow::Result<replay_report::FrameReport> {
     use bris_streaming::StageEOutcomeSnapshot;
-    use bris_vision::{CentroidOverlay, HorizonOverlay, OverlayData, StageEOutcomeView};
 
     let classification_label = diag
         .last_raw_classification
         .map_or_else(|| "unknown".into(), |c| format!("{c:?}"));
-
-    let centroid_overlay = diag.last_body_centroid.map(|c| CentroidOverlay {
-        x: c.x,
-        y: c.y,
-        sigma_px: c.sigma_px,
-        area_px: c.area_px,
-        secondaries: c.secondaries,
-    });
-    let horizon_overlay = diag.last_horizon_hypothesis.map(|h| HorizonOverlay {
-        slope: h.slope,
-        intercept: h.intercept,
-        provider: h.provider,
-        sigma_rad: h.altitude_sigma_rad,
-    });
-    let stage_e_view: Vec<StageEOutcomeView> = diag
-        .last_stage_e_outcomes
-        .iter()
-        .map(|o| match o {
-            StageEOutcomeSnapshot::Ok {
-                altitude_rad,
-                sigma_rad,
-            } => StageEOutcomeView::Ok {
-                altitude_rad: *altitude_rad,
-                sigma_rad: *sigma_rad,
-            },
-            StageEOutcomeSnapshot::Err { kind } => StageEOutcomeView::Err { kind: kind.clone() },
-        })
-        .collect();
 
     let stem = pair
         .pgm
@@ -727,19 +729,26 @@ fn render_one_frame(
         |d| d.join(&render_filename),
     );
 
-    let utc_string = captured_utc.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string();
-    let overlay = OverlayData {
-        frame_seq: pair.sidecar_data.seq,
-        captured_utc: utc_string,
-        classification: &classification_label,
-        centroid: centroid_overlay,
-        horizon: horizon_overlay,
-        stage_e_outcomes: stage_e_view,
-        capture_id_short: capture_id_short.to_string(),
-        session_id_short: session_id_short.to_string(),
+    // Idempotent: skip the PNG encode when the cached base
+    // image already exists. Multi-mode replays therefore pay
+    // the per-frame PNG cost exactly once across all modes
+    // (the overlay is rendered SVG-on-image client-side in
+    // the corpus explorer, driven by the JSON we emit below).
+    let metadata = if render_path_abs.exists() {
+        // Re-derive metadata from the source frame so the
+        // JSON stays correct; the file itself isn't re-encoded.
+        let (out_w, out_h, scale) = bris_vision_canvas_dims(frame.width(), frame.height());
+        bris_vision::RenderMetadata {
+            source_width: frame.width(),
+            source_height: frame.height(),
+            canvas_width: out_w,
+            canvas_height: out_h,
+            scale,
+        }
+    } else {
+        bris_vision::render_base_image(frame, &render_path_abs).context("render base image PNG")?
     };
-    bris_vision::render_debug_overlay(frame, &overlay, &render_path_abs)
-        .context("render debug overlay PNG")?;
+    let _ = (capture_id_short, session_id_short, captured_utc);
 
     let pgm_rel = path_relative_to(&pair.pgm, bundle_dir);
     let render_rel = path_relative_to(&render_path_abs, bundle_dir);
@@ -794,12 +803,36 @@ fn render_one_frame(
         captured_unix_ms: pair.sidecar_data.captured_unix_ms,
         render_path: Some(render_rel),
         pgm_path: pgm_rel,
+        render_geometry: Some(replay_report::RenderGeometry {
+            source_width: metadata.source_width,
+            source_height: metadata.source_height,
+            canvas_width: metadata.canvas_width,
+            canvas_height: metadata.canvas_height,
+            scale: metadata.scale,
+        }),
         classification: classification_label,
         horizon: horizon_report,
         body_centroid: centroid_report,
         stage_e_outcomes: stage_e_report,
         sight_emitted,
     })
+}
+
+/// Mirror of `bris_vision`'s internal `scaled_dims`. Used when
+/// the cached base PNG already exists and we want the metadata
+/// without re-encoding.
+fn bris_vision_canvas_dims(src_w: u32, src_h: u32) -> (u32, u32, f64) {
+    let max_side = bris_vision::RENDER_MAX_SIDE_PX;
+    let long = src_w.max(src_h).max(1);
+    if long <= max_side {
+        return (src_w, src_h, 1.0);
+    }
+    let s = f64::from(max_side) / f64::from(long);
+    #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
+    let out_w = ((f64::from(src_w) * s).round() as u32).max(1);
+    #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
+    let out_h = ((f64::from(src_h) * s).round() as u32).max(1);
+    (out_w, out_h, s)
 }
 
 /// String path of `target` relative to `base`; falls back to
@@ -914,13 +947,78 @@ fn build_capture_report(
                 f
             })
             .collect(),
+        fixes: default_result
+            .fixes
+            .iter()
+            .map(|pf| published_fix_to_report(pf, manifest.gps_truth.as_ref()))
+            .collect(),
     })
 }
 
 /// Resolve a `BundleManifest` for the run, returning it plus the
 /// directory it lives in. For `--frames` the manifest is
 /// synthesized from CLI flags only.
+/// Convert a [`bris_streaming::PublishedFix`] to the wire-
+/// shape used in the corpus replay report.
+///
+/// `gps_truth`, when present, lets the explorer compare each
+/// published fix to a recorded ground truth without
+/// re-deriving the great-circle math client-side.
+fn published_fix_to_report(
+    pf: &bris_streaming::PublishedFix,
+    gps_truth: Option<&bris_bundle::GpsTruth>,
+) -> replay_report::PublishedFixReport {
+    let lat = pf.fix.lat.degrees();
+    let lon = pf.fix.lon.degrees();
+    let (err_nm, brg_deg) = if let Some(gt) = gps_truth {
+        let (nm, brg) = great_circle_nm_and_bearing(lat, lon, gt.lat, gt.lon);
+        (Some(nm), Some(brg))
+    } else {
+        (None, None)
+    };
+    replay_report::PublishedFixReport {
+        timestamp_unix_ms: tt_to_unix_ms(pf.timestamp),
+        lat_deg: lat,
+        lon_deg: lon,
+        sigma_major_nm: pf.fix.sigma_major_nm,
+        sigma_minor_nm: pf.fix.sigma_minor_nm,
+        orientation_rad: pf.fix.orientation_rad,
+        sight_count: pf.fix.sight_count,
+        chi_square: pf.fix.chi_square,
+        gps_truth_error_nm: err_nm,
+        gps_truth_bearing_deg: brg_deg,
+    }
+}
+
+/// Approximate TT (Terrestrial Time) -> Unix-ms conversion
+/// for display purposes. TT = TAI + 32.184 s; TAI - UTC is
+/// the integer leap-second offset (37 s in 2026; bumps only
+/// on rare announced leap-second days). We use a constant
+/// 69.184 s offset here — honest for any time after
+/// 2017-01-01 and good enough for chartplotter-grade
+/// timestamps. The engine's authoritative time math stays
+/// in Tt; this is purely a display path.
+fn tt_to_unix_ms(tt: bris_core::time::Tt) -> i64 {
+    const JD_UNIX_EPOCH: f64 = 2_440_587.5;
+    const TT_MINUS_UTC_SECONDS: f64 = 69.184;
+    let jd = tt.julian_date();
+    let unix_secs_tt = (jd - JD_UNIX_EPOCH) * 86_400.0;
+    let unix_secs_utc = unix_secs_tt - TT_MINUS_UTC_SECONDS;
+    #[allow(clippy::cast_possible_truncation)]
+    let ms = (unix_secs_utc * 1000.0).round() as i64;
+    ms
+}
+
 /// Replay every capture in a session, chronological order.
+///
+/// All captures within one mode share a single engine
+/// instance — matching what the APK does in production via
+/// `SessionHolder` (one engine per active session UUID; held
+/// across capture start/stop cycles). The cross-capture
+/// `SightWindow`, cold-start state, and `last_published_fix`
+/// continuity that the engine provides are what make a fix
+/// possible across captures separated by tens of minutes.
+#[allow(clippy::too_many_lines, clippy::items_after_statements)]
 fn run_replay_session(args: &ReplayArgs, session_id: uuid::Uuid) -> anyhow::Result<()> {
     let corpus = args
         .corpus
@@ -937,7 +1035,15 @@ fn run_replay_session(args: &ReplayArgs, session_id: uuid::Uuid) -> anyhow::Resu
         captures = session.ordered_capture_ids.len(),
         "replay: session resolved"
     );
-    let mut capture_reports: Vec<replay_report::CaptureReport> = Vec::new();
+
+    // Resolve every capture's manifest + frame list up front
+    // so the mode loop iterates already-validated inputs.
+    struct ResolvedCapture {
+        manifest: BundleManifest,
+        bundle_dir: PathBuf,
+        frames: Vec<FramePathPair>,
+    }
+    let mut resolved: Vec<ResolvedCapture> = Vec::new();
     for cap_id in &session.ordered_capture_ids {
         let bundle_dir = session_dir.join("captures").join(cap_id);
         if !bundle_dir.join("bundle.json").exists() {
@@ -947,29 +1053,181 @@ fn run_replay_session(args: &ReplayArgs, session_id: uuid::Uuid) -> anyhow::Resu
             );
             continue;
         }
-        info!(capture_id = %cap_id, "replay: starting capture");
-        let mut per_capture_args = args.clone();
-        per_capture_args.session = None;
-        per_capture_args.all_sessions = false;
-        per_capture_args.bundle = Some(bundle_dir);
-        let (capture_report, _manifest) = run_replay_capture(&per_capture_args)
-            .with_context(|| format!("replay capture {cap_id}"))?;
-        if let Some(rep) = capture_report {
-            capture_reports.push(rep);
+        let mut capture_args = args.clone();
+        capture_args.session = None;
+        capture_args.all_sessions = false;
+        capture_args.bundle = Some(bundle_dir.clone());
+        let (mut manifest, _) = resolve_manifest(&capture_args)?;
+        apply_cli_overrides(&mut manifest, &capture_args)?;
+        if manifest.capture.first_frame_blake3.is_some() {
+            verify_first_frame_checksum(&manifest, &bundle_dir).with_context(|| {
+                format!(
+                    "first-frame checksum verification ({})",
+                    bundle_dir.display()
+                )
+            })?;
         }
+        let frames = enumerate_frames(&bundle_dir)
+            .with_context(|| format!("enumerate bundle frames at {}", bundle_dir.display()))?;
+        if frames.is_empty() {
+            warn!(bundle = %bundle_dir.display(), "replay: bundle has no frames; skipping");
+            continue;
+        }
+        resolved.push(ResolvedCapture {
+            manifest,
+            bundle_dir,
+            frames,
+        });
     }
+    if resolved.is_empty() {
+        bail!("session {session_id} has no replayable captures");
+    }
+
+    // Pick the mode set from the first capture's manifest —
+    // `--all-modes` requires gps_truth somewhere, but per-
+    // capture mode selection is no longer coherent (one
+    // engine per session-mode pair).
+    let modes = select_modes(args, &resolved[0].manifest);
+    if modes.is_empty() {
+        bail!("no replay modes selected");
+    }
+
+    // For each mode, build one engine, feed every capture's
+    // frames through it in chronological order, accumulate
+    // per-capture reports.
+    let mut per_mode_capture_reports: std::collections::BTreeMap<
+        ReplayMode,
+        Vec<replay_report::CaptureReport>,
+    > = std::collections::BTreeMap::new();
+    let mut per_mode_fix_total: std::collections::BTreeMap<ReplayMode, u64> =
+        std::collections::BTreeMap::new();
+
+    for mode in &modes {
+        let mode = *mode;
+        info!(mode = mode.label(), "replay: running mode (session)");
+        // AP comes from the first capture's manifest. All
+        // captures within a session share AP semantics by
+        // design (the operator sets AP once at session
+        // create); per-capture AP overrides aren't honoured
+        // in the session-engine path.
+        let ap = resolve_ap(mode, &resolved[0].manifest);
+        let cfg = build_engine_config(
+            mode,
+            ap,
+            &resolved[0].manifest,
+            Some(&resolved[0].bundle_dir),
+            args,
+        )?;
+        let engine = Arc::new(StreamingEngine::new(cfg));
+        let fix_rx = engine
+            .fix_stream()
+            .map_err(|e| anyhow::anyhow!("fix_stream: {e}"))?;
+        let mut session_fixes: Vec<PublishedFix> = Vec::new();
+        let mut capture_reports: Vec<replay_report::CaptureReport> = Vec::new();
+        for cap in &resolved {
+            info!(
+                capture_id = %cap.manifest.bundle_id,
+                mode = mode.label(),
+                "replay: feeding capture into session engine"
+            );
+            // Snapshot fix count + push frames; the delta is
+            // attributed to this capture in the report.
+            let pre_fix_count = session_fixes.len();
+            let pre_frames_pushed = engine.diagnostics().frames_pushed;
+            let render = feed_capture_through_engine(
+                engine.clone(),
+                &fix_rx,
+                &mut session_fixes,
+                &cap.manifest,
+                Some(&cap.bundle_dir),
+                &cap.frames,
+                args,
+                mode,
+            )?;
+            let capture_fix_count = session_fixes.len() - pre_fix_count;
+            let capture_fixes_slice = &session_fixes[pre_fix_count..];
+            let capture_frames_pushed = engine.diagnostics().frames_pushed - pre_frames_pushed;
+            if let Some(render) = render {
+                let report = replay_report::CaptureReport {
+                    capture_id: cap.manifest.bundle_id.clone(),
+                    bundle_dir: format!("captures/{}/", cap.manifest.bundle_id),
+                    app_version: cap.manifest.device.app_version.clone(),
+                    #[allow(clippy::cast_possible_truncation)]
+                    frame_count: cap.frames.len() as u32,
+                    frames_pushed: capture_frames_pushed,
+                    fixes_published: capture_fix_count as u64,
+                    sights_inserted_total: render.frames.iter().filter(|f| f.sight_emitted).count()
+                        as u64,
+                    stage_e_rejection_counts: render.rejection_counts.clone(),
+                    frames: render
+                        .frames
+                        .into_iter()
+                        .map(|mut f| {
+                            f.render_path = f
+                                .render_path
+                                .map(|p| format!("captures/{}/{p}", cap.manifest.bundle_id));
+                            f.pgm_path =
+                                format!("captures/{}/{}", cap.manifest.bundle_id, f.pgm_path);
+                            f
+                        })
+                        .collect(),
+                    fixes: capture_fixes_slice
+                        .iter()
+                        .map(|pf| published_fix_to_report(pf, cap.manifest.gps_truth.as_ref()))
+                        .collect(),
+                };
+                capture_reports.push(report);
+            }
+        }
+        let diag = engine.diagnostics();
+        info!(
+            mode = mode.label(),
+            captures = resolved.len(),
+            session_fixes = session_fixes.len(),
+            sight_window_depth = diag.sight_window_depth,
+            fixes_published_total = diag.fixes_published_total,
+            cold_start_attempts = diag.cold_start_attempts,
+            cold_start_published = diag.cold_start_published,
+            publication_gate_rejections = diag.publication_gate_rejections,
+            "replay: session-engine mode complete"
+        );
+        for fix in &session_fixes {
+            info!(
+                mode = mode.label(),
+                lat_deg = fix.fix.lat.degrees(),
+                lon_deg = fix.fix.lon.degrees(),
+                sigma_major_nm = fix.fix.sigma_major_nm,
+                sigma_minor_nm = fix.fix.sigma_minor_nm,
+                "replay: published_fix (session-engine)"
+            );
+        }
+        per_mode_fix_total.insert(mode, session_fixes.len() as u64);
+        per_mode_capture_reports.insert(mode, capture_reports);
+    }
+
     if args.render_frames {
-        let report = replay_report::ReplaySessionReport {
-            schema_version: replay_report::SCHEMA_VERSION,
-            session_id: session.session_id.to_string(),
-            session_title: session.title.clone(),
-            generated_unix_ms: chrono::Utc::now().timestamp_millis(),
-            engine_build: replay_report::EngineBuild::current(),
-            captures: capture_reports,
+        // Choose which mode's reports get written. Prefer
+        // Default; fall back to the first mode in the
+        // dispatched list (e.g. --ap-seed-truth alone has
+        // no Default to fall back to).
+        let chosen_mode = if per_mode_capture_reports.contains_key(&ReplayMode::Default) {
+            ReplayMode::Default
+        } else {
+            modes[0]
         };
-        let path = replay_report::write_session_report(&session_dir, &report)
-            .with_context(|| format!("write session report to {}", session_dir.display()))?;
-        info!(report = %path.display(), "replay: session report written");
+        if let Some(reports) = per_mode_capture_reports.remove(&chosen_mode) {
+            let report = replay_report::ReplaySessionReport {
+                schema_version: replay_report::SCHEMA_VERSION,
+                session_id: session.session_id.to_string(),
+                session_title: session.title.clone(),
+                generated_unix_ms: chrono::Utc::now().timestamp_millis(),
+                engine_build: replay_report::EngineBuild::current(),
+                captures: reports,
+            };
+            let path = replay_report::write_session_report(&session_dir, &report)
+                .with_context(|| format!("write session report to {}", session_dir.display()))?;
+            info!(report = %path.display(), chosen_mode = chosen_mode.label(), "replay: session report written");
+        }
     }
     Ok(())
 }
@@ -1376,6 +1634,22 @@ fn build_engine_config(
     if let Some(names) = args.horizon_providers.as_ref() {
         cfg.horizon_provider_set = parse_horizon_provider_set(names).map_err(anyhow::Error::msg)?;
     }
+    if let Some(v) = args.max_position_sigma_nm {
+        cfg.publication_gate.max_position_sigma_nm = v;
+    }
+    if let Some(v) = args.min_azimuth_spread_rad {
+        cfg.publication_gate.min_azimuth_spread_rad = v;
+    }
+    if let Some(v) = args.max_ellipse_axis_ratio {
+        cfg.publication_gate.max_ellipse_axis_ratio = v;
+    }
+    if let Some(h) = args.coarse_hemisphere.as_deref() {
+        cfg.cold_start.coarse_hemisphere = Some(match h {
+            "north" => bris_core::Hemisphere::North,
+            "south" => bris_core::Hemisphere::South,
+            _ => unreachable!("clap value_parser restricts to north|south"),
+        });
+    }
     Ok(cfg)
 }
 
@@ -1426,7 +1700,71 @@ fn run_one_mode(
     let fix_rx = engine
         .fix_stream()
         .map_err(|e| anyhow::anyhow!("fix_stream: {e}"))?;
+    let mut collected: Vec<PublishedFix> = Vec::new();
+    let render = feed_capture_through_engine(
+        engine.clone(),
+        &fix_rx,
+        &mut collected,
+        manifest,
+        bundle_dir,
+        frames,
+        args,
+        mode,
+    )?;
+    let diag = engine.diagnostics();
+    let mode_label = mode.label().to_string();
+    info!(
+        mode = mode_label,
+        frames_pushed = diag.frames_pushed,
+        frames_dropped = diag.frames_dropped,
+        body_queue_depth = diag.body_queue_depth,
+        horizon_queue_depth = diag.horizon_queue_depth,
+        sight_window_depth = diag.sight_window_depth,
+        last_raw_classification = ?diag.last_raw_classification,
+        last_dispatched_condition = ?diag.last_dispatched_condition,
+        fixes_published_total = diag.fixes_published_total,
+        fix_publish_attempts = diag.fix_publish_attempts,
+        singular_geometry_rejections = diag.singular_geometry_rejections,
+        publication_gate_rejections = diag.publication_gate_rejections,
+        cold_start_attempts = diag.cold_start_attempts,
+        cold_start_published = diag.cold_start_published,
+        ap_rederive_suppressed_count = diag.ap_rederive_suppressed_count,
+        "replay: engine diagnostics"
+    );
+    Ok(ModeResult {
+        mode,
+        ap_used: ap,
+        fixes: collected,
+        suppressed: diag.ap_rederive_suppressed_count,
+        frames_pushed: diag.frames_pushed,
+        render,
+    })
+}
 
+/// Feed one capture's frames through an existing engine,
+/// optionally rendering per-frame overlays + collecting
+/// published fixes onto `collected`.
+///
+/// The engine is kept alive across the call; the caller may
+/// reuse it to feed another capture in the same session
+/// (preserving the engine's `SightWindow`, cold-start state,
+/// and `last_published_fix` across captures — matching what
+/// the APK does in production).
+#[allow(
+    clippy::too_many_arguments,
+    clippy::too_many_lines,
+    clippy::needless_pass_by_value
+)]
+fn feed_capture_through_engine(
+    engine: Arc<StreamingEngine>,
+    fix_rx: &FixReceiver,
+    collected: &mut Vec<PublishedFix>,
+    manifest: &BundleManifest,
+    bundle_dir: Option<&Path>,
+    frames: &[FramePathPair],
+    args: &ReplayArgs,
+    mode: ReplayMode,
+) -> anyhow::Result<Option<RenderRunOutput>> {
     let intrinsics = intrinsics_from_record(&manifest.intrinsics);
     let rotation = rotation_from_degrees(manifest.capture.source_rotation_deg)?;
     let frames_owned: Vec<FramePathPair> = frames.to_vec();
@@ -1439,21 +1777,17 @@ fn run_one_mode(
         None
     };
     let render_state_feed = render_state.clone();
-    // Owned, capture-relative bundle path used to build the
-    // render+report paths.
     let bundle_dir_owned = bundle_dir.map(Path::to_path_buf);
-    // Truncated session id for the overlay's bottom-right
-    // label. None when we couldn't read session.json.
     let session_id_short = manifest
         .session_id
         .map(|s| s.to_string().chars().take(8).collect::<String>())
         .unwrap_or_default();
     let capture_id_short = manifest.bundle_id.chars().take(8).collect::<String>();
     let engine_diag_handle = engine.clone();
+    let nmea_stdout = args.nmea_stdout;
     let feeder = std::thread::Builder::new()
         .name(format!("bris-replay-feed-{mode_label}"))
-        .spawn(move || -> anyhow::Result<u64> {
-            let mut pushed = 0u64;
+        .spawn(move || -> anyhow::Result<()> {
             for (idx, pair) in frames_owned.iter().enumerate() {
                 let s = &pair.sidecar_data;
                 let utc = Utc
@@ -1480,9 +1814,6 @@ fn run_one_mode(
                 } else {
                     frame
                 };
-                // Clone the frame buffer up front for the
-                // optional render step. push_frame consumes
-                // the Frame; the render path runs after.
                 let frame_for_render = if render_state_feed.is_some() {
                     Some(frame.clone())
                 } else {
@@ -1492,7 +1823,6 @@ fn run_one_mode(
                     warn!(error = ?e, frame = %pair.pgm.display(), "replay: push_frame failed");
                     continue;
                 }
-                pushed += 1;
                 if let (Some(state), Some(frame), Some(bundle_dir)) = (
                     render_state_feed.as_ref(),
                     frame_for_render,
@@ -1522,17 +1852,15 @@ fn run_one_mode(
                     }
                 }
             }
-            Ok(pushed)
+            Ok(())
         })
         .context("spawn replay feeder thread")?;
 
-    // Main thread drains the fix stream with a short timeout
-    // until the feeder joins.
-    let mut collected: Vec<PublishedFix> = Vec::new();
+    // Drain published fixes during + after the feed.
     loop {
         match fix_rx.try_recv() {
             Ok(Some(fix)) => {
-                if args.nmea_stdout {
+                if nmea_stdout {
                     let s = format_fix_as_nmea(&fix, Utc::now(), QualityThresholds::default());
                     print!("[mode={mode_label}] {s}");
                 }
@@ -1540,9 +1868,8 @@ fn run_one_mode(
             }
             Ok(None) => {
                 if feeder.is_finished() {
-                    // Drain remaining, then exit.
                     while let Ok(Some(f)) = fix_rx.try_recv() {
-                        if args.nmea_stdout {
+                        if nmea_stdout {
                             let s =
                                 format_fix_as_nmea(&f, Utc::now(), QualityThresholds::default());
                             print!("[mode={mode_label}] {s}");
@@ -1556,43 +1883,17 @@ fn run_one_mode(
             Err(()) => break,
         }
     }
-    let pushed = feeder
+    feeder
         .join()
         .map_err(|_| anyhow::anyhow!("feeder thread panicked"))??;
-    let diag = engine.diagnostics();
-    info!(
-        mode = mode_label,
-        frames_pushed = diag.frames_pushed,
-        frames_dropped = diag.frames_dropped,
-        body_queue_depth = diag.body_queue_depth,
-        horizon_queue_depth = diag.horizon_queue_depth,
-        sight_window_depth = diag.sight_window_depth,
-        last_raw_classification = ?diag.last_raw_classification,
-        last_dispatched_condition = ?diag.last_dispatched_condition,
-        fixes_published_total = diag.fixes_published_total,
-        fix_publish_attempts = diag.fix_publish_attempts,
-        singular_geometry_rejections = diag.singular_geometry_rejections,
-        publication_gate_rejections = diag.publication_gate_rejections,
-        cold_start_attempts = diag.cold_start_attempts,
-        cold_start_published = diag.cold_start_published,
-        ap_rederive_suppressed_count = diag.ap_rederive_suppressed_count,
-        "replay: engine diagnostics"
-    );
-    Ok(ModeResult {
-        mode,
-        ap_used: ap,
-        fixes: collected,
-        suppressed: diag.ap_rederive_suppressed_count,
-        frames_pushed: pushed,
-        render: render_state.map(|m| {
-            Arc::try_unwrap(m)
-                .map(|m| {
-                    m.into_inner()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner)
-                })
-                .unwrap_or_default()
-        }),
-    })
+    Ok(render_state.map(|m| {
+        Arc::try_unwrap(m)
+            .map(|m| {
+                m.into_inner()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+            })
+            .unwrap_or_default()
+    }))
 }
 
 fn log_mode_result(result: &ModeResult, manifest: &BundleManifest) {

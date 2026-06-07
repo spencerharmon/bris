@@ -135,6 +135,12 @@ pub(crate) struct FrameReport {
     pub render_path: Option<String>,
     /// Path to the source PGM relative to the corpus root.
     pub pgm_path: String,
+    /// Render geometry: lets the corpus explorer overlay
+    /// horizon / centroid SVG client-side onto the cached
+    /// base PNG without re-rendering. Absent on reports
+    /// generated before this field shipped.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub render_geometry: Option<RenderGeometry>,
     /// Classification label
     /// (`"Day"`, `"Twilight"`, `"Night"`, `"Unusable"`).
     pub classification: String,
@@ -151,6 +157,23 @@ pub(crate) struct FrameReport {
     /// True iff at least one Stage E attempt succeeded on this
     /// frame.
     pub sight_emitted: bool,
+}
+
+/// Per-frame render geometry mirroring
+/// [`bris_vision::RenderMetadata`].
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub(crate) struct RenderGeometry {
+    /// Source frame width in pixels.
+    pub source_width: u32,
+    /// Source frame height in pixels.
+    pub source_height: u32,
+    /// Base-image canvas width in pixels (the PNG written
+    /// to `render_path`).
+    pub canvas_width: u32,
+    /// Base-image canvas height in pixels.
+    pub canvas_height: u32,
+    /// Source-to-canvas scale: `canvas_x = source_x * scale`.
+    pub scale: f64,
 }
 
 /// Per-capture report block.
@@ -178,6 +201,45 @@ pub(crate) struct CaptureReport {
     pub stage_e_rejection_counts: std::collections::BTreeMap<String, u64>,
     /// Per-frame records, in capture order.
     pub frames: Vec<FrameReport>,
+    /// Fixes published during this capture's feed window.
+    /// Session-engine continuity means a fix triggered by a
+    /// sight from capture N may publish a few frames into
+    /// capture N+1; that fix is attributed to N+1 here.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub fixes: Vec<PublishedFixReport>,
+}
+
+/// One published fix, serialised for the corpus explorer's
+/// map view.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub(crate) struct PublishedFixReport {
+    /// Wall-clock at the moment the fix was published, Unix
+    /// milliseconds.
+    pub timestamp_unix_ms: i64,
+    /// Observer latitude (degrees, north positive).
+    pub lat_deg: f64,
+    /// Observer longitude (degrees, east positive).
+    pub lon_deg: f64,
+    /// 1σ semi-major axis of the uncertainty ellipse, nm.
+    pub sigma_major_nm: f64,
+    /// 1σ semi-minor axis, nm.
+    pub sigma_minor_nm: f64,
+    /// Orientation of the major axis from north, radians,
+    /// clockwise, in `[0, π)`.
+    pub orientation_rad: f64,
+    /// Number of sights that contributed.
+    pub sight_count: u32,
+    /// Reduced chi-square of the LSQ residuals.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chi_square: Option<f64>,
+    /// Optional GPS-truth comparison (when the bundle
+    /// carried `gps_truth`). Distance in nautical miles
+    /// between fix and truth.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gps_truth_error_nm: Option<f64>,
+    /// Bearing from fix to GPS truth, degrees.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gps_truth_bearing_deg: Option<f64>,
 }
 
 /// Per-session report.
@@ -286,6 +348,13 @@ mod tests {
                         "sessions/UUID/captures/0019abc/frames/00000000-render.png".into(),
                     ),
                     pgm_path: "sessions/UUID/captures/0019abc/frames/00000000.pgm".into(),
+                    render_geometry: Some(RenderGeometry {
+                        source_width: 3024,
+                        source_height: 4032,
+                        canvas_width: 900,
+                        canvas_height: 1200,
+                        scale: 0.297_619_047_6,
+                    }),
                     classification: "Twilight".into(),
                     horizon: Some(HorizonReport {
                         provider: "vertical-line".into(),
@@ -306,6 +375,7 @@ mod tests {
                     }],
                     sight_emitted: false,
                 }],
+                fixes: Vec::new(),
             }],
         };
         let json = serde_json::to_string(&report).unwrap();

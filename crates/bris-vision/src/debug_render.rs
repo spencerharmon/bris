@@ -134,6 +134,51 @@ pub fn render_debug_overlay(
     img.save(path)
 }
 
+/// Render only the base 8-bit RGB downsample of a frame to PNG.
+///
+/// Idempotent + cache-friendly: produces the same PNG bytes
+/// for a given frame regardless of overlay state. Replay
+/// tooling uses this to write the base image once per
+/// capture; per-replay overlays (horizon, centroid, HUD)
+/// render client-side in the corpus explorer as SVG over
+/// the cached PNG, so multi-mode replays don't pay the
+/// per-frame PNG encode cost more than once.
+///
+/// # Errors
+///
+/// Returns `Err` on PNG encoding / I/O failure.
+pub fn render_base_image(frame: &Frame, path: &Path) -> Result<RenderMetadata, ImageError> {
+    let (out_w, out_h, scale) = scaled_dims(frame.width(), frame.height(), RENDER_MAX_SIDE_PX);
+    let img = downsample_autoleveled(frame, out_w, out_h);
+    img.save(path)?;
+    Ok(RenderMetadata {
+        source_width: frame.width(),
+        source_height: frame.height(),
+        canvas_width: out_w,
+        canvas_height: out_h,
+        scale,
+    })
+}
+
+/// Geometry returned by [`render_base_image`]. The explorer
+/// uses `scale` to map source-frame pixel coordinates
+/// (which is what `HorizonReport` / `BodyCentroidReport`
+/// carry) into canvas pixels for SVG overlay.
+#[derive(Debug, Clone, Copy)]
+pub struct RenderMetadata {
+    /// Source frame width in pixels (before downsample).
+    pub source_width: u32,
+    /// Source frame height in pixels (before downsample).
+    pub source_height: u32,
+    /// Canvas width in pixels (≤ [`RENDER_MAX_SIDE_PX`] on long edge).
+    pub canvas_width: u32,
+    /// Canvas height in pixels (≤ [`RENDER_MAX_SIDE_PX`] on long edge).
+    pub canvas_height: u32,
+    /// Multiply source coordinates by this to land in canvas
+    /// pixels: `canvas_x = source_x * scale`.
+    pub scale: f64,
+}
+
 /// Compute the downsampled canvas size and the source→canvas
 /// scale factor.
 fn scaled_dims(src_w: u32, src_h: u32, max_side: u32) -> (u32, u32, f64) {

@@ -9,6 +9,29 @@ For the end-to-end pipeline architecture and data flow, see
 
 ---
 
+## bris-cli: cross-capture session-engine continuity (2026-06-05)
+
+`bris-cli replay --session` and `--all-sessions` now reuse one
+`StreamingEngine` instance across every capture in a session,
+matching what the APK does in production via `SessionHolder`.
+The prior CLI behaviour — fresh engine per capture inside
+`--session` — was a replay-only bug: it wiped the SightWindow
+and forced fresh cold-start between captures, systematically
+producing different fix counts from the device on the same
+inputs.
+
+Also lands three publication-gate overrides on the replay
+subcommand (`--max-position-sigma-nm`, `--min-azimuth-spread-
+rad`, `--max-ellipse-axis-ratio`) for the diagnostic use case
+"where would we be if we accepted this sigma" on adversarial /
+low-evidence corpora. Production captures leave them unset.
+
+`docs/design/replay_modes.md` §"Session-engine vs. per-
+capture engine lifetimes" + §"Publication-gate overrides"
+document both behaviours.
+
+---
+
 ## Phase 7.7a + 7.7b: ML-gravity provider landed (2026-06-05)
 
 Heteroscedastic gravity-regression model trained on Polyhaven

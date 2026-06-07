@@ -38,8 +38,8 @@ pub use condition::{
     TwilightBand,
 };
 pub use debug_render::{
-    render_debug_overlay, CentroidOverlay, HorizonOverlay, OverlayData, StageEOutcomeView,
-    RENDER_MAX_SIDE_PX,
+    render_base_image, render_debug_overlay, CentroidOverlay, HorizonOverlay, OverlayData,
+    RenderMetadata, StageEOutcomeView, RENDER_MAX_SIDE_PX,
 };
 pub use frame::{rotate_pixels, Frame, FrameError, Intrinsics, IntrinsicsScaleError, Rotation};
 pub use fusion::{fuse_altitudes, FrameMeasurement, FusionConfig, FusionError};
