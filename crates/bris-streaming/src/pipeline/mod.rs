@@ -76,8 +76,9 @@ mod stage_d;
 mod stage_e;
 
 pub(crate) use horizon::{
-    merge_reflection_pair, FusionStats, HorizonStageOutcome, MlGravityDispatch,
-    ReflectionPairMerge, VanishingPointDispatch,
+    merge_reflection_pair, sky_fraction_from_seg_mask, sky_gate_allows, FusionStats,
+    HorizonStageOutcome, MlGravityDispatch, ReflectionPairMerge, SkyGateStats,
+    VanishingPointDispatch, MIN_SKY_FRACTION_REFLECTION_PAIR,
 };
 pub(crate) use hysteresis::ClassifierHysteresis;
 pub(crate) use queue::{FrameId, Storage};
@@ -206,6 +207,10 @@ pub(crate) struct StageOutcome {
     /// diagnostics so operators can see how often providers
     /// agree / disagree.
     pub fusion_stats: FusionStats,
+    /// Per-frame seg-fraction gate counters. Folded into
+    /// [`crate::EngineDiagnostics`]'s per-provider
+    /// `*_refused_no_sky` fields.
+    pub sky_gate_stats: SkyGateStats,
 }
 
 /// Process one frame through Stages A, B, and C synchronously.
@@ -240,6 +245,7 @@ pub(crate) fn process_frame(
     let bright_blob =
         bris_vision::compute_bright_blob_mask(frame, bris_vision::BrightBlobConfig::default());
     let sky_mask = seg_sky_mask(seg_mask.as_ref(), frame.width(), frame.height());
+    let sky_fraction = sky_fraction_from_seg_mask(seg_mask_ref(seg_mask.as_ref()));
 
     // ---- Stage A: classify (raw) + apply hysteresis ----
     let sun_alt_deg = sun_altitude_deg(cfg.observer, frame.capture_tt);
@@ -290,6 +296,7 @@ pub(crate) fn process_frame(
         position_prior,
         frame.capture_tt,
         seg_mask_ref(seg_mask.as_ref()),
+        sky_fraction,
     );
     if let HorizonStageOutcome::Detected { detector, line, .. } = &horizon {
         trace!(
@@ -363,29 +370,43 @@ pub(crate) fn process_frame(
             Condition::Day | Condition::Night | Condition::Twilight
         )
     {
-        let ctx = bris_vision::HorizonProviderContext {
-            frame,
-            intrinsics: &frame.intrinsics,
-            body_candidates: &body_candidates,
-            position_prior,
-            timestamp: frame.capture_tt,
-            #[cfg(feature = "segmentation")]
-            seg_mask: seg_mask.as_ref(),
-        };
-        reflection_pair_invoked = true;
-        let merge = merge_reflection_pair(horizon, &ctx, cfg);
-        let ReflectionPairMerge {
-            outcome,
-            stats,
-            hypothesized,
-            used,
-            fusion,
-        } = merge;
-        horizon = outcome;
-        reflection_pair_stats = stats;
-        reflection_pair_hypothesized = hypothesized;
-        reflection_pair_used = used;
-        stage_c_stats.fusion = fusion;
+        if sky_gate_allows(sky_fraction, MIN_SKY_FRACTION_REFLECTION_PAIR) {
+            let ctx = bris_vision::HorizonProviderContext {
+                frame,
+                intrinsics: &frame.intrinsics,
+                body_candidates: &body_candidates,
+                position_prior,
+                timestamp: frame.capture_tt,
+                #[cfg(feature = "segmentation")]
+                seg_mask: seg_mask.as_ref(),
+            };
+            reflection_pair_invoked = true;
+            let merge = merge_reflection_pair(horizon, &ctx, cfg);
+            let ReflectionPairMerge {
+                outcome,
+                stats,
+                hypothesized,
+                used,
+                fusion,
+            } = merge;
+            horizon = outcome;
+            reflection_pair_stats = stats;
+            reflection_pair_hypothesized = hypothesized;
+            reflection_pair_used = used;
+            stage_c_stats.fusion = fusion;
+        } else {
+            // Reflection-pair refused by the seg-fraction gate.
+            // Counter is updated through `stage_c_stats` so the
+            // engine's `update_stage_counters` folds it into
+            // `EngineDiagnostics::reflection_pair_refused_no_sky`.
+            stage_c_stats.sky_gate.reflection_pair_refused += 1;
+            trace!(
+                provider = "reflection-pair",
+                sky_fraction = ?sky_fraction,
+                min_required = MIN_SKY_FRACTION_REFLECTION_PAIR,
+                "Stage C (2nd pass): refused (insufficient sky)"
+            );
+        }
     }
 
     StageOutcome {
@@ -408,6 +429,7 @@ pub(crate) fn process_frame(
         ml_gravity_preprocess_failed: ml_gravity_preprocess_failed_value(&stage_c_stats),
         ml_gravity_inference_ms: ml_gravity_inference_ms_value(&stage_c_stats),
         fusion_stats: stage_c_stats.fusion,
+        sky_gate_stats: stage_c_stats.sky_gate,
     }
 }
 

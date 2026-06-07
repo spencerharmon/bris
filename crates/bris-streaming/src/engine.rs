@@ -228,6 +228,11 @@ struct EngineState {
     ml_gravity_preprocess_failed: u64,
     ml_gravity_load_failed: bool,
     ml_gravity_inference_ms_last: f64,
+    gradient_refused_no_sky: u64,
+    sky_region_refused_no_sky: u64,
+    night_refused_no_sky: u64,
+    night_textured_refused_no_sky: u64,
+    reflection_pair_refused_no_sky: u64,
     horizon_fusion_cluster_size_max: usize,
     horizon_fusion_clustered_frames: u64,
     horizon_fusion_discordant_frames: u64,
@@ -613,6 +618,13 @@ fn update_stage_counters(
     if fs.cluster_size > state.horizon_fusion_cluster_size_max {
         state.horizon_fusion_cluster_size_max = fs.cluster_size;
     }
+
+    let sg = &outcome.sky_gate_stats;
+    state.gradient_refused_no_sky += sg.gradient_refused;
+    state.sky_region_refused_no_sky += sg.sky_region_refused;
+    state.night_refused_no_sky += sg.night_refused;
+    state.night_textured_refused_no_sky += sg.night_textured_refused;
+    state.reflection_pair_refused_no_sky += sg.reflection_pair_refused;
 }
 
 impl StreamingEngine {
@@ -748,6 +760,11 @@ impl StreamingEngine {
                 ml_gravity_preprocess_failed: 0,
                 ml_gravity_load_failed: ml_gravity_load_failed_at_start,
                 ml_gravity_inference_ms_last: 0.0,
+                gradient_refused_no_sky: 0,
+                sky_region_refused_no_sky: 0,
+                night_refused_no_sky: 0,
+                night_textured_refused_no_sky: 0,
+                reflection_pair_refused_no_sky: 0,
                 horizon_fusion_cluster_size_max: 0,
                 horizon_fusion_clustered_frames: 0,
                 horizon_fusion_discordant_frames: 0,
@@ -1149,6 +1166,11 @@ impl StreamingEngine {
             ml_gravity_preprocess_failed: state.ml_gravity_preprocess_failed,
             ml_gravity_load_failed: state.ml_gravity_load_failed,
             ml_gravity_inference_ms_last: state.ml_gravity_inference_ms_last,
+            gradient_refused_no_sky: state.gradient_refused_no_sky,
+            sky_region_refused_no_sky: state.sky_region_refused_no_sky,
+            night_refused_no_sky: state.night_refused_no_sky,
+            night_textured_refused_no_sky: state.night_textured_refused_no_sky,
+            reflection_pair_refused_no_sky: state.reflection_pair_refused_no_sky,
             horizon_fusion_cluster_size_max: state.horizon_fusion_cluster_size_max,
             horizon_fusion_clustered_frames: state.horizon_fusion_clustered_frames,
             horizon_fusion_discordant_frames: state.horizon_fusion_discordant_frames,

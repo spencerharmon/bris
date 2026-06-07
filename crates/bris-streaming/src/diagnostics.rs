@@ -191,6 +191,32 @@ pub struct EngineDiagnostics {
     /// the last-observed value otherwise.
     pub ml_gravity_inference_ms_last: f64,
 
+    /// Frames where the seg-fraction eligibility gate refused
+    /// to invoke the [day] gradient provider because the
+    /// cached segmentation sky-fraction was below
+    /// `MIN_SKY_FRACTION_GRADIENT` (0.10).
+    ///
+    /// Always zero when segmentation is unavailable (feature
+    /// off, model not loaded, inference failed) — the gate
+    /// falls back to unconditional dispatch in that case so
+    /// the counter is not a silent disabler.
+    pub gradient_refused_no_sky: u64,
+    /// As [`Self::gradient_refused_no_sky`], for the
+    /// sky-region provider (`MIN_SKY_FRACTION_SKY_REGION =
+    /// 0.15`).
+    pub sky_region_refused_no_sky: u64,
+    /// As [`Self::gradient_refused_no_sky`], for the night
+    /// gradient provider (`MIN_SKY_FRACTION_NIGHT = 0.10`).
+    pub night_refused_no_sky: u64,
+    /// As [`Self::gradient_refused_no_sky`], for the
+    /// night-textured provider
+    /// (`MIN_SKY_FRACTION_NIGHT_TEXTURED = 0.10`).
+    pub night_textured_refused_no_sky: u64,
+    /// As [`Self::gradient_refused_no_sky`], for the
+    /// reflection-pair provider
+    /// (`MIN_SKY_FRACTION_REFLECTION_PAIR = 0.05`).
+    pub reflection_pair_refused_no_sky: u64,
+
     /// Highest cluster size produced by the horizon-fusion
     /// layer across the session.
     pub horizon_fusion_cluster_size_max: usize,
