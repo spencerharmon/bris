@@ -721,15 +721,32 @@ function drawErrorLine(svg, fix, truth, project) {
   ln.setAttribute("stroke-dasharray", "3 3"); svg.appendChild(ln);
 }
 
+// Spherical 'direct geodetic' from (lat,lon) with bearing
+// `brgDeg` (true) and distance `nm`. Returns destination
+// (lat,lon). Uses the standard great-circle formulas —
+// must be spherical (not the equirectangular linearization
+// we use for projection) because at multi-hundred-nm
+// distances the small-angle approximation is wildly off.
 function projectFromFix(fix, nm, brgDeg) {
+  const R_NM = 60 * 180 / Math.PI; // mean-Earth radius in nm (~3437.75)
+  const d = nm / R_NM;
+  const phi1 = (fix.lat_deg * Math.PI) / 180;
+  const lam1 = (fix.lon_deg * Math.PI) / 180;
   const brg = (brgDeg * Math.PI) / 180;
-  const dN = nm * Math.cos(brg);
-  const dE = nm * Math.sin(brg);
-  const cosLat = Math.cos((fix.lat_deg * Math.PI) / 180);
-  return {
-    lat: fix.lat_deg + dN / 60,
-    lon: fix.lon_deg + dE / (60 * Math.max(cosLat, 1e-6)),
-  };
+  const phi2 = Math.asin(
+    Math.sin(phi1) * Math.cos(d) +
+      Math.cos(phi1) * Math.sin(d) * Math.cos(brg),
+  );
+  const lam2 =
+    lam1 +
+    Math.atan2(
+      Math.sin(brg) * Math.sin(d) * Math.cos(phi1),
+      Math.cos(d) - Math.sin(phi1) * Math.sin(phi2),
+    );
+  let lon = (lam2 * 180) / Math.PI;
+  // Normalise into (-180, 180].
+  lon = ((lon + 540) % 360) - 180;
+  return { lat: (phi2 * 180) / Math.PI, lon };
 }
 
 function buildFixHud(fix) {
