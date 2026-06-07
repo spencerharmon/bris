@@ -546,6 +546,14 @@ struct ReplayArgs {
     /// `index.json`). Slow on large corpora.
     #[arg(long)]
     render_frames: bool,
+    /// Stage D dispatch policy override. Default unset =
+    /// inherit `EngineConfig` default (`when-stars-expected`).
+    /// `always` recovers the pre-gate behaviour (run Stage D
+    /// on every Night-classified frame regardless of peak
+    /// count); `never` disables Stage D entirely. See
+    /// `docs/design/pipeline.md` §Stage D dispatch.
+    #[arg(long, value_parser = ["always", "when-stars-expected", "never"])]
+    stage_d_dispatch: Option<String>,
     /// Replay every session under `<corpus>/sessions/`. Each
     /// session is processed end-to-end; rendering and report
     /// generation are governed by `--render-frames`.
@@ -1642,6 +1650,14 @@ fn build_engine_config(
     }
     if let Some(v) = args.max_ellipse_axis_ratio {
         cfg.publication_gate.max_ellipse_axis_ratio = v;
+    }
+    if let Some(p) = args.stage_d_dispatch.as_deref() {
+        cfg.stage_d_dispatch_policy = match p {
+            "always" => bris_streaming::StageDDispatchPolicy::Always,
+            "when-stars-expected" => bris_streaming::StageDDispatchPolicy::WhenStarsExpected,
+            "never" => bris_streaming::StageDDispatchPolicy::Never,
+            _ => unreachable!("clap value_parser restricts the set"),
+        };
     }
     if let Some(h) = args.coarse_hemisphere.as_deref() {
         cfg.cold_start.coarse_hemisphere = Some(match h {

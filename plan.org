@@ -1538,6 +1538,14 @@ references to the regression tests that pin the behavior. See
    [[file:crates/bris-platesolve/src/altitude.rs][bris_platesolve::star_altitudes]], each contributing to
    the sight window like any other body sight.
 
+   - 2026-06-07: dispatch gate added
+     ([[file:crates/bris-streaming/src/config.rs][EngineConfig::stage_d_dispatch_policy]]).
+     Default ``WhenStarsExpected`` requires (dispatched
+     verdict == Night) AND (>= 3 peaks); avoids the
+     ~30–50 ms per-frame plate-solve cost on indoor /
+     no-stars-visible scenes. See
+     [[file:docs/design/pipeline.md][docs/design/pipeline.md §Stage D dispatch policy]].
+
    See "Stage-by-stage mapping → Stage D" + "Open questions →
    Plate solving's database build cost" in the design doc.
 

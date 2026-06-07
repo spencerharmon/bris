@@ -348,6 +348,27 @@ pub struct EngineConfig {
     /// without it makes this field inert.
     pub segmentation_model_path: Option<PathBuf>,
 
+    /// Stage D: dispatch gate for the plate solver. Even when
+    /// Stage B produced a `Night` peak payload, the engine
+    /// only invokes [`bris_platesolve::plate_solve`] when this
+    /// policy admits the frame. Default
+    /// [`StageDDispatchPolicy::WhenStarsExpected`]: skip Stage
+    /// D on Day-classified frames (no peaks) and on
+    /// Night-classified frames with fewer than 3 peaks (the
+    /// geometric-hash matcher needs at least three peaks to
+    /// form a triangle pattern; below that it cannot succeed).
+    ///
+    /// On indoor / no-stars-visible scenes (the bedroom-moon
+    /// corpus is the canonical case) the gate eliminates the
+    /// ~30–50 ms per-frame plate-solve cost that's structurally
+    /// guaranteed to find nothing.
+    ///
+    /// Set to [`StageDDispatchPolicy::Always`] to recover the
+    /// pre-gate behaviour (every Night payload is dispatched
+    /// regardless of peak count); [`StageDDispatchPolicy::Never`]
+    /// disables Stage D entirely.
+    pub stage_d_dispatch_policy: StageDDispatchPolicy,
+
     /// Stage D: configuration for the geometric-hash plate
     /// solver database
     /// ([`bris_platesolve::StarHashDb::build`]). Defaults
@@ -637,6 +658,7 @@ impl EngineConfig {
             max_concurrent_pipeline_workers: 1,
             input_ring_capacity: 120,
             plate_solver_init: PlateSolverInit::Lazy,
+            stage_d_dispatch_policy: StageDDispatchPolicy::default(),
             classifier_hysteresis_frames: 90,
             condition_cfg: ConditionConfig::default(),
             saturated_body_cfg: SaturatedBodyConfig {
@@ -755,6 +777,32 @@ impl EngineConfig {
     }
 }
 
+/// Dispatch gate for Stage D (plate solve).
+///
+/// See [`EngineConfig::stage_d_dispatch_policy`] for the
+/// per-frame rule. `Default` is
+/// [`StageDDispatchPolicy::WhenStarsExpected`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum StageDDispatchPolicy {
+    /// Always invoke Stage D when Stage B produced a `Night`
+    /// peak payload, regardless of how few peaks were
+    /// detected. Recovers the pre-gate behaviour; preferred
+    /// only for diagnostic replays where the operator wants
+    /// to record every solve attempt even on payloads that
+    /// are guaranteed to fail.
+    Always,
+    /// Invoke Stage D only when the dispatched classifier
+    /// verdict is `Night` AND Stage B produced ≥ 3 peaks (the
+    /// geometric-hash matcher's structural floor). Default.
+    #[default]
+    WhenStarsExpected,
+    /// Never invoke Stage D. Stage D is uniformly skipped and
+    /// every Night payload remains as `BodyDetection::Night(peaks)`
+    /// downstream. Useful for measuring the rest-of-pipeline
+    /// cost in isolation.
+    Never,
+}
+
 /// When and how the plate-solving hash database is built.
 ///
 /// The database build is ~10-30 seconds in release. The choice
@@ -803,6 +851,10 @@ mod tests {
         assert_eq!(cfg.max_concurrent_pipeline_workers, 1);
         assert_eq!(cfg.classifier_hysteresis_frames, 90);
         assert!(matches!(cfg.plate_solver_init, PlateSolverInit::Lazy));
+        assert_eq!(
+            cfg.stage_d_dispatch_policy,
+            StageDDispatchPolicy::WhenStarsExpected,
+        );
         // The long-edge cap defaults on so horizon detection
         // doesn't waste cycles at 4K capture resolutions.
         assert_eq!(cfg.horizon_analysis_max_long_edge_px, Some(1280));

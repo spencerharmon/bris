@@ -221,6 +221,49 @@ to coax a 2D fix out of a single sight; that's a development hack
 and the comment says so. The real engine waits for multiple
 azimuth-diverse sights.
 
+### Stage D dispatch policy
+
+Stage D (plate solve) sits between Stage B (peak detection) and
+Stage E (sight assembly). When Stage B emits a
+`BodyDetection::Night(peaks)` payload, Stage D ordinarily passes
+the peak set into `bris_platesolve::plate_solve` to identify
+stars. That call costs ~30–50 ms per frame in release once the
+geometric-hash database is built, regardless of how many peaks
+the payload carries; on indoor / no-stars-visible scenes (the
+bedroom-moon corpus is the canonical example) every Night-
+classified frame burns that cost on a database lookup that's
+structurally guaranteed to return nothing.
+
+The `EngineConfig::stage_d_dispatch_policy` knob
+(`StageDDispatchPolicy`) gates Stage D dispatch:
+
+- **`Always`** — every Night payload is dispatched, matching the
+  pre-gate behaviour. Preferred only for diagnostic replays
+  where every solve attempt should be recorded even on payloads
+  that cannot succeed.
+- **`WhenStarsExpected`** *(default)* — dispatch only when the
+  hysteresis-smoothed classifier verdict is `Night` AND Stage B
+  produced ≥ 3 peaks. The 3-peak floor reflects that geometric-
+  hash plate-solving needs at least three peaks to form a
+  triangle pattern; below that the matcher cannot succeed.
+  Twilight and Day frames are uniformly refused.
+- **`Never`** — Stage D is uniformly skipped. Every Night payload
+  remains as `BodyDetection::Night(peaks)` downstream. Useful
+  for measuring the rest-of-pipeline cost in isolation.
+
+Every gate refusal increments two engine diagnostics:
+`EngineDiagnostics::stage_d_skipped_no_star_evidence` (the
+gate-specific counter) and `stages[STAGE_D].skipped` (the
+generic per-stage skip counter). Lazy plate-solver database
+build (`PlateSolverInit::Lazy`) is also suppressed when the
+first Night frame is refused by the gate — there is no point
+spending the ~10–30 s build on a frame that wouldn't be solved
+anyway. The next gate-admitted frame triggers the build.
+
+The CLI exposes the knob as
+`bris replay --stage-d-dispatch <always|when-stars-expected|never>`;
+default unset inherits the engine config default.
+
 ### NMEA emission
 
 Once the LSQ fix produces a position + covariance, the NMEA

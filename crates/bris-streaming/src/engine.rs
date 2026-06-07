@@ -12,7 +12,7 @@
 //! is wired in (commit 5). The shape of the public API is what
 //! commit 1 establishes.
 
-use crate::config::{EngineConfig, PlateSolverInit};
+use crate::config::{EngineConfig, PlateSolverInit, StageDDispatchPolicy};
 use crate::diagnostics::{EngineDiagnostics, PipelineStageStats};
 use crate::fix::PublishedFix;
 use crate::pipeline::{
@@ -256,6 +256,8 @@ struct EngineState {
     cross_frame_sights_emitted: u64,
     /// See [`crate::EngineDiagnostics::sights_rejected_by_screener`].
     sights_rejected_by_screener: u64,
+    /// See [`crate::EngineDiagnostics::stage_d_skipped_no_star_evidence`].
+    stage_d_skipped_no_star_evidence: u64,
 }
 
 /// Nautical mile in metres; for converting Fix sigma (nm) to
@@ -370,6 +372,44 @@ fn horizon_provider_label(p: bris_vision::HorizonProvenance) -> &'static str {
         HorizonProvenance::VanishingPoint { .. } => "vanishing-point",
         HorizonProvenance::Fused { .. } => "fused",
         HorizonProvenance::MlGravity { .. } => "ml-gravity",
+    }
+}
+
+/// Decide whether Stage D should run on a freshly-processed
+/// frame, per the configured [`StageDDispatchPolicy`].
+///
+/// `Always` admits every frame (the pre-gate behaviour);
+/// `Never` refuses every frame; `WhenStarsExpected` admits a
+/// frame only when the dispatched classifier verdict is
+/// [`Condition::Night`] AND Stage B produced at least 3
+/// peaks (the geometric-hash matcher's structural floor:
+/// triangles need three vertices). On Day frames (no peaks),
+/// already-identified frames, or Night-with-<3-peaks the
+/// gate refuses; the engine bumps
+/// `stage_d_skipped_no_star_evidence` and treats Stage D as
+/// `Skipped`.
+fn stage_d_dispatch_allowed(
+    policy: StageDDispatchPolicy,
+    dispatched: Condition,
+    body: &BodyDetection,
+) -> bool {
+    match policy {
+        StageDDispatchPolicy::Always => true,
+        StageDDispatchPolicy::Never => false,
+        StageDDispatchPolicy::WhenStarsExpected => {
+            if !matches!(dispatched, Condition::Night) {
+                return false;
+            }
+            match body {
+                BodyDetection::Night(peaks) => peaks.len() >= 3,
+                // Day, IdentifiedStars (already solved), and
+                // None all carry no Night peak set the solver
+                // could consume.
+                BodyDetection::Day(_, _)
+                | BodyDetection::IdentifiedStars(_)
+                | BodyDetection::None => false,
+            }
+        }
     }
 }
 
@@ -727,6 +767,7 @@ impl StreamingEngine {
                 ap_rederive_suppressed_count: 0,
                 cross_frame_sights_emitted: 0,
                 sights_rejected_by_screener: 0,
+                stage_d_skipped_no_star_evidence: 0,
             }),
             config,
             fix_tx,
@@ -833,12 +874,29 @@ impl StreamingEngine {
         // (a OnceLock so the post-build read path is lock-free)
         // and is None until either AtStartup populated it or
         // the lazy build path below ran.
-        let stage_d_outcome = run_stage_d(
-            &mut outcome.body,
-            pyramid.full(),
-            self.plate_db.get(),
-            self.config.plate_solve_cfg,
-        );
+        //
+        // Dispatch gate (`stage_d_dispatch_policy`): on policies
+        // tighter than `Always`, frames that cannot plausibly
+        // plate-solve are short-circuited to
+        // `StageDOutcome::Skipped` *before* the solver runs.
+        // That saves the ~30–50 ms per frame that an indoor /
+        // no-stars-visible scene would otherwise spend on a
+        // structurally guaranteed-empty database lookup.
+        let stage_d_outcome = if stage_d_dispatch_allowed(
+            self.config.stage_d_dispatch_policy,
+            outcome.dispatched_condition,
+            &outcome.body,
+        ) {
+            run_stage_d(
+                &mut outcome.body,
+                pyramid.full(),
+                self.plate_db.get(),
+                self.config.plate_solve_cfg,
+            )
+        } else {
+            state.stage_d_skipped_no_star_evidence += 1;
+            StageDOutcome::Skipped
+        };
         // Lazy build: if Stage D was skipped because the DB
         // wasn't built and we have a Night payload that *could*
         // have been solved, build the DB now (synchronously,
@@ -846,7 +904,13 @@ impl StreamingEngine {
         // frame. Subsequent frames will use the cached DB
         // lock-free.
         let stage_d_outcome = match (stage_d_outcome, &outcome.body, self.plate_db.get()) {
-            (StageDOutcome::Skipped, BodyDetection::Night(_), None) => {
+            (StageDOutcome::Skipped, BodyDetection::Night(_), None)
+                if stage_d_dispatch_allowed(
+                    self.config.stage_d_dispatch_policy,
+                    outcome.dispatched_condition,
+                    &outcome.body,
+                ) =>
+            {
                 info!(
                     "Stage D: lazy plate-solver build triggered by first night frame \
                      (this may take 10-30 s in release)"
@@ -1098,6 +1162,7 @@ impl StreamingEngine {
             ap_rederive_suppressed_count: state.ap_rederive_suppressed_count,
             cross_frame_sights_emitted: state.cross_frame_sights_emitted,
             sights_rejected_by_screener: state.sights_rejected_by_screener,
+            stage_d_skipped_no_star_evidence: state.stage_d_skipped_no_star_evidence,
         }
     }
 
@@ -1282,6 +1347,158 @@ mod tests {
             contributing_frame_ids: Vec::new(),
             provenance: FixProvenance::SaintHilaire,
         }
+    }
+
+    use bris_vision::{Centroid, Peak};
+
+    fn night_body(n_peaks: usize) -> BodyDetection {
+        let peaks = (0..n_peaks)
+            .map(|i| Peak {
+                #[allow(clippy::cast_precision_loss)]
+                x: 10.0 + i as f64,
+                y: 20.0,
+                intensity: 5000.0,
+            })
+            .collect();
+        BodyDetection::Night(peaks)
+    }
+
+    fn day_body() -> BodyDetection {
+        BodyDetection::Day(
+            Centroid {
+                x: 0.0,
+                y: 0.0,
+                area_px: 100,
+                mean_intensity: 50_000.0,
+                position_sigma_px: bris_core::Sigma::new(0.5).unwrap(),
+            },
+            Vec::new(),
+        )
+    }
+
+    #[test]
+    fn stage_d_gate_when_stars_expected_admits_night_with_3_plus_peaks() {
+        let p = StageDDispatchPolicy::WhenStarsExpected;
+        assert!(stage_d_dispatch_allowed(
+            p,
+            Condition::Night,
+            &night_body(3)
+        ));
+        assert!(stage_d_dispatch_allowed(
+            p,
+            Condition::Night,
+            &night_body(4)
+        ));
+    }
+
+    #[test]
+    fn stage_d_gate_when_stars_expected_refuses_night_with_fewer_than_3_peaks() {
+        let p = StageDDispatchPolicy::WhenStarsExpected;
+        assert!(!stage_d_dispatch_allowed(
+            p,
+            Condition::Night,
+            &night_body(0)
+        ));
+        assert!(!stage_d_dispatch_allowed(
+            p,
+            Condition::Night,
+            &night_body(2)
+        ));
+    }
+
+    #[test]
+    fn stage_d_gate_when_stars_expected_refuses_day_frame() {
+        let p = StageDDispatchPolicy::WhenStarsExpected;
+        // Day-classified frame even with a Day centroid: no
+        // peaks to plate-solve, never admit.
+        assert!(!stage_d_dispatch_allowed(p, Condition::Day, &day_body()));
+        // Night dispatched-condition but no body detection at
+        // all: still refuse — nothing for the solver to consume.
+        assert!(!stage_d_dispatch_allowed(
+            p,
+            Condition::Night,
+            &BodyDetection::None
+        ));
+        // Twilight dispatched-condition is also refused under
+        // the strict gate; spec says "classifier verdict is
+        // Night" only. Operators wanting Twilight + peaks
+        // solved must opt into `Always`.
+        assert!(!stage_d_dispatch_allowed(
+            p,
+            Condition::Twilight,
+            &night_body(5)
+        ));
+        assert!(!stage_d_dispatch_allowed(
+            p,
+            Condition::Unusable,
+            &night_body(5)
+        ));
+    }
+
+    #[test]
+    fn stage_d_gate_always_admits_every_condition_body_combination() {
+        let p = StageDDispatchPolicy::Always;
+        for cond in [
+            Condition::Day,
+            Condition::Night,
+            Condition::Twilight,
+            Condition::Unusable,
+        ] {
+            for body in [
+                day_body(),
+                night_body(0),
+                night_body(1),
+                night_body(50),
+                BodyDetection::None,
+            ] {
+                assert!(
+                    stage_d_dispatch_allowed(p, cond, &body),
+                    "Always must admit every (condition, body) tuple; failed on {cond:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn stage_d_gate_never_refuses_every_condition_body_combination() {
+        let p = StageDDispatchPolicy::Never;
+        for cond in [
+            Condition::Day,
+            Condition::Night,
+            Condition::Twilight,
+            Condition::Unusable,
+        ] {
+            for body in [day_body(), night_body(10), BodyDetection::None] {
+                assert!(
+                    !stage_d_dispatch_allowed(p, cond, &body),
+                    "Never must refuse every (condition, body) tuple; failed on {cond:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn engine_default_skips_stage_d_on_day_frame_and_bumps_counter() {
+        // Default policy = WhenStarsExpected. A dark default
+        // dummy frame at the J2000 epoch classifies as Day
+        // (Sun above horizon at Greenwich noon TT) — no peak
+        // payload reaches Stage D and the gate increments
+        // `stage_d_skipped_no_star_evidence`.
+        let mut cfg = EngineConfig::new(Observer::default_dev());
+        cfg.store.enabled = false;
+        let engine = StreamingEngine::new(cfg);
+        engine.push_frame(dummy_frame()).unwrap();
+        let diag = engine.diagnostics();
+        // Stage D's own skip counter went up.
+        assert_eq!(
+            diag.stages[3].skipped, 1,
+            "stages[STAGE_D].skipped should advance with every gate refusal"
+        );
+        // And the gate-specific counter went up too.
+        assert_eq!(
+            diag.stage_d_skipped_no_star_evidence, 1,
+            "gate refusal must increment stage_d_skipped_no_star_evidence"
+        );
     }
 
     #[test]
@@ -1662,6 +1879,15 @@ mod tests {
         let mut cfg = EngineConfig::new(Observer::default_dev());
         cfg.store.enabled = false;
         cfg.plate_solver_init = crate::PlateSolverInit::Lazy;
+        // This test's synthetic frame only yields a single
+        // surviving peak after the night-pipeline's horizon
+        // masking, so the default WhenStarsExpected gate
+        // (≥ 3 peaks) would refuse dispatch and short-
+        // circuit the lazy build. The test is asserting on
+        // the lazy-build trigger, which is orthogonal to
+        // the gate; pin to Always so the build path is
+        // exercised regardless of how many peaks survive.
+        cfg.stage_d_dispatch_policy = crate::StageDDispatchPolicy::Always;
         cfg.star_hash_db_cfg = bris_platesolve::StarHashDbConfig {
             mag_cutoff: 1.5,
             ..bris_platesolve::StarHashDbConfig::default()
