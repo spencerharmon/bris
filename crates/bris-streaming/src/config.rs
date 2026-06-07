@@ -532,6 +532,25 @@ pub struct EngineConfig {
     /// the Harris+NCC-only baseline.
     pub enable_ephemeris_stitch_fallback: bool,
 
+    /// Pre-fix sight screener configuration
+    /// ([`bris_nav::ScreeningConfig`]).
+    ///
+    /// The screener runs inside Stage E's `try_publish` step on
+    /// every sight already accepted into the window. It is
+    /// k·σ-gated by construction: the outlier-from-consensus
+    /// rule uses `σ = max(1.4826 · MAD_of_others, per-sight
+    /// σ_intercept)`, so a sight whose own σ honestly accounts
+    /// for its residual is never rejected as a blunder. Default
+    /// `outlier_k_sigma = 3.0` (standard 3-σ outlier rejection).
+    ///
+    /// Stage E overrides `max_abs_intercept_nm` to `f64::INFINITY`
+    /// at the call site; tuning that here has no effect because
+    /// the stale-prior cold-start pathway needs the large
+    /// intercepts to survive the screener so they can trigger
+    /// AP re-derivation. See `crates/bris-streaming/src/pipeline/
+    /// stage_e.rs::try_publish` for the rationale.
+    pub screening: bris_nav::ScreeningConfig,
+
     /// **Diagnostic-only.** When `true`, the engine accepts the
     /// `ApInput` baked into its initial [`Observer`] and refuses
     /// to re-derive the assumed position from any other source for
@@ -724,6 +743,7 @@ impl EngineConfig {
             },
             publication_gate: PublicationGateConfig::default(),
             enable_ephemeris_stitch_fallback: true,
+            screening: bris_nav::ScreeningConfig::default(),
             // Production default: never lock. See the field docs;
             // only `bris-cli replay --ap-lock-truth` flips this on.
             lock_ap_for_replay: false,

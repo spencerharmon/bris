@@ -23,9 +23,19 @@ pub struct ScreeningConfig {
     /// is so wrong the linearization breaks down anyway.
     pub max_abs_intercept_nm: f64,
     /// When ≥ 3 sights are present, reject any sight whose intercept
-    /// is more than `outlier_k_sigma × σ_consensus` from the
-    /// median-of-others. Default 5 — Chauvenet-style aggressive only
-    /// against truly egregious blunders.
+    /// is more than `outlier_k_sigma × σ` from the median-of-others,
+    /// where `σ = max(1.4826·MAD_of_others, per-sight σ_intercept)`.
+    /// The per-sight σ floor is load-bearing: a sight whose own σ
+    /// honestly explains a large residual is *kept*, even if it sits
+    /// many MAD-σ from the consensus. That keeps the screener
+    /// σ-honest (a wide-σ ML-gravity horizon does not get rejected
+    /// just for being far from a tight optical consensus).
+    ///
+    /// Default 3.0 — the standard 3-σ outlier rejection convention.
+    /// Configurable on [`crate::config::EngineConfig::screening`]
+    /// (in the streaming engine) so an operator can loosen it
+    /// during noisy captures or tighten it for high-confidence
+    /// regression runs. See `docs/design/replay_modes.md`.
     pub outlier_k_sigma: f64,
     /// Below this many sights, only the absolute-intercept screen
     /// applies; outlier rejection requires a meaningful consensus.
@@ -48,7 +58,7 @@ impl Default for ScreeningConfig {
     fn default() -> Self {
         Self {
             max_abs_intercept_nm: 60.0,
-            outlier_k_sigma: 5.0,
+            outlier_k_sigma: 3.0,
             min_sights_for_outlier: 3,
             same_look_direction_delta_rad: 5.0_f64 * std::f64::consts::PI / 180.0,
         }
@@ -253,10 +263,14 @@ mod tests {
 
     #[test]
     fn keeps_all_within_thresholds() {
+        // Three azimuth-diverse sights whose mutual scatter is
+        // well-explained by their declared σ (each σ = 2 nm; the
+        // max pairwise residual is 3 nm = 1.5·σ, comfortably inside
+        // the default k = 3 outlier gate).
         let lops = [
-            lop(0.0, 1.0, 0.5),
-            lop(90.0, 2.0, 0.5),
-            lop(180.0, -1.0, 0.5),
+            lop(0.0, 1.0, 2.0),
+            lop(90.0, 2.0, 2.0),
+            lop(180.0, -1.0, 2.0),
         ];
         let r = screen_sights(&lops, ScreeningConfig::default());
         assert_eq!(r.kept.len(), 3);
@@ -357,5 +371,82 @@ mod tests {
         ];
         let r = screen_sights(&lops, ScreeningConfig::default());
         assert_eq!(r.kept.len(), 3);
+    }
+
+    #[test]
+    fn outlier_boundary_accepts_below_k_rejects_above_k() {
+        // With default k = 3, a sight whose residual = 2·σ must be
+        // accepted; a sight whose residual = 4·σ must be rejected.
+        // The per-sight σ floor (10 nm) dominates here so the
+        // boundary is driven purely by the configured k.
+        let consensus_sigma = 0.1;
+        let test_sigma = 10.0;
+        // Three consensus sights at 0 nm to fix the median and
+        // drive MAD≈0, leaving the test sight's per-sight σ as
+        // the screener's σ in the z-score.
+        let cfg = ScreeningConfig::default();
+        assert!(
+            (cfg.outlier_k_sigma - 3.0).abs() < 1e-12,
+            "this test pins the default k = 3",
+        );
+
+        // residual = 2·σ_test = 20 nm → z = 2 → kept (z < k=3).
+        let lops_kept = [
+            lop(0.0, 0.0, consensus_sigma),
+            lop(90.0, 0.0, consensus_sigma),
+            lop(180.0, 0.0, consensus_sigma),
+            lop(270.0, 2.0 * test_sigma, test_sigma),
+        ];
+        let r = screen_sights(&lops_kept, cfg);
+        assert_eq!(
+            r.kept.len(),
+            4,
+            "residual = 2·σ must survive the 3-σ gate; kept={}, rejected={:?}",
+            r.kept.len(),
+            r.rejected,
+        );
+        assert!(r.rejected.is_empty());
+
+        // residual = 4·σ_test = 40 nm → z = 4 → rejected (z > k=3).
+        let lops_rej = [
+            lop(0.0, 0.0, consensus_sigma),
+            lop(90.0, 0.0, consensus_sigma),
+            lop(180.0, 0.0, consensus_sigma),
+            lop(270.0, 4.0 * test_sigma, test_sigma),
+        ];
+        let r = screen_sights(&lops_rej, cfg);
+        assert_eq!(
+            r.kept.len(),
+            3,
+            "residual = 4·σ must be rejected by the 3-σ gate",
+        );
+        assert_eq!(r.rejected.len(), 1);
+        assert!(matches!(
+            r.rejected[0].2,
+            RejectionReason::OutlierIntercept(_, _, _)
+        ));
+    }
+
+    #[test]
+    fn outlier_k_is_configurable() {
+        // The same residual = 2.5·σ sight is kept under k=3
+        // (loose) and rejected under k=2 (tight). Confirms the
+        // knob is actually being read by the screener.
+        let lops = [
+            lop(0.0, 0.0, 0.1),
+            lop(90.0, 0.0, 0.1),
+            lop(180.0, 0.0, 0.1),
+            lop(270.0, 25.0, 10.0), // residual = 25 nm, σ floor = 10 nm → z = 2.5
+        ];
+        let loose = ScreeningConfig {
+            outlier_k_sigma: 3.0,
+            ..ScreeningConfig::default()
+        };
+        assert_eq!(screen_sights(&lops, loose).kept.len(), 4);
+        let tight = ScreeningConfig {
+            outlier_k_sigma: 2.0,
+            ..ScreeningConfig::default()
+        };
+        assert_eq!(screen_sights(&lops, tight).kept.len(), 3);
     }
 }

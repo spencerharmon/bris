@@ -1968,6 +1968,22 @@ references to the regression tests that pin the behavior. See
    solver; rejection count surfaced via the new
    ~EngineDiagnostics.sights_rejected_by_screener~ counter and
    sight IDs + reasons logged via existing tracing.
+   *Audit 2026-06-07 (sight-screener σ-honesty):* screener
+   confirmed k·σ-honest by design — consensus-outlier rule
+   uses ~σ = max(1.4826·MAD_of_others, per-sight σ_intercept)~
+   so a wide-σ ML-gravity sight is never rejected for sitting
+   far from a tight optical consensus, and Stage E disables the
+   absolute-intercept gate (~max_abs_intercept_nm = INFINITY~)
+   so the stale-prior cold-start trigger can fire. Changes
+   from this audit: ~outlier_k_sigma~ default tightened from
+   5.0 → 3.0 (standard 3-σ); ~EngineConfig::screening~ now
+   exposes the full ~ScreeningConfig~ for replay tuning;
+   boundary tests pin 2·σ-accept / 4·σ-reject. Bedroom-moon
+   ~ap-seed-truth~ replay (~sight_window_depth=0~) is NOT a
+   screener issue — 0 sights are ever inserted, so the
+   screener never runs. Root cause is upstream: night-mode
+   classifier + plate-solve declining on moon-glare + Day
+   path hardcoded to Sun. Tracked separately.
 ** TODO Dominant-source attribution
    For each fix, identify which uncertainty source dominates (e.g.
    "horizon fit", "time", "refraction", "calibration", "stitching")
