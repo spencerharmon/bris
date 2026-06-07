@@ -1178,8 +1178,7 @@ impl StreamingEngine {
             stage_d_skipped_no_star_evidence: state.stage_d_skipped_no_star_evidence,
             ephemeris_stitch_attempted: state.ephemeris_stitch_attempted,
             ephemeris_stitch_succeeded: state.ephemeris_stitch_succeeded,
-            ephemeris_stitch_no_candidate_in_window: state
-                .ephemeris_stitch_no_candidate_in_window,
+            ephemeris_stitch_no_candidate_in_window: state.ephemeris_stitch_no_candidate_in_window,
         }
     }
 

@@ -995,9 +995,7 @@ fn try_ephemeris_stitch(
                 }
                 v
             }
-            super::BodyDetection::Night(peaks) => {
-                peaks.iter().map(|p| (p.x, p.y)).collect()
-            }
+            super::BodyDetection::Night(peaks) => peaks.iter().map(|p| (p.x, p.y)).collect(),
             super::BodyDetection::IdentifiedStars(result) => result
                 .identified
                 .iter()

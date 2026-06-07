@@ -9,6 +9,71 @@ For the end-to-end pipeline architecture and data flow, see
 
 ---
 
+## bris-streaming: ephemeris-driven Stage E stitch fallback (2026-06-07)
+
+New correspondence prior for Stage E cross-frame stitching.
+When `bris_vision::panorama_altitude_for_pair` (Harris+NCC)
+declines on indoor / low-contrast captures, Stage E now
+(gated on `EngineConfig::enable_ephemeris_stitch_fallback`,
+default true) projects the body's expected ray at the body
+and horizon frame timestamps via the almanac, predicts the
+implied pixel motion, looks for a body candidate in the
+horizon frame (Day centroid / Night peak /
+IdentifiedStars), and — if the closest match falls within
+3·σ of the prediction — accepts the correspondence under an
+identity-rotation (stationary-camera) assumption.
+
+New module `crates/bris-streaming/src/pipeline/ephemeris_stitch.rs`
+exports `predict_body_pixel_motion(body, t1, t2, observer,
+intrinsics, observer_position_sigma_m, roll_uncertainty_rad)`
+→ `(dx_px, dy_px, angular_delta_rad, angular_sigma_rad,
+sigma_px)`. σ accounting is honest: almanac altitude σ at
+both timestamps, parallax sensitivity to the observer-
+position σ (re-evaluated at a perturbed observer
+latitude), and a roll-uncertainty contribution that swells
+sigma_px to the full predicted-displacement magnitude when
+the operator's camera roll is unknown.
+
+The accepted-sight stitch σ uses the existing
+`STITCH_SIGMA_PER_SECOND_RAD × Δt` rate constant (matches
+the pair-selection σ for consistency).
+
+New `EngineDiagnostics` counters:
+`ephemeris_stitch_attempted`, `ephemeris_stitch_succeeded`,
+`ephemeris_stitch_no_candidate_in_window`. New bris-cli
+flag `--disable-ephemeris-stitch-fallback` for A/B baseline
+runs.
+
+Integration test on a synthetic 2-frame J2000 Sun sequence
+(60-s gap, body placed at almanac-predicted pixel offset)
+confirms Harris+NCC declines (per-axis residuals above the
+Kabsch threshold) and the fallback accepts the
+correspondence + emits the cross-frame sight; negative
+control with the flag disabled confirms zero attempts and
+zero cross-frame sights.
+
+Bedroom-moon session A/B (capture 2, 7 frames):
+  baseline (--disable-ephemeris-stitch-fallback):
+    cross_frame_sights_emitted=4, ephemeris_*=0/0/0
+  with fallback enabled:
+    cross_frame_sights_emitted=4, ephemeris_*=3/0/3
+
+The 3 ephemeris attempts on this corpus found a candidate
+in the horizon frame but the actual displacement (50-200+
+px) far exceeded the ephemeris-predicted displacement (~1
+px) — the camera moved significantly between frames and/or
+the brightest spot in the horizon frame is not the same
+body. The fallback honestly declines in those cases
+(rule zero: don't accept unverified correspondences). The
+implementation is exercised, the verification gate is
+tight, the success rate on this particular corpus is zero
+because the underlying stationary-camera assumption
+doesn't hold there.
+
+Docs: `docs/design/pipeline.md` Stage E section.
+
+---
+
 ## bris-streaming: Stage D dispatch policy (2026-06-07)
 
 New `EngineConfig::stage_d_dispatch_policy` knob

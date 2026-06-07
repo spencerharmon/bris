@@ -103,7 +103,7 @@ fn cfg_in(dir: &std::path::Path, fallback_enabled: bool) -> EngineConfig {
 /// `t0` and `t1` at the default-dev observer on placeholder
 /// intrinsics. Mirrors the math inside
 /// `ephemeris_stitch::predict_body_pixel_motion`: per-axis
-/// projection of (Δalt, Δaz·cos(mean_alt)) through fx/fy.
+/// projection of (`d_alt`, `d_az * cos(mean_alt)`) through fx/fy.
 fn sun_predicted_pixel_delta(t0: Tt, t1: Tt, intrinsics: &Intrinsics) -> (f64, f64) {
     let observer = Observer::default_dev();
     let p0 = body_apparent_place(SolarSystemBody::Sun, t0, t0.julian_date(), observer)

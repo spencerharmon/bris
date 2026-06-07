@@ -292,7 +292,10 @@ pub(crate) fn predict_body_pixel_motion(
     //     search.
     let f_eff = (intrinsics.fx * intrinsics.fy).sqrt().max(f64::EPSILON);
     let mag_px = (dx.powi(2) + dy.powi(2)).sqrt();
-    let roll_sigma_factor = roll_uncertainty_rad.abs().min(std::f64::consts::FRAC_PI_2).sin();
+    let roll_sigma_factor = roll_uncertainty_rad
+        .abs()
+        .min(std::f64::consts::FRAC_PI_2)
+        .sin();
     let sigma_px_angular = angular_sigma_rad * f_eff;
     let sigma_px_roll = mag_px * roll_sigma_factor;
     let sigma_px = (sigma_px_angular.powi(2) + sigma_px_roll.powi(2)).sqrt();
@@ -376,7 +379,7 @@ mod tests {
             t2,
             dev_observer(),
             &intr(),
-            10_000.0,                 // 10 km horizontal σ
+            10_000.0,                    // 10 km horizontal σ
             std::f64::consts::FRAC_PI_4, // moderate roll uncertainty
         )
         .expect("Sun apparent place should be defined at J2000 Greenwich");
