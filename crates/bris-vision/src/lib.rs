@@ -4,6 +4,7 @@
 //! All algorithms are classical (no ML inference runtime). See `plan.org`
 //! Phase 2 for design.
 
+pub mod bright_blob;
 pub mod centroid;
 pub mod centroid_refine;
 pub mod condition;
@@ -24,6 +25,7 @@ pub mod ray;
 pub mod segment;
 pub mod track;
 
+pub use bright_blob::{compute_bright_blob_mask, BrightBlobConfig};
 pub use centroid::{
     centroid_brightest_body, centroid_brightest_body_in_mask, centroid_saturated_body_in_mask,
     extract_multi_saturated_centroids, Centroid, CentroidConfig, CentroidError,
