@@ -36,8 +36,8 @@ pub use centroid_refine::{
     DEFAULT_GAIN_E_PER_ADU,
 };
 pub use condition::{
-    classify, AstronomicalEvidence, Classification, Condition, ConditionConfig, ImageEvidence,
-    TwilightBand,
+    classify, classify_with_masks, AstronomicalEvidence, Classification, Condition,
+    ConditionConfig, ImageEvidence, TwilightBand,
 };
 pub use debug_render::{
     render_base_image, render_debug_overlay, CentroidOverlay, HorizonOverlay, OverlayData,
