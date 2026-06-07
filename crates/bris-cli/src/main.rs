@@ -496,6 +496,14 @@ struct ReplayArgs {
     /// `--ml-gravity` even when that flag is not also passed.
     #[arg(long)]
     ml_gravity_model: Option<PathBuf>,
+    /// Disable the ephemeris-driven Stage E cross-frame stitch
+    /// fallback for this replay. Useful for A/B comparison
+    /// against the Harris+NCC-only baseline (the default leaves
+    /// the fallback on). When set, every cross-frame pair that
+    /// Harris+NCC declines is recorded as a `Stitch` rejection;
+    /// the engine's ephemeris counters stay at zero.
+    #[arg(long)]
+    disable_ephemeris_stitch_fallback: bool,
     /// Comma-separated subset of horizon providers to dispatch.
     /// Names: gradient, sky-region, night, night-textured,
     /// segmentation, reflection-pair, vertical-line,
@@ -1638,6 +1646,9 @@ fn build_engine_config(
     if args.ml_gravity || args.ml_gravity_model.is_some() {
         cfg.enable_ml_gravity = true;
     }
+    if args.disable_ephemeris_stitch_fallback {
+        cfg.enable_ephemeris_stitch_fallback = false;
+    }
     cfg.ml_gravity_model_path = ml_gravity_path;
     if let Some(names) = args.horizon_providers.as_ref() {
         cfg.horizon_provider_set = parse_horizon_provider_set(names).map_err(anyhow::Error::msg)?;
@@ -1745,6 +1756,11 @@ fn run_one_mode(
         cold_start_attempts = diag.cold_start_attempts,
         cold_start_published = diag.cold_start_published,
         ap_rederive_suppressed_count = diag.ap_rederive_suppressed_count,
+        cross_frame_sights_emitted = diag.cross_frame_sights_emitted,
+        ephemeris_stitch_attempted = diag.ephemeris_stitch_attempted,
+        ephemeris_stitch_succeeded = diag.ephemeris_stitch_succeeded,
+        ephemeris_stitch_no_candidate_in_window =
+            diag.ephemeris_stitch_no_candidate_in_window,
         "replay: engine diagnostics"
     );
     Ok(ModeResult {

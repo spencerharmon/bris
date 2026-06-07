@@ -975,20 +975,39 @@ fn try_ephemeris_stitch(
     body_frame: &bris_vision::Frame,
     horizon_frame: &bris_vision::Frame,
 ) -> Result<Option<bris_core::Uncertain<f64>>, EphemerisError> {
-    // Find a body candidate in the horizon frame to verify
-    // the ephemeris-predicted correspondence against. The
-    // verification step requires it; without a candidate the
-    // fallback declines (returns Ok(None)).
-    let Some(horizon_frame_body) = storage
+    // Find body-candidate positions in the horizon frame to
+    // verify the ephemeris-predicted correspondence against.
+    // Day -> the saturated centroid. Night -> the peak
+    // positions (the moon at twilight often presents as a
+    // single brightest peak rather than as a saturated
+    // centroid; we accept the closest-to-prediction peak
+    // as the verification candidate). IdentifiedStars /
+    // None -> nothing to verify against.
+    let horizon_frame_candidates: Vec<(f64, f64)> = storage
         .body_records()
         .find(|r| r.frame_id == c.horizon.frame_id)
-        .and_then(|r| match &r.detection {
-            super::BodyDetection::Day(centroid, _) => Some(*centroid),
-            _ => None,
-        })
-    else {
+        .map_or_else(Vec::new, |r| match &r.detection {
+            super::BodyDetection::Day(centroid, secondaries) => {
+                let mut v = Vec::with_capacity(1 + secondaries.len());
+                v.push((centroid.x, centroid.y));
+                for s in secondaries {
+                    v.push((s.x, s.y));
+                }
+                v
+            }
+            super::BodyDetection::Night(peaks) => {
+                peaks.iter().map(|p| (p.x, p.y)).collect()
+            }
+            super::BodyDetection::IdentifiedStars(result) => result
+                .identified
+                .iter()
+                .map(|s| (s.pixel_x, s.pixel_y))
+                .collect(),
+            super::BodyDetection::None => Vec::new(),
+        });
+    if horizon_frame_candidates.is_empty() {
         return Ok(None);
-    };
+    }
 
     // Roll uncertainty: we have a horizon line in
     // horizon_frame, so the camera roll is well-constrained
@@ -1008,21 +1027,23 @@ fn try_ephemeris_stitch(
         roll_uncertainty_rad,
     )?;
 
-    // Verification: actual displacement of the body between
-    // the two frames vs the ephemeris-predicted displacement,
-    // accepting if the residual is within 3·σ.
-    //
-    // The horizon-frame centroid was detected in horizon_frame's
-    // pixel grid; the body-frame centroid in body_frame's. Both
-    // grids are at the same intrinsics in practice (same camera,
-    // same resolution between adjacent frames) but we lift to
-    // rays anyway and convert the angular delta to pixels in the
-    // body-frame intrinsics so the comparison is in a single,
-    // well-defined coordinate system.
-    let actual_dx = horizon_frame_body.x - body_centroid.x;
-    let actual_dy = horizon_frame_body.y - body_centroid.y;
-    let residual_px =
-        (actual_dx - prediction.dx_px).hypot(actual_dy - prediction.dy_px);
+    // Verification: of all body-candidate positions in the
+    // horizon frame, find the one closest to the
+    // ephemeris-predicted point and check if its residual is
+    // within 3·σ. Accepting the closest match (rather than
+    // any candidate) keeps the test honest when Stage B
+    // produced multiple peaks (Night path): only the
+    // best-matching one is allowed to claim the body
+    // correspondence.
+    let predicted_x = body_centroid.x + prediction.dx_px;
+    let predicted_y = body_centroid.y + prediction.dy_px;
+    let (closest_x, closest_y, residual_px) = horizon_frame_candidates
+        .iter()
+        .map(|&(cx, cy)| (cx, cy, (cx - predicted_x).hypot(cy - predicted_y)))
+        .min_by(|a, b| a.2.partial_cmp(&b.2).unwrap_or(std::cmp::Ordering::Equal))
+        .expect("non-empty checked above");
+    let actual_dx = closest_x - body_centroid.x;
+    let actual_dy = closest_y - body_centroid.y;
     let window_px = 3.0 * prediction.sigma_px;
     if !residual_px.is_finite() || residual_px > window_px {
         trace!(
@@ -1032,7 +1053,8 @@ fn try_ephemeris_stitch(
             predicted_dy_px = prediction.dy_px,
             actual_dx,
             actual_dy,
-            "ephemeris stitch: candidate outside 3·σ window",
+            n_candidates = horizon_frame_candidates.len(),
+            "ephemeris stitch: closest candidate outside 3·σ window",
         );
         return Ok(None);
     }
