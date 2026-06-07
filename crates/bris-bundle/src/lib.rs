@@ -238,23 +238,33 @@ pub enum SessionKinematics {
     },
 }
 
-/// Use-case classification for a session. Today only `Custom`
-/// is wired to behavior; the named variants are reserved for
-/// future profile-driven defaults (kinematics, retention,
-/// pipeline tuning).
+/// Use-case classification for a session. Drives a small set
+/// of opinionated [`EngineConfig`] defaults via
+/// `bris_streaming::apply_profile`; the operator's explicit
+/// session.json / CLI overrides always win.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum UseCaseProfile {
-    /// Operator sets `kinematics` / retention fields directly.
+    /// Operator sets `kinematics` / retention fields directly;
+    /// the profile dispatcher is a no-op.
     #[default]
     Custom,
-    /// Reserved. Behaves as [`Self::Custom`] today.
+    /// Open-water sight-taking: full marine-friendly provider
+    /// set (gradient, sky-region, night, night-textured,
+    /// segmentation, reflection-pair, ML-gravity), cold-start
+    /// enabled.
     Marine,
-    /// Reserved. Behaves as [`Self::Custom`] today.
+    /// Airborne capture: drops night and reflection-pair
+    /// providers, narrows the publication gate's azimuth
+    /// spread to 20°, defaults the speed gate to 250 kn when
+    /// the operator left kinematics unset.
     Aeronautical,
-    /// Reserved. Behaves as [`Self::Custom`] today.
+    /// Stationary terrestrial observer: full default provider
+    /// set, explicit 0-kn speed gate.
     LandBased,
-    /// Reserved. Behaves as [`Self::Custom`] today.
+    /// Cluttered urban scene: vanishing-point provider on,
+    /// sky-region and reflection-pair off; night detectors
+    /// retained.
     Urban,
 }
 

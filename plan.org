@@ -2843,15 +2843,20 @@ references to the regression tests that pin the behavior. See
    `docs/design/capture.md`'s soft-delete affordances).
    Eventually: storage gauge, free-space warning, bulk delete
    by age, export-to-zip per session.
-** TODO Use-case profile defaults
+** PARTIAL Use-case profile defaults
    `SessionManifest::profile` (Marine / Aeronautical / LandBased
-   / Urban / Custom). Today only `Custom` is meaningful; the
-   others are reserved and behave identically. Eventually each
-   profile carries smart defaults for `kinematics` and
-   `sight_retention_*`, and may drive pipeline tuning
-   (e.g. urban profile expects vertical-line horizon
-   providers). Until then, advanced settings / CLI flags let
-   the operator set the underlying parameters directly.
+   / Urban / Custom). `bris_streaming::apply_profile` wires the
+   four named variants to concrete `EngineConfig` mutations:
+   per-profile `HorizonProviderSet`, Aeronautical's narrowed
+   azimuth-spread gate, profile-default `assumed_max_speed_kn`
+   for Aeronautical / LandBased, Marine cold-start enable.
+   `bris-cli replay --profile` overrides the session value.
+   Setters only write fields still at the engine default, so
+   operator-set values win. Remaining work: per-profile
+   defaults for `kinematics` / `sight_retention_*` at session
+   creation (UI side; the engine side is wired)
+   and additional pipeline tuning (e.g. urban-specific
+   horizon-fusion thresholds) as corpus evidence accumulates.
 ** DONE Lens selection (multi-camera Android devices)
    *Audit 2026-06-03 — minor deviation:* spec body says identify
    telephoto by "longest ~LENS_FOCAL_LENGTHS~ entry";

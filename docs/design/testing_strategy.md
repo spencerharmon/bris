@@ -164,11 +164,14 @@ Notes:
   session create. Until the "pick AP from map" UI lands
   (`plan.org` Phase 7), text entry is the only path.
   Engine still treats the seed as advisory (`replay_modes.md`).
-- **`profile`** classifies. Today every value except
-  `Custom` is reserved and behaves like `Custom`. Eventually
-  drives smart defaults for `kinematics` /
-  `sight_retention_*`; until then the operator sets those
-  fields directly.
+- **`profile`** classifies. Drives a small set of opinionated
+  [`EngineConfig`] defaults via
+  [`bris_streaming::apply_profile`] (Marine, Aeronautical,
+  LandBased, Urban); `Custom` leaves the operator in charge.
+  Resolution order: CLI `--profile` flag > `session.json` >
+  `Custom`. The dispatcher only writes fields that are still
+  at the engine default, so an operator-set `kinematics` or
+  CLI override is never silently clobbered.
 - **`kinematics` + retention** flow into `EngineConfig` on
   engine construction (live and replay). `Stationary` sets
   `PublicationGateConfig::assumed_max_speed_kn = 0`;

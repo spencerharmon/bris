@@ -46,6 +46,41 @@ documents the rule + diagnostics.
 
 ---
 
+## UseCaseProfile drives dispatch + gate defaults (2026-06-07)
+
+The four named `bris-bundle::UseCaseProfile` variants
+(`Marine`, `Aeronautical`, `LandBased`, `Urban`) stop being
+"reserved; behaves as Custom" and start driving concrete
+`EngineConfig` mutations via the new
+`bris_streaming::apply_profile`:
+
+- Per-profile `HorizonProviderSet` (Marine keeps the full
+  marine-friendly set, Aeronautical drops night +
+  reflection-pair, LandBased keeps defaults, Urban swaps
+  sky-region/reflection-pair for vanishing-point).
+- Aeronautical narrows `PublicationGateConfig::
+  min_azimuth_spread_rad` to 20°.
+- Aeronautical / LandBased default `assumed_max_speed_kn`
+  (250 / 0 kn) when the operator left kinematics unset.
+- Marine enables cold-start.
+
+The dispatcher only writes fields still at the engine default;
+`session.json` overlays and CLI flag overrides remain
+authoritative. Application order:
+`engine defaults → session.json overrides → profile defaults
+→ CLI flag overrides`.
+
+`bris-cli replay --profile {custom|marine|aeronautical|
+land-based|urban}` overrides the session value for a replay.
+8 new unit tests + smoke on the bedroom-moon corpus confirm
+the wiring: Aeronautical's narrower provider set produces 2
+horizon hypotheses per capture vs 7 under Custom / Marine /
+LandBased / Urban, and `fix_publish_attempts` drops from 4 to
+3 in tandem. All five profiles publish 0 fixes (adversarial
+scene; expected).
+
+---
+
 ## bris-cli: cross-capture session-engine continuity (2026-06-05)
 
 `bris-cli replay --session` and `--all-sessions` now reuse one
