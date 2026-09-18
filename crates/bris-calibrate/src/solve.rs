@@ -325,7 +325,209 @@ mod tests {
         assert!(matches!(err, SolveError::InconsistentDimensions { .. }));
     }
 
-    // End-to-end solve tests need either real captures or
-    // synthetic checkerboard frames; both are deferred to
-    // hardware bring-up.
+    // ---------------------------------------------------------------
+    // End-to-end synthetic target-board fixture.
+    //
+    // The task's definition of source-of-truth is that the
+    // planar-intrinsics workflow (Zhang init + non-linear bundle
+    // adjustment) recovers *known* lens parameters. We build that
+    // ground truth with a synthetic chessboard: place a planar grid
+    // at several known poses, project every corner through a camera
+    // with KNOWN intrinsics, feed the resulting pixel↔board
+    // correspondences into `calibrate()`, and assert the solver
+    // recovers the intrinsics we started from within tolerance.
+    //
+    // No image I/O or hardware is involved: the fixture is the
+    // `vision-calibration` synthetic projection helpers, which are
+    // exactly the forward model the solver inverts. This is the
+    // regression that pins bris-calibrate as the real source of
+    // truth — a wide-angle lens (fx≈fy≈400, not the fx=fy=1000
+    // `Intrinsics::placeholder`) is recovered from its own
+    // projections.
+    // ---------------------------------------------------------------
+
+    use vision_calibration::core::{make_pinhole_camera, BrownConrady5, FxFyCxCySkew};
+    use vision_calibration::synthetic::planar::{grid_points, poses_yaw_y_z};
+
+    /// Ground-truth intrinsics for the synthetic fixture: a
+    /// wide-angle lens (short focal length) with a slightly
+    /// off-centre principal point and mild radial distortion —
+    /// representative of the real lenses the ROI calls out
+    /// (~350–500 px focal length), and deliberately far from the
+    /// `Intrinsics::placeholder` fx=fy=1000.
+    fn truth_intrinsics() -> FxFyCxCySkew<f64> {
+        FxFyCxCySkew {
+            fx: 420.0,
+            fy: 418.0,
+            cx: 332.0,
+            cy: 244.0,
+            skew: 0.0,
+        }
+    }
+
+    /// Build synthetic `DetectedView`s by projecting a planar
+    /// chessboard grid through a camera with the given ground-truth
+    /// intrinsics from several known poses. Pixel coordinates are
+    /// the exact forward-projected corners (noise-free), so a
+    /// correct solver must recover the intrinsics to high precision.
+    fn synthetic_views(
+        k: FxFyCxCySkew<f64>,
+        dist: BrownConrady5<f64>,
+        n_views: usize,
+        width: u32,
+        height: u32,
+    ) -> Vec<DetectedView> {
+        // 9x7 inner-corner grid at 25 mm spacing — a typical
+        // calibration board size.
+        let (nx, ny, spacing) = (9u32, 7u32, 0.025_f64);
+        let board = grid_points(nx as usize, ny as usize, spacing);
+        // Centre the board on the optical axis so the whole grid
+        // stays in frame across the yaw/depth sweep.
+        let board_center_x = (f64::from(nx) - 1.0) * spacing / 2.0;
+        let board_center_y = (f64::from(ny) - 1.0) * spacing / 2.0;
+
+        let camera = make_pinhole_camera(k, dist);
+        // Sweep yaw and depth so the views are geometrically
+        // distinct (Zhang's method needs ≥3 non-degenerate views).
+        let poses = poses_yaw_y_z(n_views, -0.30, 0.12, 0.45, 0.02);
+
+        let mut views = Vec::with_capacity(n_views);
+        for (view_idx, pose) in poses.iter().enumerate() {
+            let mut correspondences = Vec::with_capacity(board.len());
+            for p in &board {
+                // Recentre the board about the origin before applying
+                // the pose so the projected corners land near the
+                // image centre.
+                let centered = vision_calibration::core::Pt3::new(
+                    p.x - board_center_x,
+                    p.y - board_center_y,
+                    0.0,
+                );
+                let p_cam = pose * centered;
+                let projected = camera
+                    .project_point_c(&p_cam.coords)
+                    .expect("synthetic board corner must project in front of the camera");
+                correspondences.push(crate::detect::Correspondence {
+                    pixel_x: projected.x,
+                    pixel_y: projected.y,
+                    // Report the board coordinate in its own (un-recentred)
+                    // frame; the solver estimates the per-view pose that
+                    // includes the constant recentring translation.
+                    board_x_m: p.x - board_center_x,
+                    board_y_m: p.y - board_center_y,
+                });
+            }
+            views.push(DetectedView {
+                source: PathBuf::from(format!("synthetic_view_{view_idx:02}.pgm")),
+                width,
+                height,
+                correspondences,
+            });
+        }
+        views
+    }
+
+    #[test]
+    fn recovers_known_wide_angle_intrinsics_from_synthetic_board() {
+        let truth = truth_intrinsics();
+        // Noise-free, distortion-free forward model: the pinhole
+        // intrinsics must be recovered essentially exactly.
+        let dist = BrownConrady5::<f64>::default();
+        let views = synthetic_views(truth, dist, 12, 640, 480);
+
+        let result = calibrate(&views).expect("synthetic calibration must succeed");
+
+        // The whole point of the task: real intrinsics, not the
+        // fx=fy=1000 placeholder.
+        assert!(
+            (result.intrinsics.fx - 1000.0).abs() > 100.0,
+            "recovered fx={} must not be the placeholder 1000",
+            result.intrinsics.fx
+        );
+
+        // Recovery tolerance: with a clean forward model the solver
+        // should land within 1 px of focal length and principal
+        // point.
+        assert!(
+            (result.intrinsics.fx - truth.fx).abs() < 1.0,
+            "fx: recovered {} vs truth {}",
+            result.intrinsics.fx,
+            truth.fx
+        );
+        assert!(
+            (result.intrinsics.fy - truth.fy).abs() < 1.0,
+            "fy: recovered {} vs truth {}",
+            result.intrinsics.fy,
+            truth.fy
+        );
+        assert!(
+            (result.intrinsics.cx - truth.cx).abs() < 1.0,
+            "cx: recovered {} vs truth {}",
+            result.intrinsics.cx,
+            truth.cx
+        );
+        assert!(
+            (result.intrinsics.cy - truth.cy).abs() < 1.0,
+            "cy: recovered {} vs truth {}",
+            result.intrinsics.cy,
+            truth.cy
+        );
+
+        // A correct solve of noise-free data has sub-pixel RMS.
+        assert!(
+            result.mean_reproj_error_px < 0.5,
+            "mean reproj error {} px too high — solve did not converge",
+            result.mean_reproj_error_px
+        );
+        assert_eq!(result.view_count, 12);
+        assert!(
+            !result.per_view.is_empty(),
+            "per-view residuals must be populated"
+        );
+    }
+
+    #[test]
+    fn recovers_intrinsics_with_radial_distortion() {
+        let truth = truth_intrinsics();
+        // Mild barrel distortion, typical of a wide-angle lens.
+        let dist = BrownConrady5::<f64> {
+            k1: -0.12,
+            k2: 0.03,
+            k3: 0.0,
+            p1: 0.0,
+            p2: 0.0,
+            iters: 5,
+        };
+        let views = synthetic_views(truth, dist, 14, 640, 480);
+
+        let result = calibrate(&views).expect("synthetic calibration must succeed");
+
+        // Focal length / principal point still recovered within a
+        // loose pixel tolerance when distortion is present and
+        // jointly estimated.
+        assert!(
+            (result.intrinsics.fx - truth.fx).abs() < 3.0,
+            "fx: recovered {} vs truth {}",
+            result.intrinsics.fx,
+            truth.fx
+        );
+        assert!(
+            (result.intrinsics.fy - truth.fy).abs() < 3.0,
+            "fy: recovered {} vs truth {}",
+            result.intrinsics.fy,
+            truth.fy
+        );
+        // The recovered radial term must have the right sign and
+        // rough magnitude (barrel distortion, k1 < 0).
+        assert!(
+            result.intrinsics.k1 < -0.02,
+            "k1: recovered {} should capture the barrel distortion",
+            result.intrinsics.k1
+        );
+        assert!(
+            result.mean_reproj_error_px < 0.5,
+            "mean reproj error {} px too high with distortion",
+            result.mean_reproj_error_px
+        );
+    }
 }
