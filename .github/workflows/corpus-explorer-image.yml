@@ -1,0 +1,99 @@
+# Build and publish the corpus-explorer static-server image to the
+# Gitea OCI registry, pinned BY DIGEST.
+#
+# INFRA-AGNOSTIC: registry host, namespace, and push credentials come
+# ENTIRELY from Actions vars/secrets — NEVER committed here. This
+# workflow contains no host, domain, or registry identifier.
+#
+# Required Actions configuration (set on the Gitea repo/org, not here):
+#   vars.REGISTRY   — the Gitea OCI registry host (e.g. registry.example)
+#   vars.NAMESPACE  — the registry namespace/owner for the image
+#   secrets.REGISTRY_USERNAME — registry push user
+#   secrets.REGISTRY_PASSWORD — registry push token/password
+#
+# The published image is pushed by tag AND resolved to its digest,
+# emitted as the job output `digest` and printed to the step summary
+# so the flux side can pin `registry/namespace/bris-corpus-explorer@<digest>`.
+#
+# Definition of done (downstream check):
+#   skopeo inspect docker://$BRIS_EXPLORER_IMAGE
+# where $BRIS_EXPLORER_IMAGE is the digest reference above — proving
+# the image really published and is pullable by digest.
+
+name: corpus-explorer-image
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "tools/corpus-explorer/**"
+      - ".github/workflows/corpus-explorer-image.yml"
+  workflow_dispatch:
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    outputs:
+      digest: ${{ steps.push.outputs.digest }}
+      image: ${{ steps.push.outputs.image }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to the Gitea registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ vars.REGISTRY }}
+          username: ${{ secrets.REGISTRY_USERNAME }}
+          password: ${{ secrets.REGISTRY_PASSWORD }}
+
+      - name: Build and push by digest
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: tools/corpus-explorer/deploy/Dockerfile
+          push: true
+          tags: ${{ vars.REGISTRY }}/${{ vars.NAMESPACE }}/bris-corpus-explorer:${{ github.sha }}
+          provenance: false
+
+      - name: Resolve and record the published digest
+        id: push
+        env:
+          REPO: ${{ vars.REGISTRY }}/${{ vars.NAMESPACE }}/bris-corpus-explorer
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          if [ -z "${DIGEST:-}" ]; then
+            echo "build-push-action did not emit a digest" >&2
+            exit 1
+          fi
+          IMAGE="${REPO}@${DIGEST}"
+          echo "digest=${DIGEST}" >> "$GITHUB_OUTPUT"
+          echo "image=${IMAGE}" >> "$GITHUB_OUTPUT"
+          {
+            echo "## corpus-explorer image published"
+            echo ""
+            echo "Pinned by digest (set \`BRIS_EXPLORER_IMAGE\` to this on the flux side):"
+            echo ""
+            echo '```'
+            echo "${IMAGE}"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Verify the pushed image is pullable by digest
+        env:
+          BRIS_EXPLORER_IMAGE: ${{ steps.push.outputs.image }}
+        run: |
+          set -euo pipefail
+          # The definition-of-done check, run in-workflow against the
+          # freshly-pushed image. skopeo is preinstalled on the runner
+          # image; install it if absent.
+          if ! command -v skopeo >/dev/null 2>&1; then
+            sudo apt-get update && sudo apt-get install -y skopeo
+          fi
+          skopeo inspect \
+            --creds "${{ secrets.REGISTRY_USERNAME }}:${{ secrets.REGISTRY_PASSWORD }}" \
+            "docker://${BRIS_EXPLORER_IMAGE}"
