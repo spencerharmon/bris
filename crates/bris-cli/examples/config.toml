@@ -54,7 +54,7 @@ exposure_us = 10000
 # warning — fixes will be off by the calibration error
 # (potentially tens of nautical miles). See
 # `docs/calibration.md` for the calibration workflow.
-# intrinsics = "/home/operator/.local/share/bris/intrinsics.toml"
+# intrinsics = "/home/operator/.local/share/bris/intrinsics.json"
 
 # Each [[nmea]] table defines one transport sink for
 # `bris serve`'s NMEA emission. CLI flags

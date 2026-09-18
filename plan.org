@@ -389,7 +389,8 @@ references to the regression tests that pin the behavior. See
    via the `chess-corners` ChESS detector + `calib-targets`
    chessboard extractor, parameter solve via `vision-calibration`'s
    planar-intrinsics workflow (Zhang's method + non-linear bundle
-   adjustment), TOML persistence, and a quality diagnostic.
+   adjustment), a unified JSON manifest persistence format, and a
+   quality diagnostic.
    Wired into the CLI as ~bris calibrate --frames <dir> --rows
    --cols --square-size-mm~. ~bris serve~ loads the persisted
    intrinsics via the config file's ~[camera] intrinsics = ...~
@@ -397,6 +398,28 @@ references to the regression tests that pin the behavior. See
    recorded at a different resolution than the camera is currently
    producing. Operator-facing user documentation in
    [[file:docs/operator/calibration.md][docs/operator/calibration.md]].
+
+   *Format unification (2026-09):* the CLI's persisted
+   ~intrinsics.json~ and Android's in-app session
+   ~calibration.json~ are now the *same* schema
+   (~bris_calibrate::persist::CalibrationManifest~):
+   ~calibration_id~, ~lens_id~, ~status~, ~intrinsics~, ~width~,
+   ~height~, ~rms_px~, ~n_frames_used~, ~n_frames_total~,
+   ~detection_stats~, ~diagnosis_overall~, ~diagnosis_issues~,
+   ~per_view_residuals~ — Android's shape, which the CLI's older
+   bespoke TOML format now matches field-for-field.
+   ~bris-ffi~ exposes ~write_calibration_manifest~ /
+   ~read_calibration_manifest~ so the Android shell can delegate to
+   the shared Rust implementation instead of hand-rolling the JSON
+   (~CalibrationStore.kt~ still writes it directly in Kotlin as of
+   this change — wiring the shell over to the new FFI calls is a
+   follow-up, tracked as a Kotlin-side refactor with no schema
+   change). Round-trip coverage lives in
+   ~bris-calibrate::persist::tests~ (loads a hand-written
+   Android-shaped manifest) and
+   ~bris-ffi::calibration_manifest_tests~ (writes via the FFI path,
+   reads back via both the FFI reader and
+   ~bris_calibrate::persist::read_intrinsics~ directly).
 
    *Interactive calibration UX (2026-05):* the per-frame primitive
    ~detect_corners_in_jpeg~ now reports a typed ~FrameOutcome~
