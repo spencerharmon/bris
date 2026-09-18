@@ -811,7 +811,7 @@ fn render_one_frame(
                 altitude_rad: *altitude_rad,
                 sigma_rad: *sigma_rad,
             },
-            StageEOutcomeSnapshot::Err { kind } => replay_report::StageEAttemptReport::Err {
+            StageEOutcomeSnapshot::Err { kind, .. } => replay_report::StageEAttemptReport::Err {
                 error: kind.clone(),
             },
         })

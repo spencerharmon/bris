@@ -494,6 +494,9 @@ pub(crate) fn run(
                 out.attempts
                     .push(crate::diagnostics::StageEOutcomeSnapshot::Err {
                         kind: reduce_error_kind(&e).to_string(),
+                        horizon_provider: crate::engine::horizon_provider_label(
+                            cand.horizon.provenance,
+                        ),
                     });
                 trace!(error = ?e, "Stage E: sight reduction failed");
             }
@@ -2386,5 +2389,90 @@ mod tests {
         // harness pulls it in and we don't accumulate unused
         // imports as future tests are added.
         let _ = Observer::default_dev();
+    }
+
+    /// Regression for the "`BelowHorizon` fix-frame geometry
+    /// mismatch" diagnosis (bris ROI "Horizon detection"): a
+    /// single fix-frame capture whose ml-gravity-sourced
+    /// horizon line rejects the body sight must surface
+    /// `horizon_provider == "ml-gravity"` on the Stage E
+    /// attempt snapshot, not an undifferentiated `BelowHorizon`
+    /// that could equally be a legitimate optical-provider
+    /// rejection. Before this fix `HorizonRecord` (and
+    /// therefore `PairCandidate`/the Err snapshot) dropped the
+    /// hypothesis's `HorizonProvenance` entirely, so this
+    /// attribution was structurally impossible.
+    #[test]
+    fn below_horizon_rejection_attributes_ml_gravity_provider() {
+        use super::super::queue::Storage;
+        use super::super::BodyDetection;
+        use crate::pipeline::horizon::{HorizonDetector, HorizonStageOutcome};
+        use bris_vision::{HorizonProvenance, Intrinsics};
+
+        const W: u32 = 320;
+        const H: u32 = 240;
+
+        let intr = Intrinsics::placeholder(W, H);
+        let tt = Tt::from_julian_date(JD_J2000);
+        let pixels = vec![30_000u16; (W * H) as usize];
+        let frame = bris_vision::Frame::new(W, H, pixels, tt, 1_000, intr).unwrap();
+
+        let mut storage = Storage::new(4);
+        let frame_id = FrameId(1);
+        storage.admit_frame(frame_id, tt, frame);
+
+        // A near-horizontal ml-gravity horizon line sitting at
+        // the very top of the frame — geometrically valid but
+        // deliberately positioned so a body near the frame's
+        // bottom (a normal, above-the-true-horizon body in a
+        // real capture) measures as below it, reproducing the
+        // "fix-frame geometry mismatch" failure mode.
+        let horizon_line = HorizonLine {
+            slope: 0.0,
+            intercept: 5.0,
+            inlier_count: 0,
+            candidate_count: 0,
+            residual_rms_px: 0.0,
+            altitude_sigma: Sigma::new(0.05).unwrap(),
+        };
+        let body = Centroid {
+            x: f64::from(W) / 2.0,
+            y: f64::from(H) - 5.0,
+            area_px: 20,
+            mean_intensity: 60_000.0,
+            position_sigma_px: Sigma::new(1.0).unwrap(),
+        };
+        storage.admit_records(
+            frame_id,
+            tt,
+            BodyDetection::Day(body, Vec::new()),
+            HorizonStageOutcome::Detected {
+                detector: HorizonDetector::MlGravity,
+                provenance: HorizonProvenance::MlGravity {
+                    model_id: "test-model",
+                    sigma_rad: 0.05,
+                },
+                line: horizon_line,
+                direct_sights: Vec::new(),
+            },
+        );
+
+        let mut window = SightWindow::default();
+        let cfg = EngineConfig::new(Observer::default_dev());
+        let outcome = run(&storage, &mut window, &cfg, None, false);
+
+        let below_horizon_attempt = outcome.attempts.iter().find_map(|a| match a {
+            crate::diagnostics::StageEOutcomeSnapshot::Err {
+                kind,
+                horizon_provider,
+            } if kind == "BelowHorizon" => Some(*horizon_provider),
+            _ => None,
+        });
+        assert_eq!(
+            below_horizon_attempt,
+            Some("ml-gravity"),
+            "expected a BelowHorizon rejection attributed to ml-gravity; got attempts: {:?}",
+            outcome.attempts
+        );
     }
 }

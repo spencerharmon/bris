@@ -157,6 +157,17 @@ pub(crate) struct HorizonRecord {
     /// directly for the participating bodies. Empty for
     /// purely-optical outcomes.
     pub(crate) direct_sights: Vec<bris_vision::DirectSight>,
+    /// Which provider produced this horizon. Retained so
+    /// Stage E can attribute a `BelowHorizon` (or any other)
+    /// sight-reduction rejection to the horizon's source —
+    /// otherwise a systematic geometry mismatch in one
+    /// provider (e.g. `ml-gravity` on a single fix-frame
+    /// capture, with no cross-frame averaging to smooth a bad
+    /// prediction) is indistinguishable in the diagnostics
+    /// from an ordinary "body genuinely below horizon"
+    /// rejection. See `docs/design/ml_gravity.md` and
+    /// `docs/design/artificial_horizon.md`.
+    pub(crate) provenance: bris_vision::HorizonProvenance,
 }
 
 /// Total-ordered, NaN-free σ used as priority-queue key.
@@ -592,6 +603,7 @@ fn horizon_record_from_outcome(
         HorizonStageOutcome::Detected {
             line,
             direct_sights,
+            provenance,
             ..
         } => {
             let sigma_key = SigmaKey::from_sigma(line.altitude_sigma);
@@ -601,6 +613,7 @@ fn horizon_record_from_outcome(
                 line,
                 sigma_key,
                 direct_sights,
+                provenance,
             })
         }
         HorizonStageOutcome::None => None,

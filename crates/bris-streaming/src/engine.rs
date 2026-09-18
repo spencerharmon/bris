@@ -255,6 +255,9 @@ struct EngineState {
     sights_evicted_total: u64,
     singular_geometry_rejections: u64,
     publication_gate_rejections: u64,
+    /// See
+    /// [`crate::EngineDiagnostics::ml_gravity_below_horizon_rejections`].
+    ml_gravity_below_horizon_rejections: u64,
     /// See [`crate::EngineDiagnostics::ap_rederive_suppressed_count`].
     ap_rederive_suppressed_count: u64,
     /// See [`crate::EngineDiagnostics::cross_frame_sights_emitted`].
@@ -370,7 +373,7 @@ fn body_centroid_snapshot(
 /// Stable provider label for diagnostics consumers (replay
 /// report, render overlay). Kept short so it reads cleanly on
 /// the overlay text block.
-fn horizon_provider_label(p: bris_vision::HorizonProvenance) -> &'static str {
+pub(crate) fn horizon_provider_label(p: bris_vision::HorizonProvenance) -> &'static str {
     use bris_vision::{HorizonProvenance, OpticalKind};
     match p {
         HorizonProvenance::Optical(OpticalKind::Gradient) => "gradient",
@@ -787,6 +790,7 @@ impl StreamingEngine {
                 sights_evicted_total: 0,
                 singular_geometry_rejections: 0,
                 publication_gate_rejections: 0,
+                ml_gravity_below_horizon_rejections: 0,
                 ap_rederive_suppressed_count: 0,
                 cross_frame_sights_emitted: 0,
                 sights_rejected_by_screener: 0,
@@ -1030,6 +1034,17 @@ impl StreamingEngine {
         state
             .last_stage_e_outcomes
             .clone_from(&stage_e_outcome.attempts);
+        for attempt in &stage_e_outcome.attempts {
+            if let crate::diagnostics::StageEOutcomeSnapshot::Err {
+                kind,
+                horizon_provider,
+            } = attempt
+            {
+                if kind == "BelowHorizon" && *horizon_provider == "ml-gravity" {
+                    state.ml_gravity_below_horizon_rejections += 1;
+                }
+            }
+        }
         // Cumulative counters from this Stage E pass.
         state.sights_inserted_total += stage_e_outcome.sights_inserted as u64;
         state.sights_evicted_total += stage_e_outcome.sights_evicted as u64;
@@ -1194,6 +1209,7 @@ impl StreamingEngine {
             sights_evicted_total: state.sights_evicted_total,
             singular_geometry_rejections: state.singular_geometry_rejections,
             publication_gate_rejections: state.publication_gate_rejections,
+            ml_gravity_below_horizon_rejections: state.ml_gravity_below_horizon_rejections,
             ap_rederive_suppressed_count: state.ap_rederive_suppressed_count,
             cross_frame_sights_emitted: state.cross_frame_sights_emitted,
             sights_rejected_by_screener: state.sights_rejected_by_screener,
