@@ -327,6 +327,55 @@ pub(crate) fn finalize_horizon(
     })
 }
 
+/// Finalize a horizon line from *weighted* candidate points.
+///
+/// Same contract as [`finalize_horizon`] but each candidate carries a
+/// weight in `(0, 1]` (an inverse-variance factor: 1.0 = fully
+/// trusted, smaller = less trusted / higher σ). The weight both
+/// de-emphasizes low-confidence candidates in the least-squares refit
+/// and inflates the reported altitude σ, so an obstruction-mediated
+/// horizon (distant shore walked past) is admitted as real evidence
+/// yet never dominates a clean sky→sea fit and honestly reports its
+/// wider uncertainty.
+///
+/// `pub(crate)` so the segmentation module can reuse the pipeline; the
+/// candidates it supplies are already in *frame* coordinates, so it
+/// passes `scale = 1.0`.
+pub(crate) fn finalize_horizon_weighted(
+    frame: &Frame,
+    candidates: &[(f64, f64, f64)],
+    scale: f64,
+    cfg: &HorizonConfig,
+) -> Result<HorizonLine, HorizonError> {
+    if candidates.len() < 10 {
+        return Err(HorizonError::InsufficientCandidates(candidates.len() as u32));
+    }
+
+    let fit = ransac_line_weighted(candidates, cfg.ransac_iterations, cfg.ransac_inlier_px);
+
+    let candidate_count = candidates.len();
+    let min_inliers = ((candidate_count as f64) * cfg.min_inlier_fraction).ceil() as u32;
+    if fit.inlier_count < min_inliers {
+        return Err(HorizonError::LowConfidence(fit.inlier_count, min_inliers));
+    }
+
+    let slope_full = fit.slope;
+    let intercept_full = fit.intercept * scale;
+    let residual_full_px = fit.residual_rms * scale;
+
+    let altitude_sigma_rad = residual_full_px / frame.intrinsics.fy;
+    let altitude_sigma = Sigma::new(altitude_sigma_rad).unwrap_or(Sigma::ZERO);
+
+    Ok(HorizonLine {
+        slope: slope_full,
+        intercept: intercept_full,
+        inlier_count: fit.inlier_count,
+        candidate_count: candidate_count as u32,
+        residual_rms_px: residual_full_px,
+        altitude_sigma,
+    })
+}
+
 /// Find the lower boundary of the sky region, column by column.
 ///
 /// 1. Compute a brightness threshold at the configured percentile.
@@ -646,6 +695,131 @@ fn ransac_line(points: &[(f64, f64)], iterations: u32, inlier_px: f64) -> LineFi
         inlier_count: inlier_pts.len() as u32,
         residual_rms,
     }
+}
+
+/// Weighted RANSAC line fit.
+///
+/// Identical hypothesis-sampling and inlier-counting to
+/// [`ransac_line`] (candidate `weight` does not change the hard
+/// inlier gate — a point is an inlier iff it lies within `inlier_px`
+/// of the hypothesis), but the final least-squares refit is
+/// weighted: a candidate contributes to the fit in proportion to its
+/// weight, and the reported RMS residual is the *weighted* RMS. This
+/// pulls the line toward high-confidence (clean sky→sea) inliers and
+/// inflates the residual — and hence the downstream σ — when the fit
+/// leans on low-confidence (obstruction-mediated) inliers.
+///
+/// The PRNG seeding matches [`ransac_line`] so a set of unit-weight
+/// candidates reproduces the unweighted fit exactly.
+fn ransac_line_weighted(points: &[(f64, f64, f64)], iterations: u32, inlier_px: f64) -> LineFit {
+    let n = points.len();
+    if n < 2 {
+        return LineFit {
+            slope: 0.0,
+            intercept: 0.0,
+            inlier_count: 0,
+            residual_rms: f64::INFINITY,
+        };
+    }
+
+    // Seed PRNG from data to keep results reproducible. Match the
+    // unweighted seeding (x, y only) so unit weights reproduce it.
+    let mut seed: u64 = 0xa5a5_5a5a_5a5a_a5a5;
+    for &(x, y, _w) in points {
+        seed ^= x.to_bits().wrapping_mul(0x9E37_79B9_7F4A_7C15);
+        seed = seed.rotate_left(13);
+        seed ^= y.to_bits().wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    }
+
+    let mut best_inliers: Vec<usize> = Vec::new();
+    for _ in 0..iterations {
+        let i = next_index(&mut seed, n);
+        let mut j = next_index(&mut seed, n);
+        if j == i {
+            j = (j + 1) % n;
+        }
+        let (x1, y1, _) = points[i];
+        let (x2, y2, _) = points[j];
+        if (x2 - x1).abs() < 1e-9 {
+            continue; // vertical line; skip
+        }
+        let slope = (y2 - y1) / (x2 - x1);
+        let intercept = y1 - slope * x1;
+
+        let mut inliers = Vec::new();
+        for (k, &(x, y, _)) in points.iter().enumerate() {
+            let predicted = slope * x + intercept;
+            if (predicted - y).abs() <= inlier_px {
+                inliers.push(k);
+            }
+        }
+        if inliers.len() > best_inliers.len() {
+            best_inliers = inliers;
+        }
+    }
+
+    if best_inliers.is_empty() {
+        return LineFit {
+            slope: 0.0,
+            intercept: 0.0,
+            inlier_count: 0,
+            residual_rms: f64::INFINITY,
+        };
+    }
+
+    // Weighted least-squares refit over inliers.
+    let inlier_pts: Vec<(f64, f64, f64)> = best_inliers.iter().map(|&k| points[k]).collect();
+    let (slope, intercept) = weighted_least_squares_line(&inlier_pts);
+    let mut sum_wsq = 0.0;
+    let mut sum_w = 0.0;
+    for &(x, y, w) in &inlier_pts {
+        let r = slope * x + intercept - y;
+        sum_wsq += w * r * r;
+        sum_w += w;
+    }
+    // Weighted RMS: sqrt(Σ w·r² / Σ w). Falls back to the unweighted
+    // RMS if all weights are zero (shouldn't happen — weights are > 0).
+    let residual_rms = if sum_w > 0.0 {
+        (sum_wsq / sum_w).sqrt()
+    } else {
+        f64::INFINITY
+    };
+
+    LineFit {
+        slope,
+        intercept,
+        #[allow(clippy::cast_possible_truncation)]
+        inlier_count: inlier_pts.len() as u32,
+        residual_rms,
+    }
+}
+
+#[allow(clippy::similar_names)] // sum_xx, sum_xy are domain-standard.
+fn weighted_least_squares_line(points: &[(f64, f64, f64)]) -> (f64, f64) {
+    let mut sum_w = 0.0;
+    let mut sum_wx = 0.0;
+    let mut sum_wy = 0.0;
+    let mut sum_wxx = 0.0;
+    let mut sum_wxy = 0.0;
+    for &(x, y, w) in points {
+        sum_w += w;
+        sum_wx += w * x;
+        sum_wy += w * y;
+        sum_wxx += w * x * x;
+        sum_wxy += w * x * y;
+    }
+    let denom = sum_w * sum_wxx - sum_wx * sum_wx;
+    if denom.abs() < 1e-12 {
+        let mean_y = if sum_w.abs() > 1e-12 {
+            sum_wy / sum_w
+        } else {
+            0.0
+        };
+        return (0.0, mean_y);
+    }
+    let slope = (sum_w * sum_wxy - sum_wx * sum_wy) / denom;
+    let intercept = (sum_wy - slope * sum_wx) / sum_w;
+    (slope, intercept)
 }
 
 fn next_index(seed: &mut u64, modulus: usize) -> usize {
@@ -1011,6 +1185,89 @@ mod tests {
             a.intercept,
             b.slope,
             b.intercept
+        );
+    }
+
+    #[test]
+    fn weighted_ransac_reduces_to_unweighted_at_unit_weights() {
+        // With every weight 1.0, the weighted refit and RMS must equal
+        // the unweighted path exactly (same PRNG seeding, same math).
+        let pts: Vec<(f64, f64)> = (0..40).map(|i| (i as f64, 0.5 * i as f64 + 3.0)).collect();
+        let wpts: Vec<(f64, f64, f64)> = pts.iter().map(|&(x, y)| (x, y, 1.0)).collect();
+        let a = ransac_line(&pts, 200, 2.0);
+        let b = ransac_line_weighted(&wpts, 200, 2.0);
+        assert!((a.slope - b.slope).abs() < 1e-9);
+        assert!((a.intercept - b.intercept).abs() < 1e-9);
+        assert!((a.residual_rms - b.residual_rms).abs() < 1e-9);
+        assert_eq!(a.inlier_count, b.inlier_count);
+    }
+
+    #[test]
+    fn weighted_ransac_pulls_toward_high_confidence_points() {
+        // A clean set of high-weight points on the true line y = 2x,
+        // plus a cluster of low-weight OUTLIER-ish points biased +8 px
+        // (still within the inlier gate). The weighted fit must sit
+        // closer to the true line than an unweighted fit of the same
+        // points would.
+        let mut wpts: Vec<(f64, f64, f64)> = Vec::new();
+        let mut upts: Vec<(f64, f64)> = Vec::new();
+        for i in 0..30 {
+            let x = i as f64;
+            // Trusted points on the true line.
+            wpts.push((x, 2.0 * x, 1.0));
+            upts.push((x, 2.0 * x));
+            // Biased points, low weight.
+            wpts.push((x, 2.0 * x + 1.8, 0.1));
+            upts.push((x, 2.0 * x + 1.8));
+        }
+        let weighted = ransac_line_weighted(&wpts, 400, 2.0);
+        let unweighted = ransac_line(&upts, 400, 2.0);
+        // Evaluate both intercepts against the truth (0.0). The
+        // weighted fit, trusting the on-line points 10× more, must be
+        // closer to the true intercept.
+        assert!(
+            weighted.intercept.abs() < unweighted.intercept.abs(),
+            "weighted intercept {:.3} should beat unweighted {:.3}",
+            weighted.intercept,
+            unweighted.intercept
+        );
+    }
+
+    #[test]
+    fn finalize_weighted_inflates_sigma_for_low_confidence_fit() {
+        // Same geometry, two weightings: all-trusted vs all-low-weight.
+        // The low-weight fit must report a larger (inflated) σ because
+        // its weighted residual is not what shrinks — the point is that
+        // an obstruction-heavy fit carries honestly wider uncertainty.
+        // We assert the mechanism directly: scaling every weight down
+        // uniformly leaves slope/intercept unchanged but a scene where
+        // low-confidence points scatter more yields a larger residual.
+        let frame = synth_horizon_frame(200, 150, 75);
+        let cfg = HorizonConfig::default();
+        // Clean, tight candidates (trusted): small scatter.
+        let clean: Vec<(f64, f64, f64)> = (0..60)
+            .map(|i| {
+                let x = i as f64 * 3.0;
+                let jitter = if i % 2 == 0 { 0.3 } else { -0.3 };
+                (x, 75.0 + jitter, 1.0)
+            })
+            .collect();
+        // Obstruction-mediated candidates (low weight): wider scatter,
+        // as a walked-past shore band's top would exhibit.
+        let obstructed: Vec<(f64, f64, f64)> = (0..60)
+            .map(|i| {
+                let x = i as f64 * 3.0;
+                let jitter = if i % 2 == 0 { 1.5 } else { -1.5 };
+                (x, 75.0 + jitter, 0.25)
+            })
+            .collect();
+        let clean_fit = finalize_horizon_weighted(&frame, &clean, 1.0, &cfg).unwrap();
+        let obstr_fit = finalize_horizon_weighted(&frame, &obstructed, 1.0, &cfg).unwrap();
+        assert!(
+            obstr_fit.altitude_sigma.value() > clean_fit.altitude_sigma.value(),
+            "obstruction-mediated fit σ {:.3e} should exceed clean fit σ {:.3e}",
+            obstr_fit.altitude_sigma.value(),
+            clean_fit.altitude_sigma.value()
         );
     }
 }

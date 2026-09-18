@@ -282,6 +282,16 @@ mod harness {
     pub struct TransitionCounts {
         pub col_sky_to_sea_min: u32,
         pub col_sky_to_obstr_to_sea_min: u32,
+        /// Minimum thick-shore-band columns walked past to sea below.
+        /// Optional so pre-existing cases (thin bands only) need not
+        /// declare it.
+        #[serde(default)]
+        pub col_sky_to_thick_obstr_to_sea_min: Option<u32>,
+        /// Minimum *total* obstruction-aware contribution (thin +
+        /// thick) — the load-bearing "roughly doubles the evidence"
+        /// assertion when a scene mixes band widths. Optional.
+        #[serde(default)]
+        pub col_obstruction_aware_min: Option<u32>,
         #[serde(default)]
         pub notes: Option<String>,
     }
@@ -734,21 +744,67 @@ mod harness {
         }
     }
 
-    /// Segmentation transition-count check. Currently a no-op stub:
-    /// the public API doesn't expose per-source candidate counts.
-    /// The schema lands first so cases can declare expectations; the
-    /// assertion will tighten when the API surfaces the counts.
+    /// Segmentation transition-count check. Segments the case's first
+    /// frame and asserts the per-source column counts the
+    /// obstruction-aware detector produces — the load-bearing property
+    /// that walking past shore/obstruction bands roughly doubles the
+    /// usable horizon evidence over a strict sky→sea-only detector.
+    ///
+    /// Skips (with an `eprintln!`) if the segmentation model file
+    /// isn't present, matching the other segmentation checks.
     #[cfg(feature = "segmentation")]
     pub fn check_segmentation_transition_counts(case: &CaseSpec) {
-        let _ = case
+        use bris_vision::{segment_with_rotation, segmentation_transition_counts};
+        let exp = case
             .segmentation
             .as_ref()
             .and_then(|s| s.transition_counts.as_ref())
             .expect("check_segmentation_transition_counts called without table");
-        eprintln!(
-            "segmentation transition-count check stubbed for {}",
-            case.case.name
+        if !ensure_segmentation_model_loaded() {
+            return;
+        }
+        let frame = load_case_frame(case, &first_frame_filename(case));
+        let path = frame
+            .source_path
+            .as_ref()
+            .expect("regression frame must carry a source path");
+        let mask = segment_with_rotation(path, frame.source_rotation)
+            .unwrap_or_else(|e| panic!("segment {}: {e}", case.case.name));
+        let counts = segmentation_transition_counts(&mask);
+
+        assert!(
+            counts.sky_to_sea >= exp.col_sky_to_sea_min,
+            "{}: expected ≥{} clean sky→sea columns, got {}",
+            case.case.name,
+            exp.col_sky_to_sea_min,
+            counts.sky_to_sea
         );
+        assert!(
+            counts.sky_to_obstr_to_sea >= exp.col_sky_to_obstr_to_sea_min,
+            "{}: expected ≥{} thin-obstruction→sea columns, got {}",
+            case.case.name,
+            exp.col_sky_to_obstr_to_sea_min,
+            counts.sky_to_obstr_to_sea
+        );
+        if let Some(min) = exp.col_sky_to_thick_obstr_to_sea_min {
+            assert!(
+                counts.sky_to_thick_obstr_to_sea >= min,
+                "{}: expected ≥{} thick-obstruction→sea columns, got {}",
+                case.case.name,
+                min,
+                counts.sky_to_thick_obstr_to_sea
+            );
+        }
+        let obstruction_aware = counts.sky_to_obstr_to_sea + counts.sky_to_thick_obstr_to_sea;
+        if let Some(min) = exp.col_obstruction_aware_min {
+            assert!(
+                obstruction_aware >= min,
+                "{}: expected ≥{} obstruction-aware columns, got {}",
+                case.case.name,
+                min,
+                obstruction_aware
+            );
+        }
     }
 
     #[cfg(not(feature = "segmentation"))]
