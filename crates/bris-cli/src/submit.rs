@@ -125,7 +125,18 @@ fn flush(queue: &SubmissionQueue, args: &SubmitArgs) -> anyhow::Result<()> {
              $BRIS_COLLECTOR_TOKEN."
         )
     })?;
-    let transport = HttpTransport::new(CollectorEndpoint::new(base_url, token));
+    // Attach the device UUID so a per-device token (minted by
+    // `bris devices register` / the Android on-device flow) is
+    // accepted: the collector's `device_or_admin_bearer` looks
+    // up the token hash by this header, not by the bearer alone.
+    // The shared admin token remains valid with no device UUID
+    // set (this CLI's default `cli-unset-device` placeholder is
+    // harmless there since the admin path never inspects it).
+    let mut endpoint = CollectorEndpoint::new(base_url, token);
+    if let Some(device_uuid) = &args.device_uuid {
+        endpoint = endpoint.with_device_uuid(device_uuid.clone());
+    }
+    let transport = HttpTransport::new(endpoint);
 
     let results = queue
         .drain_once(&transport)

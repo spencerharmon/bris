@@ -36,6 +36,12 @@ http-body-util = "0.1"
 mime = "0.3"
 sha2 = "0.10"
 hex = "0.4"
+serde_json = "1"
+# End-to-end acceptance test (collection-path-e2e): builds a
+# real bris-bundle v1 submission via the submitter code path and
+# POSTs it over a real loopback HTTP connection.
+bris-submit = { workspace = true, features = ["http"] }
+tokio = { version = "1", features = ["net"] }
 
 [lints]
 workspace = true
