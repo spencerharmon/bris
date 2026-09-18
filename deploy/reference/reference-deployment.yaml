@@ -1,0 +1,107 @@
+# bris-collector reference k8s spec fragment.
+#
+# INFRASTRUCTURE-AGNOSTIC REFERENCE ONLY. This documents the
+# ENV / MOUNT / PORT CONTRACT the flux Kustomization must satisfy,
+# using RFC2606 (example.com) and RFC5737 (192.0.2.0/24)
+# placeholders. It is NOT a deployable manifest: real image tags,
+# namespaces, hostnames, the storage class, the PVC size, the
+# Secret's actual token, and the retention window all live ONLY in
+# flux. Copy the *shape* — the env var names, the data-root mount
+# path, and the container port — into the real overlay.
+#
+# ── Contract summary ────────────────────────────────────────────
+#   Container port : 8443            (matches `bind` in the config)
+#   Data-root mount: /var/lib/bris-collector
+#                    (matches `data_root`; back it with a PVC)
+#   Config file    : /etc/bris-collector/collector.toml
+#                    (mount collector.reference.toml via a ConfigMap;
+#                     point BRIS_COLLECTOR_CONFIG at it)
+#   Env vars       : BRIS_COLLECTOR_CONFIG        -> config file path
+#                    BRIS_COLLECTOR_DATA_ROOT     -> data-root mount
+#                    BRIS_COLLECTOR_BIND          -> "0.0.0.0:8443"
+#                    BRIS_COLLECTOR_BEARER_TOKEN  -> from a Secret
+#                    BRIS_COLLECTOR_MAX_SUBMISSION_BYTES (optional)
+#                    BRIS_COLLECTOR_RETENTION_DAYS       (optional)
+# ────────────────────────────────────────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: bris-collector
+  # namespace: set in flux
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: bris-collector
+  template:
+    metadata:
+      labels:
+        app: bris-collector
+    spec:
+      containers:
+        - name: bris-collector
+          # image: set in flux (e.g. registry.example.com/bris-collector:TAG)
+          image: registry.example.com/bris-collector:REPLACE_ME
+          args: ["serve"]
+          ports:
+            - name: https
+              containerPort: 8443   # must match the port in `bind`
+          env:
+            # Point the binary at the mounted config file.
+            - name: BRIS_COLLECTOR_CONFIG
+              value: /etc/bris-collector/collector.toml
+            # The data-root MUST equal the volume mountPath below.
+            - name: BRIS_COLLECTOR_DATA_ROOT
+              value: /var/lib/bris-collector
+            - name: BRIS_COLLECTOR_BIND
+              value: "0.0.0.0:8443"
+            # The admin/bootstrap token comes from a Secret. The
+            # binary refuses to start without it.
+            - name: BRIS_COLLECTOR_BEARER_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: bris-collector-admin-token   # created in flux
+                  key: bearer-token
+          volumeMounts:
+            # Submissions store. Back this with a PVC in flux.
+            - name: data
+              mountPath: /var/lib/bris-collector
+            # The config file, mounted read-only from a ConfigMap.
+            - name: config
+              mountPath: /etc/bris-collector
+              readOnly: true
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: https
+              scheme: HTTPS
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: https
+              scheme: HTTPS
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: bris-collector-data   # defined in flux
+        - name: config
+          configMap:
+            # ConfigMap built from collector.reference.toml (filled
+            # in) in flux, keyed `collector.toml`.
+            name: bris-collector-config
+            items:
+              - key: collector.toml
+                path: collector.toml
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: bris-collector
+  # namespace: set in flux
+spec:
+  selector:
+    app: bris-collector
+  ports:
+    - name: https
+      port: 443
+      targetPort: https   # -> containerPort 8443
