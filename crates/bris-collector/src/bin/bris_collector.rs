@@ -55,7 +55,9 @@ async fn main() -> anyhow::Result<()> {
 async fn serve() -> anyhow::Result<()> {
     let config = Config::from_env().map_err(anyhow::Error::msg)?;
     if config.bearer_token.is_empty() {
-        anyhow::bail!("BRIS_COLLECTOR_BEARER_TOKEN must be set; refusing to start without auth");
+        anyhow::bail!(
+            "BRIS_COLLECTOR_BEARER_TOKEN (admin/bootstrap token) must be set; refusing to start without auth"
+        );
     }
 
     tracing::info!(

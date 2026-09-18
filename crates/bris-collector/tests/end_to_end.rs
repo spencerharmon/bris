@@ -704,3 +704,177 @@ async fn pbris_log_and_calibration_media_land_off_media_dir() {
         "pbris.log must not also be duplicated under media/"
     );
 }
+
+#[tokio::test]
+async fn device_register_requires_admin_token() {
+    let state = test_state("admin-token");
+    let app = build_app(state);
+
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/devices/register")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(
+            serde_json::json!({ "device_uuid": "01HXYZTESTDEVICE0000000001" }).to_string(),
+        ))
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn device_register_then_submit_with_per_device_token() {
+    let state = test_state("admin-token");
+    let data_root = state.config.data_root.clone();
+    let app = build_app(state);
+
+    // First contact: register the device using the admin/bootstrap
+    // token compiled into the device, obtaining a per-device token.
+    let register_req = Request::builder()
+        .method("POST")
+        .uri("/v1/devices/register")
+        .header(header::AUTHORIZATION, "Bearer admin-token")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(
+            serde_json::json!({ "device_uuid": "01HXYZTESTDEVICE0000000001" }).to_string(),
+        ))
+        .unwrap();
+    let register_resp = app.clone().oneshot(register_req).await.unwrap();
+    assert_eq!(register_resp.status(), StatusCode::OK);
+    let register_body = register_resp
+        .into_body()
+        .collect()
+        .await
+        .unwrap()
+        .to_bytes();
+    let register_json: serde_json::Value = serde_json::from_slice(&register_body).unwrap();
+    let device_token = register_json["token"]
+        .as_str()
+        .expect("token field")
+        .to_owned();
+    assert_ne!(device_token, "admin-token");
+    assert_eq!(register_json["device_uuid"], "01HXYZTESTDEVICE0000000001");
+
+    // Subsequent submission uses the per-device token plus the
+    // device-identifying header instead of the admin token.
+    let frame_bytes: Vec<u8> = (0u32..1024)
+        .map(|i| u8::try_from(i % 256).unwrap())
+        .collect();
+    let manifest = fix_manifest_json("frame_0001.png", frame_bytes.len() as u64);
+    let body_bytes = multipart_body(&[
+        ("manifest", "application/json", manifest.as_bytes()),
+        ("frame_0001.png", "image/png", &frame_bytes),
+    ]);
+    let submit_req = Request::builder()
+        .method("POST")
+        .uri("/v1/submissions")
+        .header(header::AUTHORIZATION, format!("Bearer {device_token}"))
+        .header("x-bris-device-uuid", "01HXYZTESTDEVICE0000000001")
+        .header(
+            header::CONTENT_TYPE,
+            format!("multipart/form-data; boundary={BOUNDARY}"),
+        )
+        .body(Body::from(body_bytes))
+        .unwrap();
+    let submit_resp = app.clone().oneshot(submit_req).await.unwrap();
+    assert_eq!(
+        submit_resp.status(),
+        StatusCode::OK,
+        "body={:?}",
+        String::from_utf8_lossy(&submit_resp.into_body().collect().await.unwrap().to_bytes())
+    );
+
+    let day_dir = data_root.join("submissions/2026/05/13");
+    assert!(
+        day_dir.exists(),
+        "submission via per-device token should land on disk"
+    );
+
+    // The admin token continues to work for review/admin
+    // endpoints (list) -- it is never replaced, only supplemented
+    // by the per-device flow.
+    let list_resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/v1/submissions")
+                .header(header::AUTHORIZATION, "Bearer admin-token")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(list_resp.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn submission_rejects_wrong_device_token() {
+    let state = test_state("admin-token");
+    let app = build_app(state);
+
+    // Register device A, then try to submit as device A using an
+    // unrelated (unregistered) bearer token -- must be rejected.
+    let register_req = Request::builder()
+        .method("POST")
+        .uri("/v1/devices/register")
+        .header(header::AUTHORIZATION, "Bearer admin-token")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(
+            serde_json::json!({ "device_uuid": "01HXYZTESTDEVICE0000000001" }).to_string(),
+        ))
+        .unwrap();
+    let register_resp = app.clone().oneshot(register_req).await.unwrap();
+    assert_eq!(register_resp.status(), StatusCode::OK);
+
+    let frame_bytes: Vec<u8> = (0u32..1024)
+        .map(|i| u8::try_from(i % 256).unwrap())
+        .collect();
+    let manifest = fix_manifest_json("frame_0001.png", frame_bytes.len() as u64);
+    let body_bytes = multipart_body(&[
+        ("manifest", "application/json", manifest.as_bytes()),
+        ("frame_0001.png", "image/png", &frame_bytes),
+    ]);
+    let submit_req = Request::builder()
+        .method("POST")
+        .uri("/v1/submissions")
+        .header(header::AUTHORIZATION, "Bearer totally-wrong-token")
+        .header("x-bris-device-uuid", "01HXYZTESTDEVICE0000000001")
+        .header(
+            header::CONTENT_TYPE,
+            format!("multipart/form-data; boundary={BOUNDARY}"),
+        )
+        .body(Body::from(body_bytes))
+        .unwrap();
+    let submit_resp = app.oneshot(submit_req).await.unwrap();
+    assert_eq!(submit_resp.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn submission_rejects_unregistered_device_uuid() {
+    let state = test_state("admin-token");
+    let app = build_app(state);
+
+    let frame_bytes: Vec<u8> = (0u32..1024)
+        .map(|i| u8::try_from(i % 256).unwrap())
+        .collect();
+    let manifest = fix_manifest_json("frame_0001.png", frame_bytes.len() as u64);
+    let body_bytes = multipart_body(&[
+        ("manifest", "application/json", manifest.as_bytes()),
+        ("frame_0001.png", "image/png", &frame_bytes),
+    ]);
+    let submit_req = Request::builder()
+        .method("POST")
+        .uri("/v1/submissions")
+        .header(
+            header::AUTHORIZATION,
+            "Bearer some-token-that-was-never-issued",
+        )
+        .header("x-bris-device-uuid", "01HXYZTESTDEVICE0000000099")
+        .header(
+            header::CONTENT_TYPE,
+            format!("multipart/form-data; boundary={BOUNDARY}"),
+        )
+        .body(Body::from(body_bytes))
+        .unwrap();
+    let submit_resp = app.oneshot(submit_req).await.unwrap();
+    assert_eq!(submit_resp.status(), StatusCode::UNAUTHORIZED);
+}

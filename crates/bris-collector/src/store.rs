@@ -8,9 +8,17 @@
 use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Datelike, Duration, Utc};
+use rand::RngCore;
 use rusqlite::{params, Connection};
+use sha2::{Digest, Sha256};
 
+use crate::auth::constant_time_eq;
 use crate::manifest::Manifest;
+
+/// Number of random bytes in a freshly-minted per-device token,
+/// hex-encoded to a 64-character string. 256 bits of entropy —
+/// comfortably infeasible to guess or brute-force.
+const DEVICE_TOKEN_BYTES: usize = 32;
 
 /// Name of the sidecar file written into a submission directory
 /// when it is soft-deleted. Its contents are the RFC3339
@@ -91,6 +99,11 @@ impl Store {
                  ON submissions (kind);
              CREATE INDEX IF NOT EXISTS idx_device_uuid
                  ON submissions (device_uuid);
+             CREATE TABLE IF NOT EXISTS devices (
+                 device_uuid TEXT PRIMARY KEY,
+                 token_hash TEXT NOT NULL,
+                 issued_at TEXT NOT NULL
+             );
              ",
         )?;
         Ok(())
@@ -215,6 +228,77 @@ impl Store {
             ],
         )?;
         Ok(final_dir)
+    }
+
+    /// First-contact device registration: mint a fresh
+    /// per-device bearer token, persist only its SHA-256 hash
+    /// (never the token itself) keyed by `device_uuid`, and
+    /// return the raw token to hand back to the caller — the one
+    /// and only time it exists outside the device's own memory.
+    ///
+    /// Idempotent-by-rotation: calling this again for an
+    /// already-registered device mints and persists a *new*
+    /// token, immediately invalidating the old one (an admin-
+    /// token-authenticated caller re-registering a device is
+    /// treated as an explicit rotation, e.g. after a suspected
+    /// leak — never silently returns the previous token, since
+    /// the previous raw token is not retrievable anyway).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError::Sqlite`] on an index failure.
+    pub fn register_device(&self, device_uuid: &str) -> Result<String, StoreError> {
+        let mut token_bytes = [0u8; DEVICE_TOKEN_BYTES];
+        rand::rng().fill_bytes(&mut token_bytes);
+        let token = hex::encode(token_bytes);
+        let token_hash = hex::encode(Sha256::digest(token.as_bytes()));
+        let issued_at = Utc::now().to_rfc3339();
+
+        let conn = self.index.lock().expect("index mutex poisoned");
+        conn.execute(
+            "INSERT INTO devices (device_uuid, token_hash, issued_at)
+             VALUES (?, ?, ?)
+             ON CONFLICT(device_uuid) DO UPDATE SET
+                 token_hash = excluded.token_hash,
+                 issued_at = excluded.issued_at",
+            params![device_uuid, token_hash, issued_at],
+        )?;
+        Ok(token)
+    }
+
+    /// Verify a bearer token presented for `device_uuid` against
+    /// the hash persisted by [`Self::register_device`]. Hashes
+    /// the presented token and compares the two hashes in
+    /// constant time — an unregistered device (no row) always
+    /// returns `Ok(false)` rather than erroring, so a probing
+    /// caller can't distinguish "unregistered" from "wrong token"
+    /// by timing or error shape.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError::Sqlite`] on an index failure other
+    /// than "no such device".
+    pub fn verify_device_token(&self, device_uuid: &str, token: &str) -> Result<bool, StoreError> {
+        let stored_hash: Option<String> = {
+            let conn = self.index.lock().expect("index mutex poisoned");
+            match conn.query_row(
+                "SELECT token_hash FROM devices WHERE device_uuid = ?",
+                [device_uuid],
+                |r| r.get(0),
+            ) {
+                Ok(hash) => Some(hash),
+                Err(rusqlite::Error::QueryReturnedNoRows) => None,
+                Err(e) => return Err(StoreError::Sqlite(e)),
+            }
+        };
+        let Some(stored_hash) = stored_hash else {
+            return Ok(false);
+        };
+        let presented_hash = hex::encode(Sha256::digest(token.as_bytes()));
+        Ok(constant_time_eq(
+            presented_hash.as_bytes(),
+            stored_hash.as_bytes(),
+        ))
     }
 
     /// Filesystem root.
@@ -495,5 +579,43 @@ mod tests {
         assert_eq!(sanitize_filename("../etc/passwd"), "etc_passwd");
         assert_eq!(sanitize_filename("a/b\\c"), "a_b_c");
         assert_eq!(sanitize_filename("normal.png"), "normal.png");
+    }
+
+    #[test]
+    fn register_device_issues_token_verifiable_only_with_correct_uuid_and_token() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let store = Store::open(tmp.path()).expect("store open");
+
+        let token = store.register_device("device-a").expect("register_device");
+        assert!(!token.is_empty());
+
+        assert!(store
+            .verify_device_token("device-a", &token)
+            .expect("verify"));
+        assert!(!store
+            .verify_device_token("device-a", "wrong-token")
+            .expect("verify"));
+        assert!(!store
+            .verify_device_token("device-b", &token)
+            .expect("verify: unregistered device"));
+    }
+
+    #[test]
+    fn register_device_rotates_and_invalidates_the_prior_token() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let store = Store::open(tmp.path()).expect("store open");
+
+        let first = store.register_device("device-a").expect("register_device");
+        let second = store
+            .register_device("device-a")
+            .expect("register_device (rotation)");
+
+        assert_ne!(first, second);
+        assert!(!store
+            .verify_device_token("device-a", &first)
+            .expect("verify"));
+        assert!(store
+            .verify_device_token("device-a", &second)
+            .expect("verify"));
     }
 }

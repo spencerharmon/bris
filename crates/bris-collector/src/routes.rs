@@ -3,11 +3,17 @@
 //! Endpoints:
 //!
 //! - `GET  /v1/healthz` — liveness, no auth.
+//! - `POST /v1/devices/register` — first-contact device
+//!   registration; issues a per-device bearer token. Auth:
+//!   admin/bootstrap token.
 //! - `POST /v1/submissions` — multipart-form submission.
-//!   Auth: bearer token.
+//!   Auth: per-device bearer token (with the
+//!   `X-Bris-Device-Uuid` header) or the admin/bootstrap token.
 //! - `GET  /v1/submissions` — list submissions (index-mirror
-//!   query). Auth: bearer token. Spike-grade: no pagination,
-//!   capped at 200 most-recent rows.
+//!   query). Auth: admin/bootstrap token. Spike-grade: no
+//!   pagination, capped at 200 most-recent rows.
+//!
+//! See [`crate::auth`] for the two-token model.
 //!
 //! Review-UI endpoints (download manifest, download a media
 //! file) are tracked as follow-ups; the spike's review tooling
@@ -24,10 +30,10 @@ use axum::middleware;
 use axum::response::{IntoResponse, Json, Response};
 use axum::routing::{get, post};
 use axum::Router;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 
-use crate::auth::bearer;
+use crate::auth::{bearer, device_or_admin_bearer, hashed_device_id};
 use crate::config::Config;
 use crate::manifest::Manifest;
 use crate::store::Store;
@@ -45,21 +51,39 @@ pub struct AppState {
 ///
 /// Public so integration tests can mount the app in-process
 /// against a tempdir store.
+///
+/// Two distinct auth layers, applied per route group (never one
+/// blanket layer over the whole router):
+/// - `POST /v1/submissions` accepts the admin/bootstrap token OR
+///   a per-device token (see [`device_or_admin_bearer`]).
+/// - Every other non-public endpoint — device registration and
+///   the review/admin surface (list, get manifest, get media) —
+///   requires the admin/bootstrap token ([`bearer`]).
 pub fn build_app(state: Arc<AppState>) -> Router {
     let body_limit = state.config.max_submission_bytes;
-    Router::new()
-        .route("/v1/healthz", get(healthz))
-        .route(
-            "/v1/submissions",
-            post(post_submission).get(list_submissions),
-        )
+
+    let device_submission_routes = Router::new()
+        .route("/v1/submissions", post(post_submission))
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            device_or_admin_bearer,
+        ));
+
+    let admin_routes = Router::new()
+        .route("/v1/devices/register", post(register_device))
+        .route("/v1/submissions", get(list_submissions))
         .route("/v1/submissions/:id", get(get_submission_manifest))
         .route(
             "/v1/submissions/:id/media/:filename",
             get(get_submission_media),
         )
+        .route_layer(middleware::from_fn_with_state(state.clone(), bearer));
+
+    Router::new()
+        .route("/v1/healthz", get(healthz))
+        .merge(device_submission_routes)
+        .merge(admin_routes)
         .layer(DefaultBodyLimit::max(body_limit))
-        .layer(middleware::from_fn_with_state(state.clone(), bearer))
         .with_state(state)
 }
 
@@ -67,6 +91,59 @@ pub fn build_app(state: Arc<AppState>) -> Router {
 /// `docker compose healthcheck` is trivial to wire.
 async fn healthz() -> &'static str {
     "ok"
+}
+
+/// `POST /v1/devices/register` — first-contact device
+/// registration. Admin/bootstrap-token authenticated (see
+/// [`crate::auth::bearer`]): a device flashed with the shared
+/// bootstrap token calls this once to obtain its own per-device
+/// token, which it then uses for every subsequent
+/// `POST /v1/submissions` instead of the shared token. Calling
+/// this again for an already-registered `device_uuid` rotates
+/// the token (see [`Store::register_device`]).
+async fn register_device(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<DeviceRegisterRequest>,
+) -> Result<Json<DeviceRegisterResponse>, ErrorResponse> {
+    if req.device_uuid.trim().is_empty() {
+        return Err(ErrorResponse::bad_request(
+            "device_uuid must not be empty".to_owned(),
+        ));
+    }
+    let token = state.store.register_device(&req.device_uuid).map_err(|e| {
+        warn!(
+            device = %hashed_device_id(&req.device_uuid),
+            error = %e,
+            "register_device failed"
+        );
+        ErrorResponse::internal(format!("register_device: {e}"))
+    })?;
+    info!(
+        device = %hashed_device_id(&req.device_uuid),
+        "device registered; per-device token issued"
+    );
+    Ok(Json(DeviceRegisterResponse {
+        device_uuid: req.device_uuid,
+        token,
+    }))
+}
+
+/// Request body for `POST /v1/devices/register`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct DeviceRegisterRequest {
+    /// The device's stable per-install UUID (the same value that
+    /// lands in every submission's `manifest.device.uuid`).
+    pub device_uuid: String,
+}
+
+/// Response body for `POST /v1/devices/register`.
+#[derive(Debug, Clone, Serialize)]
+pub struct DeviceRegisterResponse {
+    /// Echoes the registered UUID.
+    pub device_uuid: String,
+    /// The freshly-minted per-device bearer token. Returned only
+    /// this once — the collector persists only its hash.
+    pub token: String,
 }
 
 /// `POST /v1/submissions` — accept a multipart form. One part
@@ -134,6 +211,7 @@ async fn post_submission(
     info!(
         submission_id = %id,
         kind = ?manifest.submission_kind,
+        device = %hashed_device_id(&manifest.device.uuid),
         files = files.len(),
         path = %dir.display(),
         "submission accepted"

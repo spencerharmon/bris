@@ -9,9 +9,17 @@
 //!   filesystem store. Required. Created if it does not exist.
 //! - `BRIS_COLLECTOR_BIND` — `host:port` to bind to. Default
 //!   `0.0.0.0:8443`.
-//! - `BRIS_COLLECTOR_BEARER_TOKEN` — shared bearer token
-//!   accepted on submissions. Required in production; tests
-//!   bypass auth by constructing the [`Config`] directly.
+//! - `BRIS_COLLECTOR_BEARER_TOKEN` — the admin/bootstrap token.
+//!   Compiled into every device at flash time; a device uses it
+//!   exactly once, to call `POST /v1/devices/register` and
+//!   obtain its own per-device token, then authenticates every
+//!   subsequent submission with that per-device token instead
+//!   (see `bris_collector::auth`). The admin token also
+//!   continues to authorize every review/admin endpoint (list,
+//!   get manifest, get media) and remains accepted on
+//!   `POST /v1/submissions` for operator tooling. Required in
+//!   production; tests bypass auth by constructing the
+//!   [`Config`] directly.
 //! - `BRIS_COLLECTOR_MAX_SUBMISSION_BYTES` — request body
 //!   ceiling, in bytes. Default 512 MiB.
 
@@ -26,8 +34,10 @@ pub struct Config {
     pub data_root: PathBuf,
     /// Bind address.
     pub bind: String,
-    /// Shared bearer token expected in `Authorization: Bearer
-    /// <token>`. Empty disables auth (test-only; the binary
+    /// Admin/bootstrap token expected in `Authorization: Bearer
+    /// <token>` on device registration, the review/admin
+    /// endpoints, and (for backward-compatible operator tooling)
+    /// submissions. Empty disables auth (test-only; the binary
     /// refuses to start if empty).
     pub bearer_token: String,
     /// Maximum request body size, in bytes.

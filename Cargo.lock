@@ -619,6 +619,7 @@ dependencies = [
  "hex",
  "http-body-util",
  "mime",
+ "rand 0.9.4",
  "rusqlite",
  "serde",
  "serde_json",
