@@ -251,11 +251,20 @@ Manifest schema (v1):
   "debug_capture": { ... }, // populated when kind = "debug_capture"
   "media": [
     { "filename": "frame_0001.png", "role": "fix_frame",
-      "frame_index": 1, "captured_at": "...", "size_bytes": ... },
+      "frame_index": 1, "captured_at": "...", "size_bytes": ...,
+      "checksum_blake3": "..." },
     ...
   ]
 }
 ```
+
+Every `media[]` entry carries `checksum_blake3` — a lowercase-hex
+BLAKE3 digest of the raw file — in addition to `size_bytes`. It
+is required, never empty, and the collector verifies it against
+the bytes actually received on every ingest (not merely the
+size), rejecting a mismatch with 400. This is what lets a stored
+submission be *proven*, not merely assumed, byte-identical to
+what the device captured.
 
 The `fix` / `calibration` / `debug_capture` sub-objects hold
 the kind-specific payload (e.g. `fix` contains lat/lon, the
@@ -292,13 +301,36 @@ collector.log               # operator log; no PII
 `index.sqlite` mirrors a flat row per submission (id,
 submitted_at, captured_at, kind, device_uuid, app_version,
 bris_core_version, has_gps, note_present, soft_deleted_at).
-Rebuildable from the manifests; treated as a cache.
+Rebuildable from the manifests; treated as a cache. Run
+`bris-collector reindex` to rebuild it from scratch by walking
+`submissions/**/manifest.json` (and any `deleted.json`
+sidecars) — the operator-driven repair path for a lost,
+corrupted, or drifted index (e.g. after a crash between a
+submission's rename-into-place and its index insert).
 
-Soft-delete: setting `soft_deleted_at` in the manifest and the
-mirror row hides the submission from the default review UI;
-files remain on disk for the retention window (default 30 days,
-configurable). Hard-delete after the window is a separate
-explicit operator action.
+Ingest is crash-safe: a submission is fully assembled (manifest
++ media written, sizes and BLAKE3 checksums verified) in a
+private staging directory under `<data-root>/tmp/<id>/` and
+only becomes visible at its final `submissions/.../  <id>/` path
+via a single atomic `rename(2)`. A crash before the rename
+leaves nothing at the final path and only an orphaned staging
+directory, cleaned up with `bris-collector sweep-tmp`. The
+SQLite insert happens only after the rename succeeds; a crash
+between rename and insert is repaired with `bris-collector
+reindex`.
+
+Soft-delete: `bris-collector soft-delete <id>` writes a sidecar
+`deleted.json` (with the UTC timestamp) next to the submission's
+`manifest.json` — the manifest itself is never rewritten — and
+flips `soft_deleted_at` in the mirror row, hiding the submission
+from the default review UI. Files remain on disk for the
+retention window (default 30 days, configurable via
+`--retention-days`). Hard-delete after the window is a separate,
+explicit operator action: `bris-collector retention-sweep
+[--retention-days N] [--dry-run]`. Neither soft-delete nor
+retention-sweep ever runs implicitly — not at startup, not as a
+deploy side effect, not from the HTTP surface — precisely
+because submitted captures are precious primary data.
 
 ## Security and privacy posture
 

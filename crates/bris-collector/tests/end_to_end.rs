@@ -55,7 +55,7 @@ fn multipart_body(parts: &[(&str, &str, &[u8])]) -> Vec<u8> {
     body
 }
 
-fn fix_manifest_json(media_filename: &str, media_size: u64) -> String {
+fn fix_manifest_json(media_filename: &str, media_size: u64, checksum_blake3: &str) -> String {
     serde_json::json!({
         "schema_version": 1,
         "submission_kind": "fix",
@@ -84,6 +84,7 @@ fn fix_manifest_json(media_filename: &str, media_size: u64) -> String {
                 "size_bytes": media_size,
                 "frame_index": 1,
                 "captured_at": "2026-05-13T14:18:55.123Z",
+                "checksum_blake3": checksum_blake3,
             }
         ],
     })
@@ -117,7 +118,8 @@ async fn submission_round_trip_lands_on_disk_and_in_index() {
     let frame_bytes: Vec<u8> = (0u32..1024)
         .map(|i| u8::try_from(i % 256).unwrap())
         .collect();
-    let manifest = fix_manifest_json("frame_0001.png", frame_bytes.len() as u64);
+    let checksum = blake3::hash(&frame_bytes).to_hex().to_string();
+    let manifest = fix_manifest_json("frame_0001.png", frame_bytes.len() as u64, &checksum);
     let body_bytes = multipart_body(&[
         ("manifest", "application/json", manifest.as_bytes()),
         ("frame_0001.png", "image/png", &frame_bytes),
@@ -197,7 +199,8 @@ async fn rejects_size_mismatch() {
     let state = test_state("test-token");
     let app = build_app(state);
     // Manifest declares size_bytes = 1024, actual file is 10 bytes.
-    let manifest = fix_manifest_json("frame_0001.png", 1024);
+    let checksum = blake3::hash(&[0u8; 10]).to_hex().to_string();
+    let manifest = fix_manifest_json("frame_0001.png", 1024, &checksum);
     let body_bytes = multipart_body(&[
         ("manifest", "application/json", manifest.as_bytes()),
         ("frame_0001.png", "image/png", &[0u8; 10]),
@@ -217,6 +220,36 @@ async fn rejects_size_mismatch() {
     let body = resp.into_body().collect().await.unwrap().to_bytes();
     let s = String::from_utf8_lossy(&body);
     assert!(s.contains("size mismatch"), "body was: {s}");
+}
+
+#[tokio::test]
+async fn rejects_checksum_mismatch() {
+    let state = test_state("test-token");
+    let app = build_app(state);
+    // Manifest declares a checksum that does not match the
+    // actual uploaded bytes, even though size_bytes agrees.
+    let frame_bytes = [7u8; 32];
+    let wrong_checksum = blake3::hash(b"not the frame bytes").to_hex().to_string();
+    let manifest = fix_manifest_json("frame_0001.png", frame_bytes.len() as u64, &wrong_checksum);
+    let body_bytes = multipart_body(&[
+        ("manifest", "application/json", manifest.as_bytes()),
+        ("frame_0001.png", "image/png", &frame_bytes),
+    ]);
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/submissions")
+        .header(header::AUTHORIZATION, "Bearer test-token")
+        .header(
+            header::CONTENT_TYPE,
+            format!("multipart/form-data; boundary={BOUNDARY}"),
+        )
+        .body(Body::from(body_bytes))
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    let s = String::from_utf8_lossy(&body);
+    assert!(s.contains("checksum mismatch"), "body was: {s}");
 }
 
 #[tokio::test]
@@ -264,7 +297,11 @@ async fn get_manifest_and_media_round_trip() {
     let frame_bytes: Vec<u8> = (0u32..256)
         .map(|i| u8::try_from(i % 256).unwrap())
         .collect();
-    let manifest = fix_manifest_json("frame_0001.png", frame_bytes.len() as u64);
+    let manifest = fix_manifest_json(
+        "frame_0001.png",
+        frame_bytes.len() as u64,
+        blake3::hash(&frame_bytes).to_hex().as_str(),
+    );
     let body_bytes = multipart_body(&[
         ("manifest", "application/json", manifest.as_bytes()),
         ("frame_0001.png", "image/png", &frame_bytes),

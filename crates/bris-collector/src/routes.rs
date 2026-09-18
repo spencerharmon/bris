@@ -29,7 +29,7 @@ use tracing::{info, warn};
 
 use crate::auth::bearer;
 use crate::config::Config;
-use crate::manifest::Manifest;
+use crate::manifest::{Manifest, ReceivedFile};
 use crate::store::Store;
 
 /// Shared state for handlers.
@@ -105,13 +105,24 @@ async fn post_submission(
     let manifest: Manifest = serde_json::from_slice(&manifest_bytes)
         .map_err(|e| ErrorResponse::bad_request(format!("manifest parse: {e}")))?;
 
-    // Cross-check declared media against uploaded files.
-    let sizes: HashMap<String, u64> = files
+    // Cross-check declared media against uploaded files: size
+    // AND a BLAKE3 checksum of the bytes actually received, so
+    // ingest proves the stored bytes are exactly what the
+    // device captured (not merely the right length).
+    let received: HashMap<String, ReceivedFile> = files
         .iter()
-        .map(|(name, bytes)| (name.clone(), bytes.len() as u64))
+        .map(|(name, bytes)| {
+            (
+                name.clone(),
+                ReceivedFile {
+                    size_bytes: bytes.len() as u64,
+                    checksum_blake3: blake3::hash(bytes).to_hex().to_string(),
+                },
+            )
+        })
         .collect();
     manifest
-        .validate(&sizes)
+        .validate(&received)
         .map_err(|e| ErrorResponse::bad_request(format!("manifest validate: {e}")))?;
 
     let id = ulid::Ulid::new().to_string();

@@ -606,7 +606,9 @@ version = "0.0.1"
 dependencies = [
  "anyhow",
  "axum",
+ "blake3",
  "chrono",
+ "clap",
  "http-body-util",
  "mime",
  "rusqlite",

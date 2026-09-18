@@ -119,6 +119,12 @@ pub struct MediaItem {
     /// Size in bytes (denormalized; collector verifies on
     /// receive).
     pub size_bytes: u64,
+    /// BLAKE3 checksum of the raw file, lowercase hex. Required
+    /// so the collector can prove on ingest (and any later
+    /// re-verification) that the bytes it stored are exactly
+    /// the bytes the device captured — the durable-store
+    /// invariant depends on this, not merely on size agreeing.
+    pub checksum_blake3: String,
 }
 
 /// Validation errors against a received manifest.
@@ -154,18 +160,49 @@ pub enum ManifestError {
         /// What the uploaded part actually was.
         received: u64,
     },
+    /// A media item's checksum disagrees with the uploaded
+    /// part's actual BLAKE3 hash.
+    #[error("media checksum mismatch for {filename}: manifest={manifest}, computed={computed}")]
+    ChecksumMismatch {
+        /// The disputed filename.
+        filename: String,
+        /// What the manifest declared.
+        manifest: String,
+        /// What the collector computed from the received bytes.
+        computed: String,
+    },
+    /// A media item declared an empty checksum. Empty is never
+    /// treated as "absent" here — `checksum_blake3` is a
+    /// required field, unlike `bris-bundle`'s optional
+    /// first-frame checksum.
+    #[error("media item {filename} has an empty checksum_blake3")]
+    EmptyChecksum {
+        /// The offending filename.
+        filename: String,
+    },
+}
+
+/// Received file metadata the collector cross-checks the
+/// manifest against: the byte length and the BLAKE3 hash of
+/// what was actually uploaded.
+#[derive(Debug, Clone)]
+pub struct ReceivedFile {
+    /// Length in bytes.
+    pub size_bytes: u64,
+    /// Lowercase-hex BLAKE3 digest of the bytes.
+    pub checksum_blake3: String,
 }
 
 impl Manifest {
-    /// Cross-check the manifest against a map of received file
-    /// sizes keyed by part name.
+    /// Cross-check the manifest against a map of received files
+    /// (size + checksum) keyed by part name.
     ///
     /// # Errors
     ///
     /// Returns the first inconsistency.
     pub fn validate(
         &self,
-        received_files: &std::collections::HashMap<String, u64>,
+        received_files: &std::collections::HashMap<String, ReceivedFile>,
     ) -> Result<(), ManifestError> {
         if self.schema_version != SCHEMA_VERSION {
             return Err(ManifestError::SchemaVersion {
@@ -192,17 +229,32 @@ impl Manifest {
             _ => {}
         }
         for item in &self.media {
+            if item.checksum_blake3.is_empty() {
+                return Err(ManifestError::EmptyChecksum {
+                    filename: item.filename.clone(),
+                });
+            }
             let received =
                 received_files
                     .get(&item.filename)
                     .ok_or_else(|| ManifestError::UnknownMedia {
                         filename: item.filename.clone(),
                     })?;
-            if *received != item.size_bytes {
+            if received.size_bytes != item.size_bytes {
                 return Err(ManifestError::SizeMismatch {
                     filename: item.filename.clone(),
                     manifest: item.size_bytes,
-                    received: *received,
+                    received: received.size_bytes,
+                });
+            }
+            if !received
+                .checksum_blake3
+                .eq_ignore_ascii_case(&item.checksum_blake3)
+            {
+                return Err(ManifestError::ChecksumMismatch {
+                    filename: item.filename.clone(),
+                    manifest: item.checksum_blake3.clone(),
+                    computed: received.checksum_blake3.clone(),
                 });
             }
         }
