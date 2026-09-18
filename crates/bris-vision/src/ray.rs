@@ -451,4 +451,219 @@ mod tests {
             m.altitude_sigma.value(),
         );
     }
+
+    // --- Non-circular ml-gravity BelowHorizon geometry regression ---
+    //
+    // The `ml-gravity` provider synthesises its horizon from a
+    // model-predicted camera-frame gravity via
+    // `gravity_from_roll_pitch` → `horizon_line_from_normal`.
+    // The integration copy of these assertions lives in
+    // `tests/ml_gravity_math.rs`, but that whole file is behind
+    // `#[cfg(feature = "ml-gravity")]`, so the definition-of-done
+    // check `cargo test -p bris-vision` (default features) never
+    // runs it. This module-level copy exercises the SAME geometry
+    // with default features so the DoD check actually proves the
+    // reflection/gravity horizon derivation does not spuriously
+    // reject valid single-fix-frame sights. It reproduces the
+    // provider's (roll, pitch) → g_cam formula locally (pure math,
+    // no ONNX / `ort` / `ndarray` dependency) and compares it,
+    // and the horizon it yields, against an INDEPENDENTLY
+    // constructed true horizon — so it is not the tautological
+    // inverse the prior regression was.
+
+    /// The provider's documented derivation, reproduced with no
+    /// feature gate: `g_cam = (sinφcosθ, cosφcosθ, -sinθ)`.
+    fn ml_gravity_g_cam(roll: f64, pitch: f64) -> (f64, f64, f64) {
+        let (sr, cr) = roll.sin_cos();
+        let (sp, cp) = pitch.sin_cos();
+        (sr * cp, cr * cp, -sp)
+    }
+
+    /// Independent camera-frame gravity for a roll/pitch tilt,
+    /// built from hand-written +x then +z rotations of the level
+    /// image-down vector — sharing no code with
+    /// `ml_gravity_g_cam`. The two must agree for a perfect
+    /// prediction; that agreement is the load-bearing
+    /// non-circularity check.
+    fn independent_true_g_cam(roll: f64, pitch: f64) -> (f64, f64, f64) {
+        let g0 = (0.0_f64, 1.0_f64, 0.0_f64);
+        let (sp, cp) = pitch.sin_cos();
+        let after_pitch = (g0.0, cp * g0.1 + sp * g0.2, -sp * g0.1 + cp * g0.2);
+        let (sr, cr) = roll.sin_cos();
+        (
+            cr * after_pitch.0 + sr * after_pitch.1,
+            -sr * after_pitch.0 + cr * after_pitch.1,
+            after_pitch.2,
+        )
+    }
+
+    fn v_cross(a: (f64, f64, f64), b: (f64, f64, f64)) -> (f64, f64, f64) {
+        (
+            a.1 * b.2 - a.2 * b.1,
+            a.2 * b.0 - a.0 * b.2,
+            a.0 * b.1 - a.1 * b.0,
+        )
+    }
+    fn v_norm(a: (f64, f64, f64)) -> (f64, f64, f64) {
+        let n = (a.0 * a.0 + a.1 * a.1 + a.2 * a.2).sqrt();
+        (a.0 / n, a.1 / n, a.2 / n)
+    }
+
+    /// Unit body ray at `altitude` above the local horizontal
+    /// defined by `sky_normal`, offset by `azimuth` around it.
+    fn body_ray_at(sky_normal: (f64, f64, f64), altitude: f64, azimuth: f64) -> (f64, f64, f64) {
+        let sn = v_norm(sky_normal);
+        let seed = if sn.0.abs() < 0.9 {
+            (1.0, 0.0, 0.0)
+        } else {
+            (0.0, 1.0, 0.0)
+        };
+        let e1 = v_norm(v_cross(sn, seed));
+        let e2 = v_cross(sn, e1);
+        let (sa, ca) = altitude.sin_cos();
+        let (saz, caz) = azimuth.sin_cos();
+        (
+            sa * sn.0 + ca * (caz * e1.0 + saz * e2.0),
+            sa * sn.1 + ca * (caz * e1.1 + saz * e2.1),
+            sa * sn.2 + ca * (caz * e1.2 + saz * e2.2),
+        )
+    }
+
+    #[test]
+    fn ml_gravity_derivation_has_no_below_horizon_geometry_bias() {
+        let tilts_deg: &[(f64, f64)] = &[
+            (0.0, 0.0),
+            (12.0, 0.0),
+            (-18.0, 0.0),
+            (0.0, 10.0),
+            (0.0, -8.0),
+            (20.0, 12.0),
+            (-25.0, -6.0),
+        ];
+        for &(roll_deg, pitch_deg) in tilts_deg {
+            assert_no_geometry_bias_for_tilt(roll_deg, pitch_deg);
+        }
+    }
+
+    fn assert_no_geometry_bias_for_tilt(roll_deg: f64, pitch_deg: f64) {
+        use crate::measure::{measure_altitude_from_ray, MeasurementError};
+        let intr = Intrinsics::placeholder(1280, 720);
+        let width = 1280;
+        let body_sigma = Sigma::new(1.0e-4).unwrap();
+        let alt_sigma = Sigma::new(0.05).unwrap();
+        let azimuths: &[f64] = &[0.0, 1.2, 2.6, 4.0, 5.3];
+
+        {
+            let roll = roll_deg.to_radians();
+            let pitch = pitch_deg.to_radians();
+
+            // Non-circularity: independent true gravity must match
+            // the derivation under test for a perfect prediction.
+            let g_true = independent_true_g_cam(roll, pitch);
+            let g_pred = ml_gravity_g_cam(roll, pitch);
+            assert!((g_pred.0 - g_true.0).abs() < 1e-12);
+            assert!((g_pred.1 - g_true.1).abs() < 1e-12);
+            assert!((g_pred.2 - g_true.2).abs() < 1e-12);
+
+            let true_sky_normal = (-g_true.0, -g_true.1, -g_true.2);
+            let pred_normal = CameraRay {
+                x: -g_pred.0,
+                y: -g_pred.1,
+                z: -g_pred.2,
+            };
+            let line_perfect = horizon_line_from_normal(&pred_normal, &intr, alt_sigma).unwrap();
+
+            for &az in azimuths {
+                // Perfect prediction recovers true altitude — a
+                // valid sight is never spuriously rejected.
+                for true_alt_deg in [6.0_f64, 15.0, 40.0] {
+                    let body = body_ray_at(true_sky_normal, true_alt_deg.to_radians(), az);
+                    let m = measure_altitude_from_ray(intr, width, line_perfect, body, body_sigma)
+                        .unwrap_or_else(|e| {
+                            panic!(
+                                "roll={roll_deg} pitch={pitch_deg} az={az} \
+                             alt={true_alt_deg}: spurious rejection {e:?}"
+                            )
+                        });
+                    assert!(
+                        (m.value.to_degrees() - true_alt_deg).abs() < 1e-6,
+                        "roll={roll_deg} pitch={pitch_deg} az={az}: recovered \
+                         {} deg, expected {true_alt_deg}",
+                        m.value.to_degrees()
+                    );
+                }
+
+                // A prediction error of eps shifts measured
+                // altitude by AT MOST eps (no amplification) — a
+                // body 25° up is never rejected when eps < 25°.
+                for eps_deg in [3.0_f64, 9.0, 15.0] {
+                    let eps = eps_deg.to_radians();
+                    let gw = ml_gravity_g_cam(roll, pitch + eps);
+                    let nw = CameraRay {
+                        x: -gw.0,
+                        y: -gw.1,
+                        z: -gw.2,
+                    };
+                    let line_w = horizon_line_from_normal(&nw, &intr, alt_sigma).unwrap();
+                    let true_alt = 25.0_f64.to_radians();
+                    let body = body_ray_at(true_sky_normal, true_alt, az);
+                    let m = measure_altitude_from_ray(intr, width, line_w, body, body_sigma)
+                        .unwrap_or_else(|e| {
+                            panic!(
+                                "roll={roll_deg} pitch={pitch_deg} az={az} \
+                                 eps={eps_deg}: a 25°-above body was spuriously \
+                                 rejected {e:?} under a smaller prediction error — \
+                                 a geometry bug"
+                            )
+                        });
+                    assert!(
+                        (m.value - true_alt).abs() <= eps + 1e-6,
+                        "roll={roll_deg} pitch={pitch_deg} az={az} eps={eps_deg}: \
+                         altitude error {} deg exceeds injected {} deg — derivation \
+                         amplifies prediction error",
+                        (m.value - true_alt).abs().to_degrees(),
+                        eps_deg
+                    );
+                }
+            }
+
+            // Honest, azimuth-DEPENDENT BelowHorizon rejection: a
+            // 4°-above body under an 8° single-frame prediction
+            // error is rejected on the down-tilted side and
+            // accepted on the up-tilted side. Both outcomes must
+            // appear across the azimuth circle — a systematic bug
+            // would reject at every azimuth; a disabled check at
+            // none. This is the single-capture under-production
+            // mechanism, and it is CORRECT (honest σ).
+            let marginal = 4.0_f64.to_radians();
+            let big = 8.0_f64.to_radians();
+            let gb = ml_gravity_g_cam(roll, pitch + big);
+            let nb = CameraRay {
+                x: -gb.0,
+                y: -gb.1,
+                z: -gb.2,
+            };
+            let line_b = horizon_line_from_normal(&nb, &intr, alt_sigma).unwrap();
+            let mut rejected = false;
+            let mut accepted = false;
+            for &az in &[0.0, 0.9, 1.8, 2.7, 3.6, 4.5, 5.4, 6.2] {
+                let body = body_ray_at(true_sky_normal, marginal, az);
+                match measure_altitude_from_ray(intr, width, line_b, body, body_sigma) {
+                    Err(MeasurementError::BelowHorizon) => rejected = true,
+                    Ok(_) => accepted = true,
+                    Err(e) => panic!("unexpected error {e:?}"),
+                }
+            }
+            assert!(
+                rejected,
+                "roll={roll_deg} pitch={pitch_deg}: BelowHorizon never fired where it \
+                 honestly should"
+            );
+            assert!(
+                accepted,
+                "roll={roll_deg} pitch={pitch_deg}: rejected at EVERY azimuth — that is a \
+                 systematic geometry bias, not honest single-frame σ"
+            );
+        }
+    }
 }
