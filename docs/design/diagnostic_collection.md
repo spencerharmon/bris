@@ -280,7 +280,7 @@ submissions/
     01HXYZ...02/
       manifest.json
       calibration/
-        intrinsics.toml
+        intrinsics.json
         residuals.json
         frame_001.jpg
         ...

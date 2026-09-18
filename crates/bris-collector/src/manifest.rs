@@ -110,7 +110,7 @@ pub struct MediaItem {
     pub filename: String,
     /// What role this file plays: `"fix_frame"`,
     /// `"calibration_frame"`, `"pbris_log"`,
-    /// `"intrinsics_toml"`, `"debug_log"`, `"video"`, etc.
+    /// `"intrinsics_json"`, `"debug_log"`, `"video"`, etc.
     pub role: String,
     /// Optional frame index for sequenced captures.
     pub frame_index: Option<u32>,

@@ -123,7 +123,7 @@ bris calibrate \
   --frames ./calib-frames \
   --rows 7 --cols 11 \
   --square-size-mm 25 \
-  --output ~/.local/share/bris/intrinsics.toml
+  --output ~/.local/share/bris/intrinsics.json
 ```
 
 Output (typical successful run):
@@ -133,7 +133,7 @@ INFO bris-calibrate: scanning frames    directory=./calib-frames candidate_frame
 INFO bris-calibrate: detection complete  successful_views=27 skipped_no_board=2 skipped_wrong_size=1 skipped_io=0
 INFO bris-calibrate: solve complete      fx=612.34 fy=612.71 cx=318.91 cy=240.50 k1=-0.0823 k2=0.1421 rms_px=0.31 views=27 observations=2079
 
-Calibration written to: /home/operator/.local/share/bris/intrinsics.toml
+Calibration written to: /home/operator/.local/share/bris/intrinsics.json
   RMS reprojection: 0.310 px
   Views used:       27
   Observations:     2079
@@ -175,13 +175,13 @@ Either point your config file at it:
 ```toml
 # ~/.config/bris/config.toml
 [camera]
-intrinsics = "/home/operator/.local/share/bris/intrinsics.toml"
+intrinsics = "/home/operator/.local/share/bris/intrinsics.json"
 ```
 
 Or pass `--intrinsics` on the command line:
 
 ```bash
-bris serve --intrinsics ~/.local/share/bris/intrinsics.toml --assumed-lat 47.6 --assumed-lon -122.3
+bris serve --intrinsics ~/.local/share/bris/intrinsics.json --assumed-lat 47.6 --assumed-lon -122.3
 ```
 
 `bris serve` logs the intrinsics file's quality summary at

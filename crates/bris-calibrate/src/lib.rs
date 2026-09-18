@@ -33,7 +33,7 @@
 //!    Levenberg-Marquardt refines. Returns intrinsics +
 //!    quality summary including per-view RMS residuals.
 //! 4. **Persist** via [`persist::write_intrinsics`] —
-//!    a TOML file that `bris serve` and `bris capture`
+//!    a JSON manifest that `bris serve` and `bris capture`
 //!    load on startup.
 //! 5. **Inspect** quality via [`doctor::diagnose`] before
 //!    trusting the result. The diagnostic flags common
@@ -60,7 +60,7 @@
 //! - [`solve`] — intrinsics fit, wrapping `vision-calibration`'s
 //!   planar-intrinsics workflow. Includes per-view residual
 //!   extraction.
-//! - [`persist`] — TOML serialization of a calibration
+//! - [`persist`] — JSON manifest serialization of a calibration
 //!   result.
 //! - [`doctor`] — quality assessment of a result.
 //!
@@ -91,7 +91,9 @@ pub use detect::{
 };
 pub use doctor::{diagnose, Diagnosis, DiagnosisIssue, DiagnosisLevel};
 pub use persist::{
-    default_intrinsics_path, read_intrinsics, write_intrinsics, PersistError, PersistedIntrinsics,
+    default_intrinsics_path, read_intrinsics, write_intrinsics, CalibrationManifest,
+    CalibrationReport, ManifestDetectionStats, ManifestDiagnosisIssue, ManifestIntrinsics,
+    ManifestViewResidual, PersistError,
 };
 pub use sharpness::laplacian_variance;
 pub use solve::{calibrate, CalibrationResult, SolveError, ViewResidual};

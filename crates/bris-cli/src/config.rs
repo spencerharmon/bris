@@ -196,7 +196,7 @@ pub(crate) struct ResolvedServeConfig {
     pub nmea_sinks: Vec<RawNmea>,
     /// Path to a calibration intrinsics file. `None` means
     /// "fall back to placeholder intrinsics with a loud
-    /// warning" — see the `bris_calibrate::PersistedIntrinsics`
+    /// warning" — see the `bris_calibrate::CalibrationManifest`
     /// doc for what that means for fix accuracy.
     pub intrinsics: Option<PathBuf>,
 }

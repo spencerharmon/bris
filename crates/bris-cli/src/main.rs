@@ -31,8 +31,8 @@ use bris_bundle::{
 };
 use bris_calibrate::{
     calibrate, coverage, default_intrinsics_path, detect_corners_in_directory_with_progress,
-    diagnose, write_intrinsics, CheckerboardTarget, CoverageConfig, DiagnosisLevel, FrameDetection,
-    FrameOutcome,
+    diagnose, write_intrinsics, CalibrationReport, CheckerboardTarget, CoverageConfig,
+    DiagnosisLevel, FrameDetection, FrameOutcome,
 };
 use bris_capture::{
     max_yuyv_resolution, run_capture_loop, run_capture_loop_with, CaptureLoopAction, V4l2Capture,
@@ -274,7 +274,7 @@ struct CalibrateArgs {
     #[arg(long, default_value_t = 25.0)]
     square_size_mm: f64,
     /// Where to write the resulting intrinsics TOML file.
-    /// Default: `$XDG_DATA_HOME/bris/intrinsics.toml`.
+    /// Default: `$XDG_DATA_HOME/bris/intrinsics.json`.
     #[arg(long)]
     output: Option<PathBuf>,
 }
@@ -2496,25 +2496,23 @@ fn load_intrinsics(
     };
     let persisted = bris_calibrate::read_intrinsics(path)
         .with_context(|| format!("read intrinsics from {}", path.display()))?;
-    if persisted.intrinsics.image_width != capture_width
-        || persisted.intrinsics.image_height != capture_height
-    {
+    if persisted.width != capture_width || persisted.height != capture_height {
         bail!(
             "intrinsics file {} was calibrated against {}×{} but camera is producing {}×{}; \
              focal length scales with resolution and using these intrinsics would silently \
              produce wrong altitudes. Re-run `bris calibrate` at the camera's current \
              resolution.",
             path.display(),
-            persisted.intrinsics.image_width,
-            persisted.intrinsics.image_height,
+            persisted.width,
+            persisted.height,
             capture_width,
             capture_height,
         );
     }
     info!(
         path = %path.display(),
-        rms_px = persisted.quality.mean_reproj_error_px,
-        view_count = persisted.quality.view_count,
+        rms_px = persisted.rms_px,
+        view_count = persisted.n_frames_used,
         "loaded camera intrinsics"
     );
     Ok((persisted.intrinsics(), false))
@@ -2720,7 +2718,19 @@ fn run_calibrate(args: &CalibrateArgs) -> anyhow::Result<()> {
             )
         })?,
     };
-    write_intrinsics(&output_path, &result)
+    let report = CalibrationReport {
+        result: &result,
+        diagnosis: &diagnosis,
+        detection_stats: &stats,
+        // A one-shot `bris calibrate` run over a directory of
+        // frames has no device-session concept: no session
+        // UUID, no lens id. Android's in-app calibration
+        // session sets both when it writes this same manifest
+        // schema via `bris-ffi`.
+        calibration_id: None,
+        lens_id: None,
+    };
+    write_intrinsics(&output_path, &report)
         .with_context(|| format!("write {}", output_path.display()))?;
     info!(
         path = %output_path.display(),
