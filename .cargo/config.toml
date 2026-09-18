@@ -8,3 +8,27 @@
 # setup (cave `implementer` runs in isolated git worktrees). Do NOT set
 # `build.target-dir` to a shared path -- cargo's per-target-dir build lock
 # would serialize concurrent agent builds.
+
+# Pi Zero 2W (aarch64) appliance cross-build. The Pi appliance target
+# (`aarch64-unknown-linux-gnu`) needs a cross linker + C compiler for the
+# `cc`-built native deps (blake3, ort/tract in the vision/ml features). We
+# name the GNU cross toolchain by its target-triple-prefixed binaries so the
+# entry is host-agnostic: any environment that puts a matching cross gcc on
+# PATH satisfies it. `scripts/pi-appliance/build.sh` provisions that toolchain
+# reproducibly via Nix (`nix develop`/flake). CI installs Debian's
+# `gcc-aarch64-linux-gnu`, whose prefix is `aarch64-linux-gnu-*`; when only
+# that flavour is present, export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER
+# and CC_aarch64_unknown_linux_gnu to override the names below (the build
+# script and CI both do). No infra identifiers are baked in.
+[target.aarch64-unknown-linux-gnu]
+linker = "aarch64-unknown-linux-gnu-gcc"
+
+# `cc-rs` (blake3, ort/tract native builds) derives its default cross compiler
+# from the Debian-style prefix `aarch64-linux-gnu-*`; point it at the same
+# target-triple GNU toolchain the linker uses. `force = false` so an explicit
+# CC_aarch64_unknown_linux_gnu in the environment (CI's Debian flavour, or a
+# developer override) still wins.
+[env]
+CC_aarch64_unknown_linux_gnu = { value = "aarch64-unknown-linux-gnu-gcc", force = false }
+CXX_aarch64_unknown_linux_gnu = { value = "aarch64-unknown-linux-gnu-g++", force = false }
+AR_aarch64_unknown_linux_gnu = { value = "aarch64-unknown-linux-gnu-ar", force = false }
