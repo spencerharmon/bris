@@ -9,6 +9,39 @@ For the end-to-end pipeline architecture and data flow, see
 
 ---
 
+## Pi Zero 2W appliance image: reproducible cross-build + recipe
+
+The Pi Zero 2W (aarch64) appliance build is delivered as a
+reproducible cross-compile + image-assembly recipe:
+
+- `.cargo/config.toml` now names the aarch64 GNU cross linker and
+  `cc-rs` compiler (`aarch64-unknown-linux-gnu-{gcc,g++,ar}`) for the
+  `aarch64-unknown-linux-gnu` target, so a bare
+  `cargo build --release --target aarch64-unknown-linux-gnu -p bris-cli`
+  (the task DoD check) cross-compiles once the toolchain is on PATH.
+  The `[env]` entries use `force = false` so a CI/dev override wins.
+- `flake.nix` pins the aarch64 GNU cross toolchain (nixpkgs rev
+  `a32edd7`); `nix develop` puts `aarch64-unknown-linux-gnu-gcc` on
+  PATH with no host apt/sudo. Verified: the devShell provides the
+  cross gcc and a clean-from-scratch `cargo build … -p bris-cli`
+  produces an aarch64 ELF (`ELF 64-bit LSB … ARM aarch64`).
+- `scripts/pi-appliance/build.sh` cross-compiles then assembles a
+  staging tree: `usr/local/bin/bris`, the `bris-data` ml-gravity
+  payload under `usr/share/bris`, a placeholder-only
+  `bris-appliance.env`, a `bris-appliance.service` systemd unit, and a
+  `BUILDINFO.txt` provenance stamp; `--tarball` emits a 54 MB overlay
+  tarball. Auto-detects the Debian `aarch64-linux-gnu-*` prefix in CI.
+- CI's `cross-build` job now runs the recipe and uploads the appliance
+  tarball as an artifact.
+- No infra identifiers baked in — camera device, serial tty/baud, and
+  UDP NMEA peer are first-boot config. See
+  `docs/operator/pi-appliance.md`.
+
+`plan.org` Phase 6 "Pi Zero 2W appliance image" → PARTIAL (recipe +
+cross-build done; full read-only-rootfs OS image assembly pending).
+
+---
+
 ## bris-cli: fix / log / update subcommands implemented
 
 The previously-stubbed `bris fix`, `bris log`, and `bris update`

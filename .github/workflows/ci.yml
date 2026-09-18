@@ -82,14 +82,21 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
-      - name: configure cross-compile linker
+      # `.cargo/config.toml` names the target-triple GNU toolchain
+      # (`aarch64-unknown-linux-gnu-*`, what flake.nix provides). Debian's
+      # package uses the shorter `aarch64-linux-gnu-*` prefix, so override the
+      # linker + cc-rs compiler names via the environment (the config's [env]
+      # entries are `force = false`, so these win). Do NOT append another
+      # `[target.aarch64-unknown-linux-gnu]` section to the config here — the
+      # committed config already declares it and a duplicate is a TOML error.
+      - name: select Debian cross toolchain prefix
         run: |
-          mkdir -p .cargo
-          cat >> .cargo/config.toml <<'EOF'
-
-          [target.aarch64-unknown-linux-gnu]
-          linker = "aarch64-linux-gnu-gcc"
-          EOF
+          {
+            echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc"
+            echo "CC_aarch64_unknown_linux_gnu=aarch64-linux-gnu-gcc"
+            echo "CXX_aarch64_unknown_linux_gnu=aarch64-linux-gnu-g++"
+            echo "AR_aarch64_unknown_linux_gnu=aarch64-linux-gnu-ar"
+          } >> "$GITHUB_ENV"
       # Cross-build the full workspace. bris-cli and bris-capture
       # (segmentation feature -> ort, plus bris-cli's blake3 C
       # build) were previously excluded; both now build cleanly
@@ -111,6 +118,17 @@ jobs:
             -p bris-cli \
             -p bris-ffi \
             -p bris-collector
+      # Exercise the Pi appliance image-assembly recipe end to end: it
+      # re-runs the bris-cli cross-build (the appliance DoD check) and
+      # assembles the staging tree (binary + bris-data payload + config
+      # template + systemd unit). Upload the tarball as a build artifact.
+      - name: assemble Pi appliance image
+        run: scripts/pi-appliance/build.sh --tarball
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bris-pi-appliance-aarch64
+          path: target/pi-appliance.tar.gz
+          if-no-files-found: error
 
   deny:
     name: cargo-deny
