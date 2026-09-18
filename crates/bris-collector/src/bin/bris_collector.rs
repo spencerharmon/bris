@@ -1,8 +1,11 @@
 //! `bris-collector` binary entrypoint.
 //!
-//! Reads configuration from environment variables, opens the
-//! store, binds the HTTP server, and serves until SIGTERM /
-//! SIGINT.
+//! Reads configuration from an optional TOML config file
+//! (`BRIS_COLLECTOR_CONFIG`) overlaid by `BRIS_COLLECTOR_*`
+//! environment variables (see [`bris_collector::config`] for the
+//! full surface and precedence), opens the store, binds the HTTP
+//! server, and serves until SIGTERM / SIGINT. A reference config
+//! file and k8s spec fragment ship under `deploy/reference/`.
 //!
 //! Also exposes operator-driven maintenance subcommands that
 //! never run as a side effect of `serve` (the default, and the
@@ -64,6 +67,7 @@ async fn serve() -> anyhow::Result<()> {
         data_root = %config.data_root.display(),
         bind = %config.bind,
         max_submission_bytes = config.max_submission_bytes,
+        retention_days = config.retention_days,
         "bris-collector starting"
     );
 
@@ -109,7 +113,10 @@ fn soft_delete(args: &[String]) -> anyhow::Result<()> {
 /// operator-driven hard-delete of soft-deleted submissions past
 /// the retention window. Never invoked automatically.
 fn retention_sweep(args: &[String]) -> anyhow::Result<()> {
-    let mut retention_days: i64 = 30;
+    let config = Config::from_env().map_err(anyhow::Error::msg)?;
+    // Default to the configured retention window; an explicit
+    // --retention-days on the command line still overrides it.
+    let mut retention_days: i64 = config.retention_days;
     let mut dry_run = false;
     let mut i = 0;
     while i < args.len() {
@@ -131,7 +138,6 @@ fn retention_sweep(args: &[String]) -> anyhow::Result<()> {
         }
     }
 
-    let config = Config::from_env().map_err(anyhow::Error::msg)?;
     let store = Store::open(&config.data_root)?;
     let removed = store.retention_sweep(chrono::Duration::days(retention_days), dry_run)?;
     if dry_run {

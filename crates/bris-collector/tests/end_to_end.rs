@@ -30,6 +30,7 @@ fn test_state(token: &str) -> Arc<AppState> {
         bind: "127.0.0.1:0".to_owned(),
         bearer_token: token.to_owned(),
         max_submission_bytes: 32 * 1024 * 1024,
+        retention_days: 30,
     };
     let store = Store::open(&cfg.data_root).expect("store open");
     // Leak the tempdir so it survives the test (the State holds

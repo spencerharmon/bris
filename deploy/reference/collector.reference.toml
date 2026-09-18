@@ -1,0 +1,48 @@
+# bris-collector reference configuration.
+#
+# INFRASTRUCTURE-AGNOSTIC REFERENCE ONLY. This file documents the
+# shape of every bris-collector setting using RFC2606
+# (example.com / example.net) and RFC5737 (192.0.2.0/24)
+# placeholders. It is NOT a live config: the concrete data-root,
+# bind address, admin token, and retention window belong ONLY in
+# the deployment layer (flux) — a ConfigMap for the non-secret
+# values and a Secret for the token.
+#
+# Precedence (last wins): built-in defaults -> this file -> the
+# BRIS_COLLECTOR_* environment variables. So a deployment can bake
+# a base file (or mount this via a ConfigMap) and override any
+# single value — most importantly the token — from the
+# environment (a mounted Secret) without editing the file.
+#
+# The file path is passed to the binary via BRIS_COLLECTOR_CONFIG;
+# if unset, the collector runs env-only.
+
+# Base directory of the filesystem store. REQUIRED. Created if it
+# does not exist. In k8s this is the mount path of the submissions
+# PersistentVolume (see reference-deployment.yaml). Env override:
+# BRIS_COLLECTOR_DATA_ROOT.
+data_root = "/var/lib/bris-collector"
+
+# host:port to bind. The port half is the container port the
+# Service targets. Default "0.0.0.0:8443". Env override:
+# BRIS_COLLECTOR_BIND.
+bind = "0.0.0.0:8443"
+
+# Admin/bootstrap bearer token. DO NOT set a real token here —
+# this placeholder exists only to document the key. In production
+# supply it from a k8s Secret via BRIS_COLLECTOR_BEARER_TOKEN (see
+# reference-deployment.yaml). The binary refuses to start if no
+# token is configured. Env override: BRIS_COLLECTOR_BEARER_TOKEN.
+bearer_token = "REPLACE_ME_FROM_SECRET"
+
+# Request-body ceiling, in bytes. Default 536870912 (512 MiB).
+# Env override: BRIS_COLLECTOR_MAX_SUBMISSION_BYTES.
+max_submission_bytes = 536870912
+
+# Default retention window, in days, for the `retention-sweep`
+# maintenance command (hard-deletes submissions soft-deleted
+# longer than this). The sweep is NEVER run automatically; this is
+# only its default window and an explicit `--retention-days`
+# overrides it. Default 30. Env override:
+# BRIS_COLLECTOR_RETENTION_DAYS.
+retention_days = 30
