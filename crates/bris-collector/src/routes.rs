@@ -114,6 +114,14 @@ async fn post_submission(
         .validate(&sizes)
         .map_err(|e| ErrorResponse::bad_request(format!("manifest validate: {e}")))?;
 
+    // Checksum validation is a separate pass over the actual
+    // bytes (size-only `validate` above already confirmed every
+    // declared filename resolves to a received part).
+    let received: HashMap<String, Vec<u8>> = files.iter().cloned().collect();
+    manifest
+        .validate_checksums(&received)
+        .map_err(|e| ErrorResponse::bad_request(format!("manifest validate: {e}")))?;
+
     let id = ulid::Ulid::new().to_string();
     let dir = state
         .store
@@ -216,12 +224,19 @@ async fn get_submission_media(
     let dir = manifest_path
         .parent()
         .ok_or_else(|| ErrorResponse::internal("manifest path has no parent".to_owned()))?;
-    let media_path = dir.join("media").join(&filename);
-    if !media_path.exists() {
-        return Err(ErrorResponse::not_found(format!(
-            "{id}/media/{filename} not found"
-        )));
-    }
+    // Files land in one of three places depending on role (see
+    // `store::media_destination`): `media/`, `calibration/`, or
+    // the submission root (`pbris.log`). Try each rather than
+    // re-deriving the role here.
+    let candidates = [
+        dir.join("media").join(&filename),
+        dir.join("calibration").join(&filename),
+        dir.join(&filename),
+    ];
+    let media_path = candidates
+        .into_iter()
+        .find(|p| p.exists())
+        .ok_or_else(|| ErrorResponse::not_found(format!("{id}/media/{filename} not found")))?;
     let bytes = tokio::fs::read(&media_path).await.map_err(|e| {
         warn!(error = %e, path = %media_path.display(), "media read failed");
         ErrorResponse::internal(format!("media read: {e}"))

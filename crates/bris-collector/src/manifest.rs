@@ -119,6 +119,14 @@ pub struct MediaItem {
     /// Size in bytes (denormalized; collector verifies on
     /// receive).
     pub size_bytes: u64,
+    /// Optional lowercase-hex SHA-256 of the file contents.
+    /// When present the collector recomputes it from the
+    /// received bytes and rejects the submission on mismatch.
+    /// Absent for older clients (schema-compatible, additive
+    /// field); the collector then relies on size-only
+    /// validation.
+    #[serde(default)]
+    pub checksum_sha256: Option<String>,
 }
 
 /// Validation errors against a received manifest.
@@ -153,6 +161,18 @@ pub enum ManifestError {
         manifest: u64,
         /// What the uploaded part actually was.
         received: u64,
+    },
+    /// A media item's declared checksum disagrees with the
+    /// uploaded part's actual SHA-256.
+    #[error("media checksum mismatch for {filename}: manifest={manifest}, received={received}")]
+    ChecksumMismatch {
+        /// The disputed filename.
+        filename: String,
+        /// What the manifest declared (lowercase hex).
+        manifest: String,
+        /// What the collector computed from the received bytes
+        /// (lowercase hex).
+        received: String,
     },
 }
 
@@ -203,6 +223,49 @@ impl Manifest {
                     filename: item.filename.clone(),
                     manifest: item.size_bytes,
                     received: *received,
+                });
+            }
+        }
+        Ok(())
+    }
+
+    /// Cross-check declared per-file SHA-256 checksums against
+    /// the actually-received bytes, keyed by part name (same
+    /// key space as [`Manifest::validate`]'s `received_files`).
+    ///
+    /// Media items with no declared `checksum_sha256` are
+    /// skipped (size-only validation via [`Manifest::validate`]
+    /// still applies to them). Call this only after
+    /// [`Manifest::validate`] has already confirmed every media
+    /// item resolves to a received file.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ManifestError::ChecksumMismatch`] on the first
+    /// disagreement.
+    pub fn validate_checksums(
+        &self,
+        received_files: &std::collections::HashMap<String, Vec<u8>>,
+    ) -> Result<(), ManifestError> {
+        use sha2::{Digest, Sha256};
+
+        for item in &self.media {
+            let Some(expected) = &item.checksum_sha256 else {
+                continue;
+            };
+            let Some(bytes) = received_files.get(&item.filename) else {
+                // `validate` already caught unknown filenames;
+                // nothing further to check here.
+                continue;
+            };
+            let mut hasher = Sha256::new();
+            hasher.update(bytes);
+            let got = hex::encode(hasher.finalize());
+            if !got.eq_ignore_ascii_case(expected) {
+                return Err(ManifestError::ChecksumMismatch {
+                    filename: item.filename.clone(),
+                    manifest: expected.clone(),
+                    received: got,
                 });
             }
         }

@@ -24,12 +24,16 @@ tower-http = { version = "0.5", features = ["trace", "limit"] }
 
 ulid = "1"
 rusqlite = { version = "0.31", features = ["bundled"] }
+sha2 = "0.10"
+hex = "0.4"
 
 [dev-dependencies]
 tempfile = { workspace = true }
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
 mime = "0.3"
+sha2 = "0.10"
+hex = "0.4"
 
 [lints]
 workspace = true

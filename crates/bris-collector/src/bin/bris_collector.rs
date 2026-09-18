@@ -3,6 +3,24 @@
 //! Reads configuration from environment variables, opens the
 //! store, binds the HTTP server, and serves until SIGTERM /
 //! SIGINT.
+//!
+//! Also exposes operator-driven maintenance subcommands that
+//! never run as a side effect of `serve` (the default, and the
+//! command with no arguments):
+//!
+//! - `bris_collector index-rebuild` — rebuild the `SQLite` index
+//!   mirror from the on-disk manifests (the index is a
+//!   rebuildable cache, never the source of truth).
+//! - `bris_collector soft-delete <id>` — mark a submission
+//!   soft-deleted (sidecar marker on disk + index mirror). Files
+//!   remain on disk.
+//! - `bris_collector retention-sweep --retention-days <n>
+//!   [--dry-run]` — hard-delete submissions soft-deleted longer
+//!   than the retention window. Never run automatically; an
+//!   explicit operator action only.
+//!
+//! All subcommands read `BRIS_COLLECTOR_DATA_ROOT` the same way
+//! `serve` does.
 
 use std::sync::Arc;
 
@@ -20,6 +38,21 @@ async fn main() -> anyhow::Result<()> {
         .json()
         .init();
 
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let subcommand = args.first().map_or("serve", String::as_str);
+
+    match subcommand {
+        "serve" => serve().await,
+        "index-rebuild" => index_rebuild(),
+        "soft-delete" => soft_delete(&args[1..]),
+        "retention-sweep" => retention_sweep(&args[1..]),
+        other => anyhow::bail!(
+            "unknown subcommand {other:?}; expected one of: serve, index-rebuild, soft-delete, retention-sweep"
+        ),
+    }
+}
+
+async fn serve() -> anyhow::Result<()> {
     let config = Config::from_env().map_err(anyhow::Error::msg)?;
     if config.bearer_token.is_empty() {
         anyhow::bail!("BRIS_COLLECTOR_BEARER_TOKEN must be set; refusing to start without auth");
@@ -43,6 +76,67 @@ async fn main() -> anyhow::Result<()> {
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal())
         .await?;
+    Ok(())
+}
+
+/// `index-rebuild` — operator-driven; never run on `serve`
+/// startup.
+fn index_rebuild() -> anyhow::Result<()> {
+    let config = Config::from_env().map_err(anyhow::Error::msg)?;
+    let store = Store::open(&config.data_root)?;
+    let count = store.rebuild_index()?;
+    tracing::info!(count, data_root = %config.data_root.display(), "index rebuilt");
+    println!("rebuilt index: {count} submissions");
+    Ok(())
+}
+
+/// `soft-delete <id>` — operator-driven; marks a submission
+/// hidden from the default listing without touching its files.
+fn soft_delete(args: &[String]) -> anyhow::Result<()> {
+    let id = args
+        .first()
+        .ok_or_else(|| anyhow::anyhow!("usage: bris_collector soft-delete <id>"))?;
+    let config = Config::from_env().map_err(anyhow::Error::msg)?;
+    let store = Store::open(&config.data_root)?;
+    store.soft_delete(id)?;
+    println!("soft-deleted {id}");
+    Ok(())
+}
+
+/// `retention-sweep --retention-days <n> [--dry-run]` —
+/// operator-driven hard-delete of soft-deleted submissions past
+/// the retention window. Never invoked automatically.
+fn retention_sweep(args: &[String]) -> anyhow::Result<()> {
+    let mut retention_days: i64 = 30;
+    let mut dry_run = false;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--retention-days" => {
+                let v = args
+                    .get(i + 1)
+                    .ok_or_else(|| anyhow::anyhow!("--retention-days requires a value"))?;
+                retention_days = v
+                    .parse()
+                    .map_err(|e| anyhow::anyhow!("--retention-days: {e}"))?;
+                i += 2;
+            }
+            "--dry-run" => {
+                dry_run = true;
+                i += 1;
+            }
+            other => anyhow::bail!("unknown retention-sweep argument: {other}"),
+        }
+    }
+
+    let config = Config::from_env().map_err(anyhow::Error::msg)?;
+    let store = Store::open(&config.data_root)?;
+    let removed = store.retention_sweep(chrono::Duration::days(retention_days), dry_run)?;
+    if dry_run {
+        println!("would remove {} submissions: {:?}", removed.len(), removed);
+    } else {
+        println!("removed {} submissions: {:?}", removed.len(), removed);
+    }
     Ok(())
 }
 

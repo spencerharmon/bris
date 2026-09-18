@@ -90,6 +90,46 @@ fn fix_manifest_json(media_filename: &str, media_size: u64) -> String {
     .to_string()
 }
 
+fn fix_manifest_json_with_checksum(
+    media_filename: &str,
+    media_size: u64,
+    checksum: &str,
+) -> String {
+    serde_json::json!({
+        "schema_version": 1,
+        "submission_kind": "fix",
+        "submitted_at": "2026-05-13T14:22:01Z",
+        "device": {
+            "uuid": "01HXYZTESTDEVICE0000000001",
+            "model": "Test Device",
+            "os": "Android 14 (API 34)",
+        },
+        "versions": {
+            "app": "0.1.0",
+            "bris_core": "0.0.1",
+            "bris_data": null,
+            "submission_schema": 1,
+        },
+        "captured_at": "2026-05-13T14:18:55Z",
+        "gps": null,
+        "note": null,
+        "fix": { "lat_deg": 47.6062, "lon_deg": -122.3321 },
+        "calibration": null,
+        "debug_capture": null,
+        "media": [
+            {
+                "filename": media_filename,
+                "role": "fix_frame",
+                "size_bytes": media_size,
+                "frame_index": 1,
+                "captured_at": "2026-05-13T14:18:55.123Z",
+                "checksum_sha256": checksum,
+            }
+        ],
+    })
+    .to_string()
+}
+
 #[tokio::test]
 async fn healthz_responds_ok() {
     let state = test_state("");
@@ -351,4 +391,316 @@ async fn get_manifest_and_media_round_trip() {
     // axum will percent-decode the path segment, so the
     // handler receives `../passwd`. Sanitization rejects it.
     assert_eq!(bad.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn accepts_correct_checksum() {
+    use sha2::{Digest, Sha256};
+
+    let state = test_state("test-token");
+    let app = build_app(state);
+
+    let frame_bytes: Vec<u8> = (0u32..512)
+        .map(|i| u8::try_from(i % 256).unwrap())
+        .collect();
+    let mut hasher = Sha256::new();
+    hasher.update(&frame_bytes);
+    let checksum = hex::encode(hasher.finalize());
+
+    let manifest =
+        fix_manifest_json_with_checksum("frame_0001.png", frame_bytes.len() as u64, &checksum);
+    let body_bytes = multipart_body(&[
+        ("manifest", "application/json", manifest.as_bytes()),
+        ("frame_0001.png", "image/png", &frame_bytes),
+    ]);
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/submissions")
+        .header(header::AUTHORIZATION, "Bearer test-token")
+        .header(
+            header::CONTENT_TYPE,
+            format!("multipart/form-data; boundary={BOUNDARY}"),
+        )
+        .body(Body::from(body_bytes))
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn rejects_checksum_mismatch() {
+    let state = test_state("test-token");
+    let app = build_app(state);
+
+    let frame_bytes: Vec<u8> = (0u32..512)
+        .map(|i| u8::try_from(i % 256).unwrap())
+        .collect();
+    // Deliberately wrong checksum (valid hex, wrong digest).
+    let wrong_checksum = "0".repeat(64);
+
+    let manifest = fix_manifest_json_with_checksum(
+        "frame_0001.png",
+        frame_bytes.len() as u64,
+        &wrong_checksum,
+    );
+    let body_bytes = multipart_body(&[
+        ("manifest", "application/json", manifest.as_bytes()),
+        ("frame_0001.png", "image/png", &frame_bytes),
+    ]);
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/submissions")
+        .header(header::AUTHORIZATION, "Bearer test-token")
+        .header(
+            header::CONTENT_TYPE,
+            format!("multipart/form-data; boundary={BOUNDARY}"),
+        )
+        .body(Body::from(body_bytes))
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    let s = String::from_utf8_lossy(&body);
+    assert!(s.contains("checksum mismatch"), "body was: {s}");
+}
+
+#[tokio::test]
+async fn atomic_finalize_leaves_no_staging_residue() {
+    let state = test_state("test-token");
+    let data_root = state.config.data_root.clone();
+    let app = build_app(state);
+
+    let frame_bytes: Vec<u8> = (0u32..64).map(|i| u8::try_from(i % 256).unwrap()).collect();
+    let manifest = fix_manifest_json("frame_0001.png", frame_bytes.len() as u64);
+    let body_bytes = multipart_body(&[
+        ("manifest", "application/json", manifest.as_bytes()),
+        ("frame_0001.png", "image/png", &frame_bytes),
+    ]);
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/submissions")
+        .header(header::AUTHORIZATION, "Bearer test-token")
+        .header(
+            header::CONTENT_TYPE,
+            format!("multipart/form-data; boundary={BOUNDARY}"),
+        )
+        .body(Body::from(body_bytes))
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // The staging directory used for the atomic-finalize rename
+    // must be empty after a successful ingest — no leftover
+    // partial writes.
+    let staging = data_root.join("submissions").join(".staging");
+    if staging.exists() {
+        let remaining: Vec<_> = std::fs::read_dir(&staging).unwrap().collect();
+        assert!(
+            remaining.is_empty(),
+            "staging dir should be empty after finalize, found {remaining:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn index_rebuild_recovers_from_manifests_on_disk() {
+    let state = test_state("test-token");
+    let state_ref = state.clone();
+    let app = build_app(state);
+
+    let frame_bytes: Vec<u8> = (0u32..64).map(|i| u8::try_from(i % 256).unwrap()).collect();
+    let manifest = fix_manifest_json("frame_0001.png", frame_bytes.len() as u64);
+    let body_bytes = multipart_body(&[
+        ("manifest", "application/json", manifest.as_bytes()),
+        ("frame_0001.png", "image/png", &frame_bytes),
+    ]);
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/submissions")
+        .header(header::AUTHORIZATION, "Bearer test-token")
+        .header(
+            header::CONTENT_TYPE,
+            format!("multipart/form-data; boundary={BOUNDARY}"),
+        )
+        .body(Body::from(body_bytes))
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // Clear the index mirror directly (simulating loss/
+    // corruption), then rebuild it purely from the on-disk
+    // manifests via the same live store handle — no second
+    // connection to the same sqlite file, which would race the
+    // first.
+    {
+        let conn = state_ref.store.lock_index();
+        conn.execute("DELETE FROM submissions", []).unwrap();
+    }
+    let count = state_ref.store.rebuild_index().expect("rebuild_index");
+    assert_eq!(count, 1, "exactly one submission recovered from disk");
+}
+
+#[tokio::test]
+async fn soft_delete_hides_then_retention_sweep_hard_deletes() {
+    let state = test_state("test-token");
+    let data_root = state.config.data_root.clone();
+    let state_ref = state.clone();
+    let app = build_app(state);
+
+    let frame_bytes: Vec<u8> = (0u32..64).map(|i| u8::try_from(i % 256).unwrap()).collect();
+    let manifest = fix_manifest_json("frame_0001.png", frame_bytes.len() as u64);
+    let body_bytes = multipart_body(&[
+        ("manifest", "application/json", manifest.as_bytes()),
+        ("frame_0001.png", "image/png", &frame_bytes),
+    ]);
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/submissions")
+        .header(header::AUTHORIZATION, "Bearer test-token")
+        .header(
+            header::CONTENT_TYPE,
+            format!("multipart/form-data; boundary={BOUNDARY}"),
+        )
+        .body(Body::from(body_bytes))
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let id_body = resp.into_body().collect().await.unwrap().to_bytes();
+    let id: String = serde_json::from_slice::<serde_json::Value>(&id_body).unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    // List still shows it before soft-delete.
+    let list_resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/v1/submissions")
+                .header(header::AUTHORIZATION, "Bearer test-token")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let list_body = list_resp.into_body().collect().await.unwrap().to_bytes();
+    let list: serde_json::Value = serde_json::from_slice(&list_body).unwrap();
+    assert_eq!(list.as_array().unwrap().len(), 1);
+
+    let store = &state_ref.store;
+    store.soft_delete(&id).expect("soft_delete");
+
+    // Directory is untouched by soft-delete: files stay on disk.
+    let day_dir = data_root.join("submissions/2026/05/13");
+    let sub_dir = std::fs::read_dir(&day_dir)
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    assert!(sub_dir.join("manifest.json").exists());
+    assert!(sub_dir.join("deleted_at.txt").exists());
+
+    // A retention sweep with a future-dated retention window
+    // (0 days => cutoff = now) should hard-delete it, since the
+    // soft-delete timestamp is already in the past relative to
+    // "now".
+    let removed = store
+        .retention_sweep(chrono::Duration::days(0), false)
+        .expect("retention_sweep");
+    assert_eq!(removed, vec![id]);
+    assert!(!sub_dir.exists(), "hard-deleted directory should be gone");
+}
+
+#[tokio::test]
+async fn pbris_log_and_calibration_media_land_off_media_dir() {
+    let state = test_state("test-token");
+    let data_root = state.config.data_root.clone();
+    let app = build_app(state);
+
+    let pbris_bytes = b"$PBRIS,FIX,...\r\n".to_vec();
+    let intrinsics_bytes = b"[intrinsics]\nfx = 1000.0\n".to_vec();
+
+    let manifest = serde_json::json!({
+        "schema_version": 1,
+        "submission_kind": "calibration",
+        "submitted_at": "2026-05-13T14:22:01Z",
+        "device": {
+            "uuid": "01HXYZTESTDEVICE0000000001",
+            "model": "Test Device",
+            "os": "Android 14 (API 34)",
+        },
+        "versions": {
+            "app": "0.1.0",
+            "bris_core": "0.0.1",
+            "bris_data": null,
+            "submission_schema": 1,
+        },
+        "captured_at": "2026-05-13T14:18:55Z",
+        "gps": null,
+        "note": null,
+        "fix": null,
+        "calibration": { "reprojection_error_px": 0.42 },
+        "debug_capture": null,
+        "media": [
+            {
+                "filename": "pbris.log",
+                "role": "pbris_log",
+                "size_bytes": pbris_bytes.len() as u64,
+                "frame_index": null,
+                "captured_at": null,
+            },
+            {
+                "filename": "intrinsics.toml",
+                "role": "intrinsics_toml",
+                "size_bytes": intrinsics_bytes.len() as u64,
+                "frame_index": null,
+                "captured_at": null,
+            }
+        ],
+    })
+    .to_string();
+
+    let body_bytes = multipart_body(&[
+        ("manifest", "application/json", manifest.as_bytes()),
+        ("pbris.log", "text/plain", &pbris_bytes),
+        ("intrinsics.toml", "application/toml", &intrinsics_bytes),
+    ]);
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/submissions")
+        .header(header::AUTHORIZATION, "Bearer test-token")
+        .header(
+            header::CONTENT_TYPE,
+            format!("multipart/form-data; boundary={BOUNDARY}"),
+        )
+        .body(Body::from(body_bytes))
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "body={:?}",
+        String::from_utf8_lossy(&resp.into_body().collect().await.unwrap().to_bytes())
+    );
+
+    let day_dir = data_root.join("submissions/2026/05/13");
+    let sub_dir = std::fs::read_dir(&day_dir)
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    assert!(
+        sub_dir.join("pbris.log").exists(),
+        "pbris_log role should land at submission root, not media/"
+    );
+    assert!(
+        sub_dir.join("calibration").join("intrinsics.toml").exists(),
+        "intrinsics_toml role should land under calibration/"
+    );
+    assert!(
+        !sub_dir.join("media").join("pbris.log").exists(),
+        "pbris.log must not also be duplicated under media/"
+    );
 }
