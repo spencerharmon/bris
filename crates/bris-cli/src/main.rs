@@ -3,21 +3,24 @@
 //! Subcommands (per `plan.org` Phase 6):
 //! - `capture` — record frames from a V4L2 camera to disk.
 //!   *Implemented* against the YUYV format on Linux.
-//! - `calibrate` — lens calibration workflow (stub).
-//! - `fix` — one-shot fix from a webcam (stub; the streaming
-//!   engine in `serve` supersedes this).
+//! - `calibrate` — lens calibration workflow. *Implemented*.
+//! - `fix` — drive the streaming engine over a recorded
+//!   capture and emit NMEA + per-fix uncertainty.
+//!   *Implemented* (single-shot and `--continuous`).
 //! - `serve` — continuous engine + NMEA serving. *Implemented*
 //!   for the V4L2 → engine → published-fix path with NMEA
 //!   stdout and TCP server transports. Serial-port and
 //!   UDP-broadcast sinks are follow-ups.
 //! - `replay` — process saved frames through the full pipeline.
 //!   *Implemented* as the validation path before live capture.
-//! - `log` — sight log management (stub).
-//! - `update` — refresh almanac/catalog/leap-seconds (stub).
+//! - `log` — structured session sight logging. *Implemented*.
+//! - `update` — apply a signed `bris-data` payload (verified
+//!   signature, atomic swap). *Implemented*.
 
 mod config;
 mod nmea_transport;
 mod replay_report;
+mod subcommands;
 
 use anyhow::{bail, Context};
 use bris_almanac::{refraction::Atmosphere, Observer};
@@ -45,6 +48,7 @@ use bris_vision::{load_frame_from_path_with_rotation, save_frame_as_png, Intrins
 use chrono::{TimeZone, Utc};
 use clap::{Parser, Subcommand};
 use std::fs;
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -87,9 +91,15 @@ enum Command {
     /// printed checkerboard. See `docs/operator/calibration.md` for
     /// the operator workflow.
     Calibrate(CalibrateArgs),
-    /// Compute a one-shot fix from a webcam (stub; the
-    /// streaming engine in `serve` supersedes this).
-    Fix,
+    /// Compute a fix by driving the continuous streaming
+    /// engine over a recorded capture (bundle or frames
+    /// directory), emitting NMEA plus a per-fix uncertainty
+    /// record. `--continuous` keeps every published fix; the
+    /// default single-shot mode reports only the last (best)
+    /// fix. This is a bounded driver over the SAME
+    /// `StreamingEngine` that `serve` runs live — no daemon/
+    /// client split.
+    Fix(FixArgs),
     /// Run the continuous streaming engine against a V4L2
     /// camera, logging each published fix and emitting NMEA
     /// to the configured sinks (stdout, TCP server).
@@ -119,10 +129,18 @@ enum Command {
     /// Android app provides for on-device sessions.
     #[command(subcommand)]
     Session(SessionCommand),
-    /// Sight log management (stub).
-    Log,
-    /// Download almanac/catalog/leap-second updates (stub).
-    Update,
+    /// Structured session logging: append every published fix
+    /// for a recorded capture to a session's newline-delimited
+    /// JSON sight log (`sight-log.jsonl`), each record carrying
+    /// the fix position and its full uncertainty.
+    Log(LogArgs),
+    /// Apply a signed `bris-data` payload (almanac / catalog /
+    /// leap-seconds) to a data directory: verify the Ed25519
+    /// signature over the payload's BLAKE3 digest, then swap it
+    /// into place atomically. A bad signature or a mid-swap
+    /// failure leaves the previous data untouched — never a
+    /// silent partial update.
+    Update(UpdateArgs),
 }
 
 #[derive(Debug, clap::Args)]
@@ -606,6 +624,100 @@ impl RotationArg {
     }
 }
 
+#[derive(Debug, clap::Args)]
+struct FixArgs {
+    /// Debug bundle directory (loads `bundle.json` + frames).
+    /// Preferred over `--frames`.
+    #[arg(long)]
+    bundle: Option<PathBuf>,
+    /// Directory of raw frames (orphan-corpus path). Only used
+    /// when `--bundle` is absent; requires `--intrinsics` and
+    /// the AP flags below to supply the manifest values.
+    #[arg(long, conflicts_with = "bundle")]
+    frames: Option<PathBuf>,
+    /// JSON `IntrinsicsRecord` file (required with `--frames`).
+    #[arg(long)]
+    intrinsics: Option<PathBuf>,
+    /// Assumed-position latitude (deg N). Feeds the engine's
+    /// sight-reduction AP; without a bundle-supplied AP this is
+    /// required for a fix.
+    #[arg(long, allow_hyphen_values = true)]
+    ap_lat: Option<f64>,
+    /// Assumed-position longitude (deg E).
+    #[arg(long, allow_hyphen_values = true)]
+    ap_lon: Option<f64>,
+    /// Eye height above sea level (m). Defaults to 2.0.
+    #[arg(long)]
+    eye_height_m: Option<f64>,
+    /// Source-rotation override for `--frames`.
+    #[arg(long, value_enum)]
+    source_rotation: Option<RotationArg>,
+    /// Report every published fix instead of only the final
+    /// (single-shot) one. The engine runs continuously either
+    /// way; this only controls how many fixes are emitted.
+    #[arg(long, default_value_t = false)]
+    continuous: bool,
+    /// Write the per-fix uncertainty records (one JSON object
+    /// per line) to this path instead of stdout. NMEA still
+    /// goes to stdout.
+    #[arg(long)]
+    out: Option<PathBuf>,
+}
+
+#[derive(Debug, clap::Args)]
+struct LogArgs {
+    /// Session UUID whose sight log to append to. The session
+    /// must already exist under `<corpus>/sessions/<UUID>/`.
+    #[arg(long)]
+    session: uuid::Uuid,
+    /// Corpus root. Defaults to `./bris-corpus`.
+    #[arg(long)]
+    corpus: Option<PathBuf>,
+    /// Debug bundle directory to derive fixes from.
+    #[arg(long)]
+    bundle: Option<PathBuf>,
+    /// Directory of raw frames (requires `--intrinsics`).
+    #[arg(long, conflicts_with = "bundle")]
+    frames: Option<PathBuf>,
+    /// JSON `IntrinsicsRecord` file (required with `--frames`).
+    #[arg(long)]
+    intrinsics: Option<PathBuf>,
+    /// Assumed-position latitude (deg N).
+    #[arg(long, allow_hyphen_values = true)]
+    ap_lat: Option<f64>,
+    /// Assumed-position longitude (deg E).
+    #[arg(long, allow_hyphen_values = true)]
+    ap_lon: Option<f64>,
+    /// Eye height above sea level (m). Defaults to 2.0.
+    #[arg(long)]
+    eye_height_m: Option<f64>,
+    /// Source-rotation override for `--frames`.
+    #[arg(long, value_enum)]
+    source_rotation: Option<RotationArg>,
+}
+
+#[derive(Debug, clap::Args)]
+struct UpdateArgs {
+    /// Path to the signed payload directory to apply. Must
+    /// contain a `payload/` subtree holding the new data files,
+    /// a `manifest.json` (the `subcommands::UpdateManifest`
+    /// schema: version, and a BLAKE3 digest per payload file),
+    /// and a detached `manifest.sig` — the raw 64-byte Ed25519
+    /// signature over `manifest.json`'s exact bytes.
+    #[arg(long)]
+    payload: PathBuf,
+    /// Destination data directory the payload replaces. The
+    /// swap is atomic: the new tree is staged alongside and
+    /// renamed into place only after full verification.
+    #[arg(long)]
+    data_dir: PathBuf,
+    /// Ed25519 public key (32 raw bytes, hex-encoded) trusted
+    /// to sign updates. Required — an unsigned or unverifiable
+    /// payload is refused.
+    #[arg(long)]
+    pubkey_hex: String,
+}
+
 fn rotation_from_degrees(deg: u16) -> anyhow::Result<Rotation> {
     match deg {
         0 => Ok(Rotation::Deg0),
@@ -654,9 +766,9 @@ fn main() -> anyhow::Result<()> {
         Command::Capture(args) => run_capture(&args, &raw_config),
         Command::Serve(args) => run_serve(&args, &raw_config),
         Command::Calibrate(args) => run_calibrate(&args),
-        Command::Fix | Command::Log | Command::Update => {
-            bail!("not yet implemented; see plan.org for the development roadmap");
-        }
+        Command::Fix(args) => run_fix(&args),
+        Command::Log(args) => run_log(&args),
+        Command::Update(args) => subcommands::run_update(&args),
     }
 }
 
@@ -2706,6 +2818,229 @@ fn median(values: &[f64]) -> f64 {
     } else {
         0.5 * (v[n / 2 - 1] + v[n / 2])
     }
+}
+
+// -------------------------------------------------------------
+// `bris fix` / `bris log` subcommands
+// -------------------------------------------------------------
+
+/// One structured, serializable fix record: the position plus
+/// the full published uncertainty. Shared by `fix` (per-fix
+/// stdout/file records) and `log` (the session sight-log lines).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
+struct FixRecord {
+    /// Approximate UTC of the fix, ms since the Unix epoch.
+    timestamp_unix_ms: i64,
+    lat_deg: f64,
+    lon_deg: f64,
+    /// 1σ semi-major axis of the position error ellipse (nm).
+    sigma_major_nm: f64,
+    /// 1σ semi-minor axis of the position error ellipse (nm).
+    sigma_minor_nm: f64,
+    /// Ellipse orientation (rad).
+    orientation_rad: f64,
+    /// Number of sights combined into this fix.
+    sight_count: u32,
+    /// Reduced chi-square of the least-squares fit, when the
+    /// geometry supported computing one.
+    chi_square: Option<f64>,
+}
+
+impl FixRecord {
+    fn from_published(pf: &PublishedFix) -> Self {
+        Self {
+            timestamp_unix_ms: tt_to_unix_ms(pf.timestamp),
+            lat_deg: pf.fix.lat.degrees(),
+            lon_deg: pf.fix.lon.degrees(),
+            sigma_major_nm: pf.fix.sigma_major_nm,
+            sigma_minor_nm: pf.fix.sigma_minor_nm,
+            orientation_rad: pf.fix.orientation_rad,
+            sight_count: pf.fix.sight_count,
+            chi_square: pf.fix.chi_square,
+        }
+    }
+}
+
+/// Drive the streaming engine over one recorded capture and
+/// return every published fix, in publication order.
+///
+/// This is the shared engine driver behind both `fix` and
+/// `log`: it constructs a Default-mode replay over the given
+/// bundle/frames input and runs the same continuous
+/// `StreamingEngine` that `serve` runs live — there is no
+/// separate one-shot pipeline.
+fn drive_engine_over_capture(
+    bundle: Option<&Path>,
+    frames: Option<&Path>,
+    intrinsics: Option<&Path>,
+    ap_lat: Option<f64>,
+    ap_lon: Option<f64>,
+    eye_height_m: Option<f64>,
+    source_rotation: Option<RotationArg>,
+) -> anyhow::Result<Vec<PublishedFix>> {
+    if bundle.is_none() && frames.is_none() {
+        bail!("either --bundle or --frames must be supplied");
+    }
+    let mut replay_args = base_replay_args();
+    replay_args.bundle = bundle.map(Path::to_path_buf);
+    replay_args.frames = frames.map(Path::to_path_buf);
+    replay_args.intrinsics = intrinsics.map(Path::to_path_buf);
+    replay_args.ap_lat = ap_lat;
+    replay_args.ap_lon = ap_lon;
+    replay_args.eye_height_m = eye_height_m;
+    replay_args.source_rotation = source_rotation;
+
+    let (mut manifest, bundle_dir) = resolve_manifest(&replay_args)?;
+    apply_cli_overrides(&mut manifest, &replay_args)?;
+    if manifest.capture.first_frame_blake3.is_some() {
+        verify_first_frame_checksum(&manifest, &bundle_dir)
+            .context("first-frame checksum verification")?;
+    }
+    let enumerated = enumerate_frames(&bundle_dir)
+        .with_context(|| format!("enumerate frames at {}", bundle_dir.display()))?;
+    if enumerated.is_empty() {
+        bail!("no frames found under {}", bundle_dir.display());
+    }
+    let bundle_dir_arg = replay_args.bundle.as_deref();
+    let result = run_one_mode(
+        ReplayMode::Default,
+        &replay_args,
+        &manifest,
+        bundle_dir_arg,
+        &enumerated,
+    )?;
+    Ok(result.fixes)
+}
+
+/// Construct a `ReplayArgs` with every optional flag off, so
+/// the `fix`/`log` drivers only set the handful of fields they
+/// actually expose. Mirrors the clap defaults exactly.
+fn base_replay_args() -> ReplayArgs {
+    ReplayArgs {
+        bundle: None,
+        frames: None,
+        session: None,
+        corpus: None,
+        ap_lat: None,
+        ap_lon: None,
+        eye_height_m: None,
+        gps_truth_lat: None,
+        gps_truth_lon: None,
+        intrinsics: None,
+        source_rotation: None,
+        capture_utc: None,
+        ap_seed_truth: false,
+        ap_lock_truth: false,
+        no_ap: false,
+        all_modes: false,
+        segmentation_model: None,
+        ml_gravity: false,
+        ml_gravity_model: None,
+        disable_ephemeris_stitch_fallback: false,
+        horizon_providers: None,
+        profile: None,
+        max_position_sigma_nm: None,
+        min_azimuth_spread_rad: None,
+        max_ellipse_axis_ratio: None,
+        coarse_hemisphere: None,
+        data_root: None,
+        disable_store: false,
+        nmea_stdout: false,
+        render_frames: false,
+        stage_d_dispatch: None,
+        all_sessions: false,
+    }
+}
+
+fn run_fix(args: &FixArgs) -> anyhow::Result<()> {
+    let fixes = drive_engine_over_capture(
+        args.bundle.as_deref(),
+        args.frames.as_deref(),
+        args.intrinsics.as_deref(),
+        args.ap_lat,
+        args.ap_lon,
+        args.eye_height_m,
+        args.source_rotation,
+    )?;
+    if fixes.is_empty() {
+        bail!(
+            "no fix published for this capture (insufficient sights / gated by \
+             publication quality). Inspect with `bris replay --render-frames`."
+        );
+    }
+    // Single-shot: report only the last (latest) published fix;
+    // --continuous: report every published fix.
+    let selected: Vec<&PublishedFix> = if args.continuous {
+        fixes.iter().collect()
+    } else {
+        vec![fixes.last().expect("non-empty checked above")]
+    };
+
+    // NMEA always to stdout; uncertainty records to --out or stdout.
+    let mut record_sink: Box<dyn std::io::Write> = match &args.out {
+        Some(path) => Box::new(std::io::BufWriter::new(
+            fs::File::create(path)
+                .with_context(|| format!("create fix output file {}", path.display()))?,
+        )),
+        None => Box::new(std::io::stdout()),
+    };
+    for pf in &selected {
+        let nmea = format_fix_as_nmea(pf, Utc::now(), QualityThresholds::default());
+        // NMEA sentence(s) to stdout verbatim.
+        print!("{nmea}");
+        let record = FixRecord::from_published(pf);
+        let line = serde_json::to_string(&record).context("serialize fix record")?;
+        writeln!(record_sink, "{line}").context("write fix record")?;
+    }
+    record_sink.flush().context("flush fix records")?;
+    info!(fixes = selected.len(), "bris fix: done");
+    Ok(())
+}
+
+/// Filename of the per-session structured sight log.
+const SIGHT_LOG_FILENAME: &str = "sight-log.jsonl";
+
+fn run_log(args: &LogArgs) -> anyhow::Result<()> {
+    let corpus = args.corpus.clone().unwrap_or_else(default_corpus_root);
+    let session_dir = corpus.join("sessions").join(args.session.to_string());
+    // The session must already exist; loading validates it.
+    let _session = SessionManifest::load_from_dir(&session_dir)
+        .with_context(|| format!("load session.json from {}", session_dir.display()))?;
+
+    let fixes = drive_engine_over_capture(
+        args.bundle.as_deref(),
+        args.frames.as_deref(),
+        args.intrinsics.as_deref(),
+        args.ap_lat,
+        args.ap_lon,
+        args.eye_height_m,
+        args.source_rotation,
+    )?;
+
+    let log_path = session_dir.join(SIGHT_LOG_FILENAME);
+    // Append, so repeated `bris log` runs accumulate the
+    // session's sight history rather than clobbering it.
+    let mut file = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+        .with_context(|| format!("open sight log {}", log_path.display()))?;
+    let mut written = 0usize;
+    for pf in &fixes {
+        let record = FixRecord::from_published(pf);
+        let line = serde_json::to_string(&record).context("serialize sight-log record")?;
+        writeln!(file, "{line}").context("append sight-log record")?;
+        written += 1;
+    }
+    file.flush().context("flush sight log")?;
+    info!(
+        session = %args.session,
+        records = written,
+        log = %log_path.display(),
+        "bris log: appended structured sight records"
+    );
+    println!("{written} fix record(s) appended to {}", log_path.display());
+    Ok(())
 }
 
 // -------------------------------------------------------------

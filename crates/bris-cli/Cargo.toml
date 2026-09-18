@@ -39,6 +39,13 @@ serde_json = "1"
 clap = { version = "4", features = ["derive"] }
 ctrlc.workspace = true
 indicatif.workspace = true
+# Signed-update verification (`bris update`): Ed25519 over a
+# BLAKE3 payload digest. blake3 is already used by bris-bundle
+# / bris-ffi; ed25519-dalek + hex are MIT/BSD/Apache (cargo-deny
+# clean).
+ed25519-dalek = "2"
+blake3 = "1"
+hex = "0.4"
 
 [dev-dependencies]
 tempfile.workspace = true

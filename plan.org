@@ -2158,8 +2158,15 @@ references to the regression tests that pin the behavior. See
    CLI flags override file values. Sample config at
    ~crates/bris-cli/examples/config.toml~.
 
-   *Stubs:* ~calibrate~, ~fix~, ~log~, ~update~ (return a
-   "not yet implemented" error pointing at this plan).
+   *Implemented:* ~calibrate~ (lens calibration), ~fix~
+   (single-shot / ~--continuous~ fix driven over the streaming
+   engine from a recorded capture, emitting NMEA + a per-fix
+   uncertainty record), ~log~ (append structured fix records to
+   a session's ~sight-log.jsonl~), and ~update~ (apply a signed
+   ~bris-data~ payload: Ed25519 signature over the manifest,
+   per-file BLAKE3 digest verification, atomic swap — no silent
+   partial update). All are bounded drivers over the same
+   continuous ~StreamingEngine~ (no daemon/client split).
 ** DONE Camera capture via V4L2 (libcamera deferred)
    New ~bris-capture~ workspace crate wraps the ~v4l~ crate's
    mmap streaming capture. Wired into ~bris capture~ (record

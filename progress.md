@@ -9,6 +9,40 @@ For the end-to-end pipeline architecture and data flow, see
 
 ---
 
+## bris-cli: fix / log / update subcommands implemented
+
+The previously-stubbed `bris fix`, `bris log`, and `bris update`
+subcommands are now real bounded drivers (calibrate was already
+wired to the calibration workflow):
+
+- `bris fix --bundle <dir>` (or `--frames <dir> --intrinsics
+  <file>`) drives the continuous `StreamingEngine` over a
+  recorded capture and emits, per published fix, an NMEA
+  sentence (stdout) plus a structured uncertainty record
+  (`FixRecord`: lat/lon, σ-major/σ-minor/orientation, sight
+  count, χ²). Single-shot reports only the last fix; `--continuous`
+  reports every published fix. A capture that publishes no fix
+  exits non-zero with an honest "no fix published" message — never
+  a fabricated 0,0.
+- `bris log --session <uuid> --bundle <dir>` appends every
+  published fix as a JSON line to the session's
+  `sight-log.jsonl`, requiring the session to already exist.
+- `bris update --payload <dir> --data-dir <dir> --pubkey-hex
+  <key>` applies a signed data payload: it verifies the detached
+  Ed25519 `manifest.sig` over `manifest.json`, verifies every
+  payload file against the manifest's BLAKE3 digests (and rejects
+  unlisted files), then swaps the tree into place atomically
+  (stage → rename, old tree restored on any failure). New deps:
+  `ed25519-dalek`, `blake3`, `hex` (all cargo-deny-clean).
+
+Tests: `subcommands::tests` (5 unit tests for the update
+verify/atomic-swap paths incl. wrong-key, tampered-payload,
+tampered-manifest, and extra-file rejection) and `tests/fix_log.rs`
+(fix honest-silence + log sight-log creation, end-to-end via the
+compiled binary). `cargo test -p bris-cli` green (26 tests).
+
+---
+
 ## Pipeline: pre-classification masking + seg-cached horizon dispatch (2026-06-07)
 
 Reorders the per-frame pipeline so that segmentation runs ONCE
