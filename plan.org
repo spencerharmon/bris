@@ -551,17 +551,25 @@ references to the regression tests that pin the behavior. See
 
    3. *(DONE)* *Obstruction-aware horizon RANSAC.* Implemented as
       ~sky_to_sea_transitions_with_obstruction~ with a ~CandidateSource~
-      enum (SkyToSea / SkyToObstructionToSea / SkyToObstructionOnly).
-      The detector accepts SkyToSea + SkyToObstructionToSea by
-      default; SkyToObstructionOnly is filtered out. Empirical:
-      on the ~sailing_with_distant_shore~ regression scene, the
-      obstruction-aware variant adds 168 distant-shore candidate
-      columns to the 162 clean sky→sea columns, doubling the
-      available horizon evidence. *Future work:* weighted RANSAC
-      that prefers SkyToSea over SkyToObstructionToSea, with the
-      latter's σ contribution inflated to reflect its lower
-      confidence. The current implementation treats both sources
-      identically.
+      enum (SkyToSea / SkyToObstructionToSea /
+      SkyToThickObstructionToSea / SkyToObstructionOnly). The detector
+      accepts the three sky→…→sea sources by default (walking past a
+      thin *or* thick shore/obstruction band to the sea below);
+      SkyToObstructionOnly is filtered out. Empirical: on the
+      ~sailing_with_distant_shore~ regression scene, the
+      obstruction-aware variant adds ~168 distant-shore candidate
+      columns to the ~162 clean sky→sea columns, doubling the
+      available horizon evidence. Weighted RANSAC now prefers SkyToSea
+      (weight 1.0) over the obstruction-mediated sources
+      (SkyToObstructionToSea 0.5, SkyToThickObstructionToSea 0.25):
+      ~finalize_horizon_weighted~ / ~ransac_line_weighted~ do a
+      weighted least-squares refit whose weighted RMS residual — and
+      hence the reported altitude σ — inflates when the fit leans on
+      lower-confidence obstruction candidates. Per-source column
+      counts are exposed via ~segmentation_transition_counts~ and
+      asserted by the regression harness's
+      ~segmentation_transition_counts~ check. *Future work:* per-axis
+      σ from the horizon-line covariance rather than the scalar RMS.
 
    4. *Star-region prior for night.* A trained model that identifies
       "this region of the image looks like night sky with stars" can

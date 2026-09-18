@@ -399,39 +399,47 @@ pub fn detect_horizon_via_segmentation_with_mask(
         }
     }
     // Use the obstruction-aware transition extractor and accept
-    // SkyToSea + SkyToObstructionToSea (thin obstruction = distant
-    // shore or distant vessel between sea and sky). Strict
-    // SkyToObstructionOnly columns are not accepted by default
-    // because they're frequently the foreground vessel (boat top
-    // edge) rather than horizon.
-    let raw_candidates = sky_to_sea_transitions_with_obstruction(mask);
+    // SkyToSea + SkyToObstructionToSea + SkyToThickObstructionToSea
+    // (a distant shore or vessel band, thin or thick, walked past to
+    // the sea below). Strict SkyToObstructionOnly columns are not
+    // accepted by default because they're frequently the foreground
+    // vessel (boat top edge) rather than horizon.
+    //
+    // Each accepted candidate carries a per-source weight so the
+    // weighted RANSAC refit trusts a clean sky→sea transition (the
+    // classical fast path) most and inflates the σ contribution of
+    // obstruction-mediated candidates in proportion to how much the
+    // intervening band could bias the horizon row.
+    let (raw_candidates, _counts) = sky_to_sea_transitions_with_obstruction(mask);
     let candidates: Vec<HorizonCandidate> = raw_candidates
         .into_iter()
         .filter(|c| {
             matches!(
                 c.source,
-                CandidateSource::SkyToSea | CandidateSource::SkyToObstructionToSea
+                CandidateSource::SkyToSea
+                    | CandidateSource::SkyToObstructionToSea
+                    | CandidateSource::SkyToThickObstructionToSea
             )
         })
         .collect();
     tracing::debug!(
         candidate_columns = candidates.len(),
-        "segmentation: sky→sea (and sky→thin-obstruction→sea) transition columns"
+        "segmentation: sky→sea (and sky→obstruction→sea) transition columns"
     );
 
     let scale_x = f64::from(frame.width()) / f64::from(mask.width);
     let scale_y = f64::from(frame.height()) / f64::from(mask.height);
-    let candidates_in_frame: Vec<(f64, f64)> = candidates
+    let candidates_in_frame: Vec<(f64, f64, f64)> = candidates
         .into_iter()
-        .map(|c| (c.x * scale_x, c.y * scale_y))
+        .map(|c| (c.x * scale_x, c.y * scale_y, c.source.weight()))
         // Filter by column mask in full-resolution column space.
-        .filter(|&(x, _)| match column_mask {
+        .filter(|&(x, _, _)| match column_mask {
             None => true,
             Some(m) => m.get(x as usize).copied().unwrap_or(false),
         })
         .collect();
 
-    Ok(crate::horizon::finalize_horizon(
+    Ok(crate::horizon::finalize_horizon_weighted(
         frame,
         &candidates_in_frame,
         1.0,
@@ -486,8 +494,10 @@ fn image_path_to_input_array(
 /// One horizon candidate from the segmentation pass.
 ///
 /// The candidate carries its `source`, an indicator of how the
-/// transition was detected. RANSAC weighting (future work) can use
-/// this to prefer high-confidence sources over low-confidence ones.
+/// transition was detected. The weighted RANSAC step uses this to
+/// prefer high-confidence sources over low-confidence ones by
+/// scaling each candidate's weight (and hence its σ contribution)
+/// via [`CandidateSource::weight`].
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct HorizonCandidate {
     /// Column (x) and row (y) in mask coordinates.
@@ -510,11 +520,85 @@ enum CandidateSource {
     /// uncertainty about whether the obstruction's top is the
     /// horizon or sits above it.
     SkyToObstructionToSea,
+    /// Sky → thick obstruction → sea. A wider shore/vessel band was
+    /// walked past to reach sea below it. Same geometric meaning as
+    /// [`Self::SkyToObstructionToSea`] (the horizon is at the
+    /// sky→obstruction row), but with even lower confidence because
+    /// the wider band admits a larger error between the obstruction's
+    /// top and the true horizon. Contributes evidence but with a
+    /// small weight so it never dominates a clean sky→sea fit.
+    SkyToThickObstructionToSea,
     /// Sky → obstruction with no sea below. Lower confidence: the
     /// obstruction might be the horizon (the entire visible "below
     /// horizon" is shore or boat), or might be in the middle of the
     /// frame with the horizon hidden behind it.
     SkyToObstructionOnly,
+}
+
+impl CandidateSource {
+    /// Relative weight this source contributes to the weighted
+    /// RANSAC fit. A clean sky→sea transition is the gold standard
+    /// (weight 1.0); obstruction-mediated transitions carry less
+    /// weight in proportion to how much the intervening band could
+    /// bias the horizon row. The weight is the inverse-variance
+    /// factor the weighted least-squares refit applies, so a lower
+    /// weight both de-emphasizes the candidate in the fit and
+    /// inflates the resulting σ, exactly as the Phase 2 contract
+    /// ("prefers `SkyToSea` … with the latter's σ contribution
+    /// inflated") requires.
+    fn weight(self) -> f64 {
+        match self {
+            CandidateSource::SkyToSea => 1.0,
+            CandidateSource::SkyToObstructionToSea => 0.5,
+            CandidateSource::SkyToThickObstructionToSea => 0.25,
+            // Never fed into the fit by default; present for
+            // completeness so the match is exhaustive.
+            CandidateSource::SkyToObstructionOnly => 0.1,
+        }
+    }
+}
+
+/// Per-source column counts from the obstruction-aware transition
+/// extractor, exposed so callers (and the regression harness) can
+/// assert the load-bearing property of the ML segmentation detector:
+/// obstruction-aware columns roughly *double* the usable horizon
+/// evidence over a strict sky→sea-only detector on cluttered scenes.
+///
+/// All counts are in mask (inference-resolution) columns.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SegmentationTransitionCounts {
+    /// Columns with a clean sky→sea/water transition (highest
+    /// confidence; the strict detector's entire yield).
+    pub sky_to_sea: u32,
+    /// Columns where a *thin* obstruction band was walked past to
+    /// reach sea below it (distant shore / vessel between sea and
+    /// sky). These are the "extra" evidence the strict detector
+    /// discards.
+    pub sky_to_obstr_to_sea: u32,
+    /// Columns where a *thick* obstruction band was walked past to
+    /// reach sea below it. Lower confidence than the thin case, but
+    /// still real distant-shore evidence rather than foreground.
+    pub sky_to_thick_obstr_to_sea: u32,
+    /// Columns where sky met an obstruction with no sea below (the
+    /// obstruction reached the frame bottom). Filtered out of the
+    /// fit by default — frequently the foreground vessel.
+    pub sky_to_obstr_only: u32,
+    /// Columns that never began with sky (foreground reaches the top)
+    /// or began with sea — no usable horizon transition.
+    pub no_sky: u32,
+    /// Columns that were sky all the way down (no transition found).
+    pub all_sky: u32,
+}
+
+/// Extract per-source transition counts from a precomputed
+/// [`SegmentationMask`], without fitting a horizon.
+///
+/// This surfaces the counts the obstruction-aware extractor already
+/// computes internally so callers can quantify how much evidence the
+/// obstruction-aware walk contributes over a strict sky→sea detector.
+#[must_use]
+pub fn segmentation_transition_counts(mask: &SegmentationMask) -> SegmentationTransitionCounts {
+    sky_to_sea_transitions_with_obstruction(mask).1
 }
 
 /// Find sky→sea transitions per column, with obstruction tolerance.
@@ -525,36 +609,41 @@ enum CandidateSource {
 /// 3. If the non-sky pixel is sea/water → emit `SkyToSea` candidate
 ///    at that row.
 /// 4. If the non-sky pixel is something else (boat/ship/distant
-///    shore class), look further down for sea/water within a small
-///    span. If found, the obstruction is "thin" and we emit
-///    `SkyToObstructionToSea` at the sky→obstruction row.
+///    shore class), keep walking DOWN through the obstruction band
+///    looking for sea/water below it. If sea is found, emit a
+///    candidate at the sky→obstruction row whose *source* records
+///    how wide the band was: `SkyToObstructionToSea` for a thin band
+///    (≤ `THIN_OBSTRUCTION_SPAN_PX`), else
+///    `SkyToThickObstructionToSea` for a wider band walked past —
+///    lower confidence, but still real distant-shore evidence rather
+///    than discarded foreground.
 /// 5. If the non-sky pixel is an obstruction with no sea following
 ///    in the rest of the column, emit `SkyToObstructionOnly`.
 /// 6. If the column never starts with sky (e.g. ship structure
 ///    reaches the top), skip it entirely.
 ///
-/// "Thin" is defined as ≤ `MAX_OBSTRUCTION_SPAN_PX` rows of
-/// obstruction between the last sky and the first sea pixel. Beyond
-/// that, the obstruction is "thick" enough that whatever sea appears
-/// below it is more plausibly *foreground* (the boat is sitting on
-/// it) than horizon-related, so we treat the column as occluded.
-fn sky_to_sea_transitions_with_obstruction(mask: &SegmentationMask) -> Vec<HorizonCandidate> {
-    /// Maximum row span of obstruction sandwiched between sky and sea
-    /// for the column to still contribute a horizon candidate. Tuned
-    /// for the inference-resolution mask (512 rows tall): ~5% of
-    /// frame height.
-    const MAX_OBSTRUCTION_SPAN_PX: usize = 25;
+/// The band is only ever walked past up to `MAX_OBSTRUCTION_SPAN_PX`
+/// rows. Beyond that, whatever sea appears is more plausibly
+/// *foreground* (the boat is sitting on it) than horizon-related, so
+/// the column is treated as occluded (`SkyToObstructionOnly`).
+///
+/// Returns the candidate list plus the per-source column counts.
+fn sky_to_sea_transitions_with_obstruction(
+    mask: &SegmentationMask,
+) -> (Vec<HorizonCandidate>, SegmentationTransitionCounts) {
+    /// Upper bound on the obstruction band we will walk past at all.
+    /// Tuned for the inference-resolution mask (512 rows tall):
+    /// ~10% of frame height. Beyond this the sea below is foreground.
+    const MAX_OBSTRUCTION_SPAN_PX: usize = 50;
+    /// Threshold separating a "thin" band (distant shore/vessel,
+    /// high confidence its top ≈ the horizon) from a "thick" band
+    /// walked past with lower confidence. ~5% of frame height.
+    const THIN_OBSTRUCTION_SPAN_PX: usize = 25;
 
     let w = mask.width as usize;
     let h = mask.height as usize;
     let mut candidates = Vec::new();
-
-    // Counters for diagnostic logging.
-    let mut col_no_sky = 0usize;
-    let mut col_sky_to_sea = 0usize;
-    let mut col_sky_to_obstr_to_sea = 0usize;
-    let mut col_sky_to_obstr_only = 0usize;
-    let mut col_all_sky = 0usize;
+    let mut counts = SegmentationTransitionCounts::default();
 
     for x in 0..w {
         let mut state = ColumnState::SearchingForSky;
@@ -574,7 +663,7 @@ fn sky_to_sea_transitions_with_obstruction(mask: &SegmentationMask) -> Vec<Horiz
                         // No sky above this sea — column starts with
                         // foreground (boat) or sea; not a usable
                         // horizon column.
-                        col_no_sky += 1;
+                        counts.no_sky += 1;
                         handled = true;
                         break;
                     }
@@ -588,7 +677,7 @@ fn sky_to_sea_transitions_with_obstruction(mask: &SegmentationMask) -> Vec<Horiz
                             y: y as f64,
                             source: CandidateSource::SkyToSea,
                         });
-                        col_sky_to_sea += 1;
+                        counts.sky_to_sea += 1;
                         handled = true;
                         break;
                     } else if !is_sky {
@@ -603,17 +692,28 @@ fn sky_to_sea_transitions_with_obstruction(mask: &SegmentationMask) -> Vec<Horiz
                     if is_sea {
                         let span = y - since;
                         let row = sky_to_obstr_row.unwrap_or(y) as f64;
-                        if span <= MAX_OBSTRUCTION_SPAN_PX {
+                        if span <= THIN_OBSTRUCTION_SPAN_PX {
                             candidates.push(HorizonCandidate {
                                 x: x as f64,
                                 y: row,
                                 source: CandidateSource::SkyToObstructionToSea,
                             });
-                            col_sky_to_obstr_to_sea += 1;
+                            counts.sky_to_obstr_to_sea += 1;
+                        } else if span <= MAX_OBSTRUCTION_SPAN_PX {
+                            // Wider band, but still plausibly a
+                            // distant shore we can walk past. Emit a
+                            // lower-confidence candidate rather than
+                            // discarding the column's evidence.
+                            candidates.push(HorizonCandidate {
+                                x: x as f64,
+                                y: row,
+                                source: CandidateSource::SkyToThickObstructionToSea,
+                            });
+                            counts.sky_to_thick_obstr_to_sea += 1;
                         } else {
                             // Obstruction is too thick — treat as
                             // foreground occlusion.
-                            col_sky_to_obstr_only += 1;
+                            counts.sky_to_obstr_only += 1;
                         }
                         handled = true;
                         break;
@@ -639,25 +739,26 @@ fn sky_to_sea_transitions_with_obstruction(mask: &SegmentationMask) -> Vec<Horiz
                     y: row as f64,
                     source: CandidateSource::SkyToObstructionOnly,
                 });
-                col_sky_to_obstr_only += 1;
+                counts.sky_to_obstr_only += 1;
             } else if state == ColumnState::InSky {
-                col_all_sky += 1;
+                counts.all_sky += 1;
             } else {
-                col_no_sky += 1;
+                counts.no_sky += 1;
             }
         }
     }
 
     tracing::debug!(
-        col_no_sky,
-        col_sky_to_sea,
-        col_sky_to_obstr_to_sea,
-        col_sky_to_obstr_only,
-        col_all_sky,
+        col_no_sky = counts.no_sky,
+        col_sky_to_sea = counts.sky_to_sea,
+        col_sky_to_obstr_to_sea = counts.sky_to_obstr_to_sea,
+        col_sky_to_thick_obstr_to_sea = counts.sky_to_thick_obstr_to_sea,
+        col_sky_to_obstr_only = counts.sky_to_obstr_only,
+        col_all_sky = counts.all_sky,
         "segmentation: per-column transition counts (with obstruction tolerance)"
     );
 
-    candidates
+    (candidates, counts)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -728,7 +829,7 @@ mod tests {
             height: h as u32,
             labels,
         };
-        let candidates = sky_to_sea_transitions_with_obstruction(&mask);
+        let candidates = sky_to_sea_transitions_with_obstruction(&mask).0;
         let clean: Vec<_> = candidates
             .iter()
             .filter(|c| c.source == CandidateSource::SkyToSea)
@@ -761,7 +862,7 @@ mod tests {
             height: h as u32,
             labels,
         };
-        let candidates = sky_to_sea_transitions_with_obstruction(&mask);
+        let candidates = sky_to_sea_transitions_with_obstruction(&mask).0;
         // Column 0 must produce SkyToSea; column 1 SkyToObstructionOnly;
         // columns 2 and 3 produce nothing.
         let by_col: std::collections::HashMap<u32, &HorizonCandidate> =
@@ -847,7 +948,7 @@ mod tests {
     /// Build a 4×40 mask shaped:
     ///   col 0: sky → sea (no obstruction).
     ///   col 1: sky → thin shore (3 px) → sea.
-    ///   col 2: sky → thick shore (50 px) → sea (over-budget; rejected).
+    ///   col 2: sky → shore band (20 px, thin ≤ 25) → sea.
     ///   col 3: sky → boat (no sea).
     fn build_obstruction_mask() -> SegmentationMask {
         const W: usize = 4;
@@ -889,7 +990,7 @@ mod tests {
     #[test]
     fn obstruction_aware_finds_clean_sky_to_sea() {
         let mask = build_obstruction_mask();
-        let candidates = sky_to_sea_transitions_with_obstruction(&mask);
+        let candidates = sky_to_sea_transitions_with_obstruction(&mask).0;
         // Col 0 should produce SkyToSea at row 20.
         let col0 = candidates.iter().find(|c| (c.x - 0.0).abs() < 1e-9);
         assert!(col0.is_some(), "col 0 should produce a candidate");
@@ -901,7 +1002,7 @@ mod tests {
     #[test]
     fn obstruction_aware_accepts_thin_shore() {
         let mask = build_obstruction_mask();
-        let candidates = sky_to_sea_transitions_with_obstruction(&mask);
+        let candidates = sky_to_sea_transitions_with_obstruction(&mask).0;
         // Col 1 should produce SkyToObstructionToSea at row 18 (the
         // sky→shore transition row, not the shore→sea row, because
         // the shore's *top* is the closest approximation of the true
@@ -921,24 +1022,20 @@ mod tests {
     }
 
     #[test]
-    fn obstruction_aware_rejects_thick_obstruction() {
+    fn obstruction_aware_thin_band_within_budget() {
         let mask = build_obstruction_mask();
-        let candidates = sky_to_sea_transitions_with_obstruction(&mask);
-        // Col 2 (thick shore, 20 px > MAX_OBSTRUCTION_SPAN_PX of 25)
-        // — actually wait, 20 < 25 so it would pass. Let me check.
-        // The synth uses 18..38 = 20 rows. So this should actually
-        // pass. The test name is misleading; let me assert what
-        // *should* happen (it passes).
+        let candidates = sky_to_sea_transitions_with_obstruction(&mask).0;
+        // Col 2's shore spans rows 18..38 = 20 px, which is <=
+        // THIN_OBSTRUCTION_SPAN_PX (25) → still counted as thin.
         let col2 = candidates.iter().find(|c| (c.x - 2.0).abs() < 1e-9);
         assert!(col2.is_some());
-        // 20 px obstruction <= 25 px budget → SkyToObstructionToSea.
         assert_eq!(col2.unwrap().source, CandidateSource::SkyToObstructionToSea);
     }
 
     #[test]
     fn obstruction_aware_emits_obstruction_only_for_no_sea_columns() {
         let mask = build_obstruction_mask();
-        let candidates = sky_to_sea_transitions_with_obstruction(&mask);
+        let candidates = sky_to_sea_transitions_with_obstruction(&mask).0;
         // Col 3 has no sea at all — only sky then boat. Should emit
         // SkyToObstructionOnly at the sky→boat transition row.
         let col3 = candidates.iter().find(|c| (c.x - 3.0).abs() < 1e-9);
@@ -952,25 +1049,99 @@ mod tests {
     }
 
     #[test]
-    fn obstruction_aware_strict_thick_rejection() {
-        // Single column where the shore is 40 rows thick (well above
-        // MAX_OBSTRUCTION_SPAN_PX = 25). Algorithm should detect that
-        // span exceeded and emit no candidate (the obstruction is
-        // foreground, not horizon).
+    fn obstruction_aware_walks_past_thick_shore_band() {
+        // Single column where the shore is 40 rows thick: above the
+        // THIN threshold (25) but within MAX_OBSTRUCTION_SPAN_PX (50).
+        // The detector must WALK PAST the band to the sea below and
+        // emit a lower-confidence SkyToThickObstructionToSea candidate
+        // at the sky→obstruction row — real distant-shore evidence the
+        // strict detector would have discarded entirely.
         const W: usize = 1;
         const H: usize = 80;
         let mut labels = vec![CLASS_SKY; W * H];
-        labels[30..70].fill(13); // 40 rows of obstruction
-        labels[70..H].fill(CLASS_SEA);
+        labels[20..60].fill(13); // 40 rows of obstruction (thick)
+        labels[60..H].fill(CLASS_SEA);
         let mask = SegmentationMask {
             width: W as u32,
             height: H as u32,
             labels,
         };
-        let candidates = sky_to_sea_transitions_with_obstruction(&mask);
+        let candidates = sky_to_sea_transitions_with_obstruction(&mask).0;
+        assert_eq!(candidates.len(), 1, "should walk past the thick band");
+        let c = candidates[0];
+        assert_eq!(c.source, CandidateSource::SkyToThickObstructionToSea);
+        assert!((c.y - 20.0).abs() < 1e-9, "expected y=20, got {}", c.y);
+        // Confidence ordering: thick < thin < clean.
+        assert!(
+            CandidateSource::SkyToThickObstructionToSea.weight()
+                < CandidateSource::SkyToObstructionToSea.weight()
+        );
+        assert!(
+            CandidateSource::SkyToObstructionToSea.weight() < CandidateSource::SkyToSea.weight()
+        );
+    }
+
+    #[test]
+    fn obstruction_aware_rejects_foreground_thick_band() {
+        // Shore 60 rows thick — beyond MAX_OBSTRUCTION_SPAN_PX (50).
+        // The sea below is foreground the boat sits on, not horizon:
+        // no candidate, counted as obstruction-only.
+        const W: usize = 1;
+        const H: usize = 140;
+        let mut labels = vec![CLASS_SKY; W * H];
+        labels[20..80].fill(13); // 60 rows > 50 budget
+        labels[80..H].fill(CLASS_SEA);
+        let mask = SegmentationMask {
+            width: W as u32,
+            height: H as u32,
+            labels,
+        };
+        let (candidates, counts) = sky_to_sea_transitions_with_obstruction(&mask);
         assert!(
             candidates.is_empty(),
-            "thick obstruction (40 px > 25 px budget) should produce no candidate, got {candidates:?}"
+            "too-thick obstruction should produce no candidate, got {candidates:?}"
         );
+        assert_eq!(counts.sky_to_obstr_only, 1);
+    }
+
+    #[test]
+    fn transition_counts_quantify_obstruction_contribution() {
+        // A mask whose columns are split between clean sky→sea and
+        // thick-shore-walked-past columns: the public counts must
+        // report both, proving the obstruction-aware walk adds
+        // evidence a strict detector would discard.
+        const W: usize = 8;
+        const H: usize = 80;
+        let mut labels = vec![CLASS_SKY; W * H];
+        for x in 0..W {
+            if x < 4 {
+                // Clean sky→sea at row 30.
+                for y in 30..H {
+                    labels[y * W + x] = CLASS_SEA;
+                }
+            } else {
+                // Thick shore rows 30..60 (30 px, thick), then sea.
+                for y in 30..60 {
+                    labels[y * W + x] = 13;
+                }
+                for y in 60..H {
+                    labels[y * W + x] = CLASS_SEA;
+                }
+            }
+        }
+        let mask = SegmentationMask {
+            width: W as u32,
+            height: H as u32,
+            labels,
+        };
+        let counts = segmentation_transition_counts(&mask);
+        assert_eq!(counts.sky_to_sea, 4);
+        assert_eq!(counts.sky_to_thick_obstr_to_sea, 4);
+        assert_eq!(counts.sky_to_obstr_to_sea, 0);
+        // The obstruction-aware walk doubled the usable columns.
+        let strict = counts.sky_to_sea;
+        let obstruction_aware =
+            counts.sky_to_sea + counts.sky_to_obstr_to_sea + counts.sky_to_thick_obstr_to_sea;
+        assert_eq!(obstruction_aware, 2 * strict);
     }
 }

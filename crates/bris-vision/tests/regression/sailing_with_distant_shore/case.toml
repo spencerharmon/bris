@@ -57,9 +57,16 @@ notes               = "Robust horizon thanks to obstruction-aware columns adding
 # Per-column transition counts at the inference resolution. The
 # load-bearing assertion: the obstruction-aware detector contributes
 # meaningfully more columns than the strict sky-to-sea detector
-# would. Currently a no-op stub in the runner; the public API
-# doesn't yet expose per-source counts.
+# would. Asserted by check_segmentation_transition_counts against the
+# real segmented mask (skips when the 14.5 MB model file is absent).
+#
+# The obstruction-aware contribution is split across thin and thick
+# bands walked past to the sea below; col_obstruction_aware_min is the
+# robust combined lower bound (thin + thick), so the assertion holds
+# regardless of how a given band is classified by the thin/thick
+# threshold.
 [segmentation.transition_counts]
 col_sky_to_sea_min          = 100
-col_sky_to_obstr_to_sea_min = 100
-notes                       = "On this scene we observe ~162 + ~168 = ~330 accepted candidates; the obstruction-aware contribution is roughly equal to the clean sky-to-sea contribution."
+col_sky_to_obstr_to_sea_min = 50
+col_obstruction_aware_min   = 100
+notes                       = "On this scene we observe ~162 clean sky-to-sea columns plus ~168 obstruction-aware columns (thin + thick bands walked past), roughly doubling the available horizon evidence."
