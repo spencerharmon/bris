@@ -807,6 +807,48 @@ impl BundleManifest {
         fs::write(&path, json)?;
         Ok(())
     }
+
+    /// Classify a bundle as a single-fix retention or a
+    /// full debug-capture, for consumers (e.g. the diagnostic
+    /// submitter) that must tag a submission's kind.
+    ///
+    /// The signal is the declared `capture.frame_count`: a
+    /// Debug-OFF capture persists only the 1–3 fix-frame PGMs
+    /// that backed a published fix, while a Debug-ON capture
+    /// taps every analyzer frame (typically dozens to
+    /// thousands). We treat a small frame count as a fix
+    /// retention and anything larger as a debug capture. The
+    /// boundary is deliberately conservative
+    /// ([`Self::FIX_FRAME_MAX`]) — a fix is backed by at most a
+    /// handful of frames by construction (see
+    /// `docs/design/diagnostic_collection.md`). This is a
+    /// hint only; the authoritative per-frame retention lives
+    /// in each frame's sidecar.
+    #[must_use]
+    pub fn submission_kind_hint(&self) -> SubmissionKindHint {
+        if self.capture.frame_count <= Self::FIX_FRAME_MAX {
+            SubmissionKindHint::Fix
+        } else {
+            SubmissionKindHint::DebugCapture
+        }
+    }
+
+    /// Upper bound on the frame count of a pure fix retention.
+    /// A published fix is backed by at most a few contributing
+    /// frames; a capture with more frames than this was a
+    /// Debug-ON per-frame tap.
+    pub const FIX_FRAME_MAX: u32 = 3;
+}
+
+/// Coarse classification of a [`BundleManifest`] for
+/// submission tagging. Returned by
+/// [`BundleManifest::submission_kind_hint`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SubmissionKindHint {
+    /// A single-fix retention (only fix-frame pixels persisted).
+    Fix,
+    /// A Debug-ON per-frame capture.
+    DebugCapture,
 }
 
 /// Load the optional `index.jsonl` catalog from a bundle
