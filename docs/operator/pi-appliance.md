@@ -40,18 +40,44 @@ nix develop            # puts aarch64-unknown-linux-gnu-gcc on PATH
 scripts/pi-appliance/build.sh --tarball
 ```
 
-`.cargo/config.toml` names the cross linker and `cc-rs` compiler
-(`aarch64-unknown-linux-gnu-{gcc,g++,ar}`) for the `aarch64-unknown-linux-gnu`
-target, so a bare `cargo build --release --target aarch64-unknown-linux-gnu -p
-bris-cli` cross-compiles correctly as long as that toolchain is on PATH. The
-`[env]` entries use `force = false`, so an environment override (CI's Debian
-prefix, or a developer's own toolchain) still wins.
+You do **not** have to enter `nix develop` first, though. `.cargo/config.toml`
+routes the aarch64 linker and the `cc-rs` compiler/archiver
+(`aarch64-unknown-linux-gnu-{gcc,g++,ar}`) through the shim
+`.cargo/nix-cross-tool.sh` (installed under those three real tool names). The
+shim execs a matching cross tool if one is already on `PATH` (inside
+`nix develop`, or a Debian/CI host that renamed its `gcc-aarch64-linux-gnu` via
+the overrides below) and otherwise resolves the SAME pinned toolchain straight
+from the flake with `nix build .#crossToolchain`. So a **bare**
+
+```sh
+cargo build --release --target aarch64-unknown-linux-gnu -p bris-cli
+```
+
+cross-compiles correctly on any Nix host with no wrapping `nix develop` and no
+manual step — which is exactly the appliance definition-of-done check. The
+`rust-toolchain.toml` declares `targets = ["aarch64-unknown-linux-gnu"]`, so
+`rustup` auto-provisions the aarch64 `rust-std` on first build. The `[env]`
+entries use `force = false`, so an environment override (CI's Debian prefix, or
+a developer's own toolchain) still wins.
+
+### libclang for bindgen
+
+`bris-cli` transitively runs `bindgen` at build time (`v4l2-sys-mit` via
+`bris-capture`, and `ort-sys`), which needs **libclang** on the *host* (bindgen
+parses C headers on x86_64 to emit target-agnostic Rust bindings — this is
+independent of the aarch64 cross toolchain). bindgen finds a system libclang
+automatically (`/usr/lib/libclang.so` on Arch, `libclang-dev` on Debian). If it
+is missing, `bindgen` panics `Unable to find libclang … set LIBCLANG_PATH`; set
+`LIBCLANG_PATH` to a libclang lib dir, or run inside `nix develop` (the flake's
+devShell exports `LIBCLANG_PATH` from the pinned nix clang). CI installs
+`libclang-dev`; `scripts/pi-appliance/build.sh` auto-detects `LIBCLANG_PATH` via
+`llvm-config` and warns if none is found.
 
 ### Building in CI / on Debian
 
 CI (`.github/workflows/ci.yml`, the `cross-build` job) installs Debian's
 `gcc-aarch64-linux-gnu`, whose binaries carry the shorter `aarch64-linux-gnu-*`
-prefix. `build.sh` auto-detects that flavour and exports
+prefix, plus `libclang-dev`. `build.sh` auto-detects that flavour and exports
 `CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER` / `CC_aarch64_unknown_linux_gnu`
 overrides so the same recipe works there too. Nothing else changes.
 
@@ -83,6 +109,8 @@ The task's definition-of-done check is exactly the cross-compile step:
 cargo build --release --target aarch64-unknown-linux-gnu -p bris-cli
 ```
 
-Run inside `nix develop` (or with the Debian cross toolchain installed). A
-successful build produces `target/aarch64-unknown-linux-gnu/release/bris`, an
-`ELF 64-bit LSB … ARM aarch64` executable — confirm with `file` on it.
+Run inside `nix develop`, or bare on any Nix host (the `.cargo/nix-cross-tool.sh`
+shim resolves the pinned toolchain), or with the Debian cross toolchain +
+`libclang-dev` installed. A successful build produces
+`target/aarch64-unknown-linux-gnu/release/bris`, an `ELF 64-bit LSB … ARM
+aarch64` executable — confirm with `file` on it.
