@@ -28,6 +28,11 @@ bris-bundle.workspace = true
 uuid.workspace = true
 bris-capture.workspace = true
 bris-calibrate.workspace = true
+# On-device diagnostic submitter, shared with bris-ffi. `http`
+# gives the blocking HTTPS transport `bris submit` uses. The
+# collector URL + bearer token are supplied at runtime (flags /
+# config / env), never compiled in.
+bris-submit = { workspace = true, features = ["http"] }
 anyhow.workspace = true
 chrono.workspace = true
 image.workspace = true
@@ -36,7 +41,7 @@ toml.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 serde_json = "1"
-clap = { version = "4", features = ["derive"] }
+clap = { version = "4", features = ["derive", "env"] }
 ctrlc.workspace = true
 indicatif.workspace = true
 # Signed-update verification (`bris update`): Ed25519 over a

@@ -1,0 +1,51 @@
+[package]
+name = "bris-submit"
+description = "On-device diagnostic-submission client: builds a bris-bundle v1 multipart submission from a capture bundle, gates it behind an explicit operator review, and drives a retrying, on-disk-persistent submission queue against a bris-collector. Consumed by bris-ffi (Android) and bris-cli (embedded frontend)."
+publish = false
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[features]
+# `http` pulls in the blocking ureq client that turns a built
+# multipart payload into a real HTTPS POST. Off by default so a
+# consumer that supplies its own transport (e.g. the Android
+# shell, which does networking on the Kotlin side) links no HTTP
+# stack. bris-cli turns it on.
+default = []
+http = ["dep:ureq"]
+
+[dependencies]
+thiserror = { workspace = true }
+tracing = { workspace = true }
+chrono = { workspace = true }
+serde = { workspace = true }
+serde_json = "1"
+sha2 = "0.10"
+hex = "0.4"
+ulid = "1"
+
+bris-bundle = { workspace = true }
+
+# Blocking HTTP client for the on-device POST path. rustls TLS
+# (no OpenSSL system dep), MIT/Apache — cargo-deny clean. Only
+# linked under the `http` feature.
+ureq = { version = "2", default-features = false, features = ["tls", "gzip"], optional = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+serde_json = "1"
+# The real collector, mounted in-process, so our built payload
+# is proven acceptable end-to-end (multipart parse + size +
+# SHA-256 checksum validation) — not merely assumed.
+bris-collector = { workspace = true }
+axum = { version = "0.7", features = ["multipart"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"
+
+[lints]
+workspace = true

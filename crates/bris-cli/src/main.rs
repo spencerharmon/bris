@@ -21,6 +21,7 @@ mod config;
 mod nmea_transport;
 mod replay_report;
 mod subcommands;
+mod submit;
 
 use anyhow::{bail, Context};
 use bris_almanac::{refraction::Atmosphere, Observer};
@@ -141,6 +142,20 @@ enum Command {
     /// failure leaves the previous data untouched — never a
     /// silent partial update.
     Update(UpdateArgs),
+    /// Submit a capture bundle to a diagnostic collector.
+    ///
+    /// Builds a `bris-bundle v1` multipart submission from a
+    /// capture directory (the `bundle.json` the engine ran
+    /// against — shipped verbatim — plus its frames, sidecars,
+    /// optional `pbris.log` and calibration artifacts), shows a
+    /// one-screen pre-upload review, and — ONLY after explicit
+    /// operator confirmation (`--yes`) — enqueues it to a
+    /// durable, retrying on-disk queue and flushes that queue to
+    /// the collector. The collector base URL and bearer token
+    /// are runtime config (flags / env), never compiled in.
+    /// This is Bris's one and only network surface; nothing here
+    /// runs automatically.
+    Submit(SubmitArgs),
 }
 
 #[derive(Debug, clap::Args)]
@@ -718,6 +733,61 @@ struct UpdateArgs {
     pubkey_hex: String,
 }
 
+#[derive(Debug, clap::Args)]
+struct SubmitArgs {
+    /// Capture bundle directory (contains `bundle.json` and a
+    /// `frames/` or `media/` subdirectory). The `bundle.json`
+    /// is shipped verbatim — the manifest sent is the same one
+    /// the engine ran against.
+    #[arg(long)]
+    bundle: PathBuf,
+    /// Optional directory of calibration artifacts to attach
+    /// (`*.toml` intrinsics, residual `*.json`, checkerboard
+    /// frames). When set, the submission is tagged
+    /// `calibration`.
+    #[arg(long)]
+    calibration: Option<PathBuf>,
+    /// Collector base URL, e.g. `https://collector.example`.
+    /// Runtime config; falls back to `$BRIS_COLLECTOR_URL`.
+    /// Never compiled into the binary.
+    #[arg(long, env = "BRIS_COLLECTOR_URL")]
+    collector_url: Option<String>,
+    /// Bearer token for the collector. Runtime config; falls
+    /// back to `$BRIS_COLLECTOR_TOKEN`. Never compiled in.
+    #[arg(long, env = "BRIS_COLLECTOR_TOKEN")]
+    token: Option<String>,
+    /// Per-install device UUID stamped into the manifest.
+    /// Falls back to `$BRIS_DEVICE_UUID`.
+    #[arg(long, env = "BRIS_DEVICE_UUID")]
+    device_uuid: Option<String>,
+    /// Operator-entered free-text note attached to the
+    /// submission.
+    #[arg(long)]
+    note: Option<String>,
+    /// Root directory for the durable, retrying submission
+    /// queue. Defaults to `<data-root>/submit-queue`
+    /// (`~/.bris/submit-queue`).
+    #[arg(long)]
+    queue_root: Option<PathBuf>,
+    /// Explicit operator confirmation of the pre-upload review.
+    /// WITHOUT this flag `bris submit` prints the review and
+    /// STOPS — it never uploads. This is the CLI analogue of the
+    /// on-device one-screen review tap: no submission leaves the
+    /// device without an explicit operator action.
+    #[arg(long, default_value_t = false)]
+    yes: bool,
+    /// Build + review + enqueue only; do not POST to the
+    /// collector (the durable queue keeps the entry for a later
+    /// `--flush-only` run). Useful when offline.
+    #[arg(long, default_value_t = false)]
+    enqueue_only: bool,
+    /// Skip building a new submission; only flush already-queued
+    /// submissions to the collector. `--bundle` is still
+    /// required by clap but ignored in this mode.
+    #[arg(long, default_value_t = false)]
+    flush_only: bool,
+}
+
 fn rotation_from_degrees(deg: u16) -> anyhow::Result<Rotation> {
     match deg {
         0 => Ok(Rotation::Deg0),
@@ -769,6 +839,7 @@ fn main() -> anyhow::Result<()> {
         Command::Fix(args) => run_fix(&args),
         Command::Log(args) => run_log(&args),
         Command::Update(args) => subcommands::run_update(&args),
+        Command::Submit(args) => submit::run_submit(&args),
     }
 }
 

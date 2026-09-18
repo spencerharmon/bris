@@ -15,6 +15,7 @@ members = [
     "crates/bris-ffi",
     "crates/bris-collector",
     "crates/bris-bundle",
+    "crates/bris-submit",
 ]
 # bris-ffi and bris-collector were added together with the
 # diagnostic-collection spike (see
@@ -111,6 +112,7 @@ bris-calibrate = { path = "crates/bris-calibrate" }
 bris-ffi = { path = "crates/bris-ffi" }
 bris-collector = { path = "crates/bris-collector" }
 bris-bundle = { path = "crates/bris-bundle" }
+bris-submit = { path = "crates/bris-submit" }
 
 [profile.dev]
 # Full DWARF (`debug = 2`, the default) bloats `target/debug` by 2-5x for no

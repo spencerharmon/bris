@@ -48,6 +48,11 @@ bris-streaming = { path = "../bris-streaming", default-features = false }
 bris-calibrate = { workspace = true }
 bris-nmea = { workspace = true }
 bris-bundle = { workspace = true }
+# On-device diagnostic submitter (payload build + operator gate
+# + retrying persistent queue). `http` gives the blocking HTTPS
+# transport the FFI drives synchronously (Android calls it from a
+# coroutine); collector base URL + bearer token are runtime args.
+bris-submit = { workspace = true, features = ["http"] }
 blake3 = "1"
 serde_json = "1"
 

@@ -80,6 +80,14 @@ use bris_vision::{Frame, Intrinsics, Rotation};
 
 uniffi::setup_scaffolding!();
 
+/// On-device diagnostic Submitter (operator-gated bris-bundle v1
+/// submission + retrying persistent queue). See [`submitter`].
+mod submitter;
+pub use submitter::{
+    FfiCollectorEndpoint, FfiFlushOutcome, FfiReviewLine, FfiSubmissionReview, FfiSubmissionSource,
+    Submitter,
+};
+
 /// Errors that can be returned across the FFI boundary.
 ///
 /// Kept deliberately coarse: the Kotlin/Swift side renders these
