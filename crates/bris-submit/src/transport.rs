@@ -28,6 +28,13 @@ pub struct CollectorEndpoint {
     pub base_url: String,
     /// Bearer token for `Authorization: Bearer <token>`.
     pub bearer_token: String,
+    /// Device UUID to send in the `X-Bris-Device-Uuid` header
+    /// when `bearer_token` is a per-device token (see
+    /// `bris_collector::auth::device_or_admin_bearer`). `None`
+    /// when `bearer_token` is the shared admin/bootstrap token,
+    /// which the collector accepts on `POST /v1/submissions`
+    /// without the device header.
+    pub device_uuid: Option<String>,
 }
 
 impl std::fmt::Debug for CollectorEndpoint {
@@ -36,13 +43,20 @@ impl std::fmt::Debug for CollectorEndpoint {
         f.debug_struct("CollectorEndpoint")
             .field("base_url", &self.base_url)
             .field("bearer_token", &"<redacted>")
+            .field("device_uuid", &self.device_uuid)
             .finish()
     }
 }
 
 impl CollectorEndpoint {
     /// Construct an endpoint, trimming any trailing slash from
-    /// `base_url` so URL joining is unambiguous.
+    /// `base_url` so URL joining is unambiguous. No device UUID
+    /// is attached — use this when `bearer_token` is the shared
+    /// admin/bootstrap token. For a per-device token, use
+    /// [`Self::with_device_uuid`] afterwards, or the submission
+    /// will be rejected `401` (the collector requires the
+    /// `X-Bris-Device-Uuid` header to look up a per-device
+    /// token's hash).
     #[must_use]
     pub fn new(base_url: impl Into<String>, bearer_token: impl Into<String>) -> Self {
         let mut base_url = base_url.into();
@@ -52,7 +66,19 @@ impl CollectorEndpoint {
         Self {
             base_url,
             bearer_token: bearer_token.into(),
+            device_uuid: None,
         }
+    }
+
+    /// Attach the device UUID to send as `X-Bris-Device-Uuid`
+    /// alongside a per-device bearer token, per
+    /// `bris_collector::auth::device_or_admin_bearer`. Required
+    /// for `bearer_token` to be accepted as a per-device token;
+    /// the shared admin token needs no device UUID.
+    #[must_use]
+    pub fn with_device_uuid(mut self, device_uuid: impl Into<String>) -> Self {
+        self.device_uuid = Some(device_uuid.into());
+        self
     }
 
     /// The full submissions URL.
@@ -288,15 +314,24 @@ mod http_impl {
         ) -> Result<SubmissionOutcome, TransportError> {
             let body = encode_multipart(submission)?;
             let url = self.endpoint.submissions_url();
-            let resp = self
+            let mut req = self
                 .agent
                 .post(&url)
                 .set(
                     "Authorization",
                     &format!("Bearer {}", self.endpoint.bearer_token),
                 )
-                .set("Content-Type", &multipart_content_type())
-                .send_bytes(&body);
+                .set("Content-Type", &multipart_content_type());
+            // A per-device token is meaningless to the collector
+            // without the device UUID it was minted for (see
+            // `bris_collector::auth::device_or_admin_bearer`) —
+            // omitting this header is exactly why a per-device
+            // submission over this transport used to 401 even
+            // with a correct token.
+            if let Some(device_uuid) = &self.endpoint.device_uuid {
+                req = req.set("X-Bris-Device-Uuid", device_uuid);
+            }
+            let resp = req.send_bytes(&body);
             match resp {
                 Ok(response) => {
                     let text = response
