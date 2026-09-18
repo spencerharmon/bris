@@ -31,3 +31,21 @@ linker = ".cargo/aarch64-unknown-linux-gnu-gcc"
 CC_aarch64_unknown_linux_gnu = { value = ".cargo/aarch64-unknown-linux-gnu-gcc", force = false, relative = true }
 CXX_aarch64_unknown_linux_gnu = { value = ".cargo/aarch64-unknown-linux-gnu-g++", force = false, relative = true }
 AR_aarch64_unknown_linux_gnu = { value = ".cargo/aarch64-unknown-linux-gnu-ar", force = false, relative = true }
+# bindgen (v4l2-sys-mit via bris-capture, and ort-sys) dlopens libclang, which
+# clang-sys locates by (1) LIBCLANG_PATH, then (2) `llvm-config --prefix`. The
+# bare appliance DoD check
+#   cargo build --release --target aarch64-unknown-linux-gnu -p bris-cli
+# runs OUTSIDE `nix develop` and under a checkout-confined sandbox where the
+# host's /usr/lib/libclang.so is NOT visible, so — exactly like the cross
+# CC/linker above — libclang is resolved reproducibly from the pinned flake.
+# We point LLVM_CONFIG_PATH at the `.cargo/llvm-config` shim (a symlink to
+# `.cargo/nix-cross-tool.sh`), which — when no real llvm-config with a nix
+# libclang is on PATH — `nix build .#libclang` and prints that store path as the
+# `--prefix`. clang-sys then finds `<prefix>/lib/libclang.so*`. This is EXEC-time
+# (clang-sys runs llvm-config when bindgen loads libclang), so there is no build-
+# script ordering dependency — unlike CC, which cargo only invokes for C deps.
+# `relative = true` absolutizes the shim path against THIS config's dir so it
+# works from any build-script cwd; `force = false` lets an explicit
+# LLVM_CONFIG_PATH / LIBCLANG_PATH in the environment (inside `nix develop`, or a
+# Debian/CI host) still win. No infra identifiers are baked in.
+LLVM_CONFIG_PATH = { value = ".cargo/llvm-config", force = false, relative = true }

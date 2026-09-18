@@ -16,10 +16,12 @@
 #
 # LIBCLANG: bris-cli transitively needs libclang for bindgen (v4l2-sys-mit via
 # bris-capture, and ort-sys) even though it targets aarch64 — bindgen itself
-# runs on the HOST to parse C headers. `nix develop` exports LIBCLANG_PATH for
-# you (see flake.nix); outside nix (e.g. a bare Debian/CI host) install
-# `libclang-dev` (which provides `libclang.so`) and either export
-# LIBCLANG_PATH yourself or let this script auto-detect it via `llvm-config`.
+# runs on the HOST to parse C headers. Resolved reproducibly three ways:
+# `nix develop` exports LIBCLANG_PATH (see flake.nix); the bare DoD check resolves
+# it via `.cargo/config.toml`'s LLVM_CONFIG_PATH -> the `.cargo/llvm-config` shim
+# (nix build .#libclang); and a bare Debian/CI host uses `libclang-dev` +
+# llvm-config, which this script auto-detects. No host libclang-dev is required
+# on a nix host.
 #
 # NO INFRA IDENTIFIERS: this recipe bakes in zero site-specific facts —
 # hostnames, IPs, device names, credentials, NMEA peer addresses, and camera
@@ -75,10 +77,17 @@ fi
 
 # --- libclang discovery for bindgen ------------------------------------------
 # v4l2-sys-mit (via bris-capture) and ort-sys both invoke bindgen at build
-# time, which needs libclang. `nix develop` already exports LIBCLANG_PATH (see
-# flake.nix); if it's unset (e.g. invoked outside nix), try to discover a
-# usable libclang so the build doesn't blindly panic with an opaque bindgen
-# error.
+# time, which needs libclang. Three reproducible layers cover this:
+#   1. `nix develop` exports LIBCLANG_PATH directly (see flake.nix) — used when
+#      this script runs inside the dev shell.
+#   2. The BARE DoD check (outside nix develop) resolves libclang with no host
+#      libclang-dev via `.cargo/config.toml`'s LLVM_CONFIG_PATH -> the
+#      `.cargo/llvm-config` shim, which `nix build .#libclang` and answers
+#      clang-sys's `llvm-config --prefix` from the pinned store path.
+#   3. A Debian/CI host: install `libclang-dev` (provides `libclang.so` +
+#      `llvm-config`) and this block auto-detects LIBCLANG_PATH via llvm-config.
+# We still export LIBCLANG_PATH here when we can discover one, so the staging
+# build is explicit and fast (skips the shim's nix resolution).
 if [[ -z "${LIBCLANG_PATH:-}" ]]; then
   if command -v llvm-config >/dev/null 2>&1; then
     CANDIDATE="$(llvm-config --libdir 2>/dev/null || true)"
@@ -88,11 +97,21 @@ if [[ -z "${LIBCLANG_PATH:-}" ]]; then
   fi
 fi
 if [[ -z "${LIBCLANG_PATH:-}" ]]; then
-  echo "WARNING: LIBCLANG_PATH is not set and no libclang could be auto-detected." >&2
-  echo "  Reproducible fix: run inside 'nix develop' (flake.nix exports it)." >&2
-  echo "  Debian/CI fix:    apt-get install libclang-dev, then export" >&2
-  echo "                    LIBCLANG_PATH=\$(llvm-config --libdir)" >&2
-  echo "  Continuing — bindgen will fail below if libclang truly isn't findable." >&2
+  # No host libclang: fall back to the pinned nix libclang (same package the
+  # `.cargo/llvm-config` shim resolves). Reproducible, no host libclang-dev.
+  if command -v nix >/dev/null 2>&1; then
+    NIX_LIBCLANG="$(nix build --no-link --print-out-paths "$REPO_ROOT#libclang" 2>/dev/null | while IFS= read -r p; do
+      if compgen -G "$p/lib/libclang.so*" >/dev/null 2>&1; then echo "$p/lib"; break; fi
+    done)"
+    [[ -n "$NIX_LIBCLANG" ]] && export LIBCLANG_PATH="$NIX_LIBCLANG"
+  fi
+fi
+if [[ -z "${LIBCLANG_PATH:-}" ]]; then
+  echo "NOTE: LIBCLANG_PATH is unset and no host libclang was auto-detected." >&2
+  echo "  bindgen will resolve libclang via .cargo/config.toml's LLVM_CONFIG_PATH" >&2
+  echo "  shim (nix build .#libclang). Reproducible fix for an explicit path:" >&2
+  echo "    run inside 'nix develop' (flake.nix exports LIBCLANG_PATH), or" >&2
+  echo "    (Debian/CI) apt-get install libclang-dev." >&2
 else
   echo "using libclang: $LIBCLANG_PATH"
 fi

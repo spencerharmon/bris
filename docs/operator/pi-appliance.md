@@ -65,13 +65,27 @@ a developer's own toolchain) still wins.
 `bris-cli` transitively runs `bindgen` at build time (`v4l2-sys-mit` via
 `bris-capture`, and `ort-sys`), which needs **libclang** on the *host* (bindgen
 parses C headers on x86_64 to emit target-agnostic Rust bindings — this is
-independent of the aarch64 cross toolchain). bindgen finds a system libclang
-automatically (`/usr/lib/libclang.so` on Arch, `libclang-dev` on Debian). If it
-is missing, `bindgen` panics `Unable to find libclang … set LIBCLANG_PATH`; set
-`LIBCLANG_PATH` to a libclang lib dir, or run inside `nix develop` (the flake's
-devShell exports `LIBCLANG_PATH` from the pinned nix clang). CI installs
-`libclang-dev`; `scripts/pi-appliance/build.sh` auto-detects `LIBCLANG_PATH` via
-`llvm-config` and warns if none is found.
+independent of the aarch64 cross toolchain). If libclang is missing, `bindgen`
+panics `Unable to find libclang … set LIBCLANG_PATH`.
+
+Like the cross toolchain, libclang is resolved **reproducibly** so the bare DoD
+check needs no host `libclang-dev` and no wrapping `nix develop`:
+
+- `.cargo/config.toml` sets `LLVM_CONFIG_PATH` to the `.cargo/llvm-config` shim
+  (a symlink to `.cargo/nix-cross-tool.sh`). `clang-sys` (bindgen's libclang
+  loader) locates libclang via `LIBCLANG_PATH`, then by running
+  `llvm-config --prefix` and searching `<prefix>/lib`. The shim answers
+  `--prefix`/`--libdir` from `nix build .#libclang` (the pinned nix clang), so
+  bindgen finds `<prefix>/lib/libclang.so*` on any Nix host. This is resolved at
+  *exec* time when bindgen loads libclang, so there is no build-script ordering
+  dependency (unlike the cross CC, which cargo only invokes for C deps).
+- If a real `llvm-config` whose prefix actually ships a libclang is already on
+  `PATH` (inside `nix develop` — the devShell also exports `LIBCLANG_PATH`
+  directly — or a Debian/CI host with `libclang-dev`), the shim defers to it and
+  nix is never invoked.
+- `scripts/pi-appliance/build.sh` additionally exports an explicit
+  `LIBCLANG_PATH` when it can discover one (host `llvm-config`, else
+  `nix build .#libclang`) so the staging build is explicit and fast.
 
 ### Building in CI / on Debian
 

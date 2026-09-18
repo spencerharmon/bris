@@ -82,6 +82,16 @@
 
       # Expose the pinned cross toolchain as a package so CI / other tooling can
       # `nix build .#crossToolchain` and put it on PATH deterministically.
-      packages.${buildSystem}.crossToolchain = crossCC;
+      # `libclang` is exposed alongside so the bare appliance DoD check (run
+      # WITHOUT `nix develop`) can resolve libclang deterministically: the
+      # cross-tool shim (`.cargo/nix-cross-tool.sh`) does `nix build .#libclang`
+      # and symlinks its `lib/libclang.so*` into `.cargo/nix-libclang`, which
+      # `.cargo/config.toml` names as LIBCLANG_PATH — the libclang analogue of
+      # the crossToolchain resolution, so bindgen (v4l2-sys-mit / ort-sys) finds
+      # libclang reproducibly on any nix host with no host libclang-dev.
+      packages.${buildSystem} = {
+        crossToolchain = crossCC;
+        libclang = pkgs.llvmPackages.libclang.lib;
+      };
     };
 }

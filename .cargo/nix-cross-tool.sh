@@ -19,6 +19,76 @@ set -euo pipefail
 
 TRIPLE="aarch64-unknown-linux-gnu"
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+FLAKE_DIR="$(cd "$SELF_DIR/.." && pwd)"
+
+# Look for a REAL tool of a given name on PATH, excluding this shim's own
+# directory so we never recurse into ourselves. Prints the resolved path.
+find_real() {
+  local want="$1" IFS=:
+  for d in $PATH; do
+    [[ -z "$d" || "$d" == "$SELF_DIR" ]] && continue
+    if [[ -x "$d/$want" ]]; then printf '%s\n' "$d/$want"; return 0; fi
+  done
+  return 1
+}
+
+# Resolve a pinned nix flake package to its store path(s). Prints one per line.
+nix_out() {
+  local attr="$1"
+  command -v nix >/dev/null 2>&1 || return 1
+  nix build --no-link --print-out-paths "$FLAKE_DIR#$attr" 2>/dev/null
+}
+
+# ---------------------------------------------------------------------------
+# llvm-config shim (for bindgen/clang-sys libclang discovery).
+#
+# bindgen (v4l2-sys-mit via bris-capture, and ort-sys) dlopens libclang at build
+# time; clang-sys locates it via LIBCLANG_PATH, then `llvm-config --prefix`
+# (joined with `lib`). The bare appliance DoD check runs OUTSIDE `nix develop`
+# and under a checkout-confined sandbox where the host libclang is not visible,
+# so `.cargo/config.toml` points LLVM_CONFIG_PATH at this shim (installed as
+# `.cargo/llvm-config`). If a REAL llvm-config whose prefix actually carries a
+# libclang is on PATH (inside `nix develop`, or a Debian/CI host with
+# llvm/libclang-dev), we defer to it; otherwise we `nix build .#libclang` and
+# answer --prefix/--libdir/--bindir from that pinned store path so clang-sys
+# finds `<prefix>/lib/libclang.so*`. EXEC-time resolution — no build-script
+# ordering dependency. NO infra identifiers are baked in.
+if [[ "$(basename "$0")" == "llvm-config" ]]; then
+  # Prefer a real llvm-config ONLY if its prefix actually ships a libclang the
+  # bare check can dlopen (a bare llvm-config with no libclang is useless here).
+  if REAL="$(find_real llvm-config)"; then
+    real_prefix="$("$REAL" --prefix 2>/dev/null || true)"
+    if [[ -n "$real_prefix" ]] && compgen -G "$real_prefix/lib/libclang.so*" >/dev/null 2>&1; then
+      exec "$REAL" "$@"
+    fi
+  fi
+  LIBCLANG_OUT=""
+  while IFS= read -r p; do
+    [[ -z "$p" ]] && continue
+    if compgen -G "$p/lib/libclang.so*" >/dev/null 2>&1; then LIBCLANG_OUT="$p"; break; fi
+  done <<< "$(nix_out libclang || true)"
+  if [[ -z "$LIBCLANG_OUT" ]]; then
+    echo "nix-cross-tool(llvm-config): no libclang on PATH and could not resolve" >&2
+    echo "  '$FLAKE_DIR#libclang' via nix. Enter 'nix develop' (flake.nix exports" >&2
+    echo "  LIBCLANG_PATH), or (Debian/CI) install libclang-dev + llvm-config." >&2
+    exit 127
+  fi
+  # Answer the queries clang-sys makes; default to the prefix for anything else.
+  out=""
+  for arg in "$@"; do
+    case "$arg" in
+      --prefix)     out="$LIBCLANG_OUT" ;;
+      --libdir)     out="$LIBCLANG_OUT/lib" ;;
+      --bindir)     out="$LIBCLANG_OUT/bin" ;;
+      --includedir) out="$LIBCLANG_OUT/include" ;;
+      *)            [[ -z "$out" ]] && out="$LIBCLANG_OUT" ;;
+    esac
+  done
+  [[ -z "$out" && $# -eq 0 ]] && out="$LIBCLANG_OUT"
+  printf '%s\n' "$out"
+  exit 0
+fi
+
 case "$(basename "$0")" in
   *-gcc) SUFFIX=gcc ;;
   *-g++) SUFFIX=g++ ;;
@@ -27,18 +97,7 @@ case "$(basename "$0")" in
 esac
 TOOL="${TRIPLE}-${SUFFIX}"
 
-# Look for a REAL tool of this name on PATH, excluding this shim's own directory
-# so we never recurse into ourselves.
-find_real() {
-  local IFS=:
-  for d in $PATH; do
-    [[ -z "$d" || "$d" == "$SELF_DIR" ]] && continue
-    if [[ -x "$d/$TOOL" ]]; then printf '%s\n' "$d/$TOOL"; return 0; fi
-  done
-  return 1
-}
-
-if REAL="$(find_real)"; then
+if REAL="$(find_real "$TOOL")"; then
   exec "$REAL" "$@"
 fi
 
@@ -47,7 +106,6 @@ fi
 # store path deterministically WITHOUT entering the devShell — entering it would
 # run the shellHook, whose banner pollutes stdout. The tool lives at
 # <toolchain>/bin/<TOOL>.
-FLAKE_DIR="$(cd "$SELF_DIR/.." && pwd)"
 if ! command -v nix >/dev/null 2>&1; then
   echo "nix-cross-tool: '$TOOL' not on PATH and 'nix' unavailable to resolve it." >&2
   echo "  Fix: install nix (flake at $FLAKE_DIR pins the toolchain), enter 'nix develop'," >&2
@@ -55,7 +113,7 @@ if ! command -v nix >/dev/null 2>&1; then
   echo "  (scripts/pi-appliance/build.sh does this automatically)." >&2
   exit 127
 fi
-TOOLCHAIN_PATHS="$(nix build --no-link --print-out-paths "$FLAKE_DIR#crossToolchain" 2>/dev/null)"
+TOOLCHAIN_PATHS="$(nix_out crossToolchain || true)"
 RESOLVED=""
 while IFS= read -r p; do
   [[ -x "$p/bin/$TOOL" ]] && { RESOLVED="$p/bin/$TOOL"; break; }
