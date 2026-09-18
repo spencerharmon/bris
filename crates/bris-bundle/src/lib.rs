@@ -1196,6 +1196,53 @@ mod tests {
     }
 
     #[test]
+    fn manifest_ap_provenance_other_round_trips() {
+        // Additive catch-all variant: a future engine-side AP
+        // source not yet named as a dedicated variant must
+        // still round-trip losslessly through the schema-1
+        // wire format.
+        let mut m = full_manifest();
+        m.ap_input = Some(ApInput {
+            lat: 30.0,
+            lon: -97.0,
+            eye_height_m: 1.7,
+            provenance: ApProvenance::Other {
+                detail: "future-engine-source".into(),
+            },
+        });
+        let s = serde_json::to_string(&m).unwrap();
+        let back: BundleManifest = serde_json::from_str(&s).unwrap();
+        match back.ap_input.expect("ap_input round-trip").provenance {
+            ApProvenance::Other { detail } => assert_eq!(detail, "future-engine-source"),
+            other => panic!("unexpected provenance variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn manifest_additive_unknown_field_loads_at_current_schema_version() {
+        // A schema_version: 1 bundle carrying a field this
+        // build does not yet know about (an additive change
+        // from a newer writer within the same schema version)
+        // must still load — only a schema_version MISMATCH is
+        // a loader error, never an unrecognized field.
+        let dir = tempdir().unwrap();
+        let m = full_manifest();
+        let mut value = serde_json::to_value(&m).unwrap();
+        value
+            .as_object_mut()
+            .unwrap()
+            .insert("future_additive_field".into(), serde_json::json!("ignored"));
+        std::fs::write(
+            dir.path().join("bundle.json"),
+            serde_json::to_vec(&value).unwrap(),
+        )
+        .unwrap();
+        let back = BundleManifest::load_from_dir(dir.path()).unwrap();
+        assert_eq!(back.bundle_id, m.bundle_id);
+        assert_eq!(back.schema_version, SCHEMA_VERSION);
+    }
+
+    #[test]
     fn save_then_load_round_trips() {
         let dir = tempdir().unwrap();
         let m = full_manifest();
