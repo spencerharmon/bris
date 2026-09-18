@@ -35,6 +35,24 @@ http-body-util = "0.1"
 mime = "0.3"
 sha2 = "0.10"
 hex = "0.4"
+# The real submitter code path (build_submission + operator gate +
+# multipart encoder) and the bris-bundle v1 schema, so the
+# end-to-end collection-path test exercises the ACTUAL submitter →
+# collector seam rather than a hand-rolled multipart body. This is
+# a dev-dependency cycle (bris-submit dev-depends on bris-collector
+# for its own acceptance test); cargo permits dev-dependency
+# cycles.
+bris-submit = { workspace = true }
+bris-bundle = { workspace = true }
+image = { workspace = true }
+# Builds and locates the real `bris` binary so the test can run
+# `bris replay` against the stored submission, proving the bundle
+# is replayable IN PLACE off the collector's data-root.
+escargot = "0.5"
+
+[[test]]
+name = "e2e_collection_path"
+path = "tests/e2e_collection_path.rs"
 
 [lints]
 workspace = true
