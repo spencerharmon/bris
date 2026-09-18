@@ -968,6 +968,329 @@ impl Engine {
     }
 }
 
+/// Lifecycle state of a [`Session`].
+///
+/// A session is a bounded operator-facing driver over the
+/// continuous [`Engine`]: the operator taps "start", sweeps the
+/// phone while the engine accumulates sights and publishes fixes,
+/// then either **accepts** the current best fix (terminal) or
+/// **abandons** the session (terminal). `stop` pauses fix
+/// intake without terminating so the operator can inspect the
+/// current best before deciding.
+///
+/// The state machine is deliberately small and its transitions
+/// are the only mutations the FFI exposes:
+///
+/// ```text
+///                start            stop
+///   Idle ─────────────────▶ Active ─────────▶ Stopped
+///                             │  ▲               │
+///                     accept/ │  │ start         │ accept/abandon
+///                     abandon │  └───────────────┘
+///                             ▼
+///                 Accepted / Abandoned  (terminal)
+/// ```
+///
+/// - `Idle` → `Active` via [`Session::start`].
+/// - `Active` → `Stopped` via [`Session::stop`] (re-startable).
+/// - `Stopped` → `Active` via [`Session::start`] (resume).
+/// - `Active`/`Stopped` → `Accepted` via [`Session::accept`].
+/// - `Active`/`Stopped` → `Abandoned` via [`Session::abandon`].
+///
+/// The terminal states are absorbing: any lifecycle call on a
+/// terminated session returns [`FfiError::InvalidArgument`]. The
+/// underlying [`Engine`] keeps running regardless — the session
+/// is a *view* onto its publish stream, not its owner.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum SessionState {
+    /// Constructed but not yet started; no fixes are being
+    /// collected.
+    Idle,
+    /// Running: fixes published by the engine are collected as
+    /// candidates for [`Session::accept`].
+    Active,
+    /// Paused: intake is halted but the session may be resumed
+    /// with [`Session::start`] or terminated.
+    Stopped,
+    /// Terminated by [`Session::accept`]; the accepted fix is
+    /// available via [`Session::accepted_fix`].
+    Accepted,
+    /// Terminated by [`Session::abandon`]; no fix was accepted.
+    Abandoned,
+}
+
+/// Internal, non-FFI session bookkeeping guarded by a single
+/// mutex so the fix-subscriber callback and the foreign
+/// lifecycle calls cannot race.
+#[derive(Debug)]
+struct SessionInner {
+    state: SessionState,
+    /// The best fix observed while `Active`, by smallest
+    /// σ_major (tightest uncertainty ellipse). `None` until the
+    /// engine publishes its first fix during an active window.
+    best_fix: Option<FfiPublishedFix>,
+    /// The fix locked in by [`Session::accept`]. Set exactly
+    /// once, on the `→ Accepted` transition.
+    accepted_fix: Option<FfiPublishedFix>,
+}
+
+/// Fix-subscriber that feeds an active [`Session`]'s best-fix
+/// tracker. Registered with the engine for the session's whole
+/// lifetime; it ignores fixes unless the session is `Active`, so
+/// the same subscriber survives stop/resume without
+/// re-registration (the engine's subscription list has no
+/// unsubscribe).
+#[derive(Debug)]
+struct SessionFixCollector {
+    inner: Arc<Mutex<SessionInner>>,
+}
+
+impl FixSubscriber for SessionFixCollector {
+    fn on_fix(&self, fix: FfiPublishedFix) {
+        let mut guard = self.inner.lock().expect("session mutex poisoned");
+        if guard.state != SessionState::Active {
+            // Only collect while the operator is actively
+            // sweeping. Fixes published while Idle/Stopped/
+            // terminal are the engine's business, not this
+            // session's.
+            return;
+        }
+        // Keep the tightest-uncertainty fix seen so far. σ_major
+        // is the honest 1σ semi-major axis; a smaller value is a
+        // more confident fix. Ties and non-finite σ never
+        // displace an existing better candidate.
+        let replace = match &guard.best_fix {
+            None => true,
+            Some(best) => {
+                fix.sigma_major_nm.is_finite() && fix.sigma_major_nm < best.sigma_major_nm
+            }
+        };
+        if replace {
+            guard.best_fix = Some(fix);
+        }
+    }
+
+    fn on_closed(&self) {
+        // Engine dropped: nothing to collect. The session's
+        // already-collected best_fix / accepted_fix remain valid
+        // for inspection.
+    }
+}
+
+/// A bounded operator session over the continuous [`Engine`].
+///
+/// Construct with [`session_new`], passing the shared engine
+/// handle. The session subscribes to the engine's fix stream and,
+/// while [`SessionState::Active`], tracks the tightest-uncertainty
+/// fix as the accept candidate. It drives the engine as discrete
+/// operator sessions (the mobile "Take sight" flow) without a
+/// daemon/client split: everything runs in-process behind UniFFI.
+///
+/// Cloning the `Arc<Session>` shares one session; the lifecycle
+/// state lives behind an internal mutex.
+#[derive(uniffi::Object)]
+pub struct Session {
+    /// The continuous engine this session views. Held so the
+    /// engine (and thus the fix pump feeding our collector)
+    /// outlives the session.
+    engine: Arc<Engine>,
+    inner: Arc<Mutex<SessionInner>>,
+}
+
+impl std::fmt::Debug for Session {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Session")
+            .field("inner", &self.inner)
+            .finish_non_exhaustive()
+    }
+}
+
+/// Construct a session bound to an existing [`Engine`].
+///
+/// The session begins [`SessionState::Idle`]; call
+/// [`Session::start`] to begin collecting fixes. The session
+/// registers a fix subscriber on the engine for its whole
+/// lifetime, so the engine must outlive the session (the
+/// returned `Arc<Session>` holds a reference to enforce that).
+#[uniffi::export]
+#[must_use]
+pub fn session_new(engine: Arc<Engine>) -> Arc<Session> {
+    let inner = Arc::new(Mutex::new(SessionInner {
+        state: SessionState::Idle,
+        best_fix: None,
+        accepted_fix: None,
+    }));
+    let collector = Arc::new(SessionFixCollector {
+        inner: Arc::clone(&inner),
+    });
+    engine.subscribe_fixes(collector);
+    Arc::new(Session { engine, inner })
+}
+
+#[uniffi::export]
+impl Session {
+    /// Start (or resume) the session.
+    ///
+    /// Transitions `Idle → Active` (fresh start) or
+    /// `Stopped → Active` (resume after a [`Session::stop`]).
+    /// While `Active`, every fix the engine publishes is
+    /// considered as an accept candidate. Resuming does **not**
+    /// clear the best fix collected before the stop — the
+    /// operator continues refining the same session.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FfiError::InvalidArgument`] if the session is
+    /// already `Active` or has terminated (`Accepted`/
+    /// `Abandoned`).
+    pub fn start(&self) -> Result<(), FfiError> {
+        let mut guard = self.inner.lock().expect("session mutex poisoned");
+        match guard.state {
+            SessionState::Idle | SessionState::Stopped => {
+                guard.state = SessionState::Active;
+                Ok(())
+            }
+            SessionState::Active => Err(FfiError::InvalidArgument {
+                detail: "session already active".to_owned(),
+            }),
+            SessionState::Accepted | SessionState::Abandoned => Err(FfiError::InvalidArgument {
+                detail: format!("session has terminated ({:?}); cannot start", guard.state),
+            }),
+        }
+    }
+
+    /// Pause the session without terminating it.
+    ///
+    /// Transitions `Active → Stopped`. Fix intake halts; the
+    /// best fix collected so far is retained so the operator can
+    /// inspect it (via [`Session::best_fix`]) before choosing to
+    /// [`Session::accept`], [`Session::abandon`], or
+    /// [`Session::start`] again to keep refining.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FfiError::InvalidArgument`] if the session is
+    /// not currently `Active`.
+    pub fn stop(&self) -> Result<(), FfiError> {
+        let mut guard = self.inner.lock().expect("session mutex poisoned");
+        if guard.state == SessionState::Active {
+            guard.state = SessionState::Stopped;
+            Ok(())
+        } else {
+            Err(FfiError::InvalidArgument {
+                detail: format!("session not active ({:?}); cannot stop", guard.state),
+            })
+        }
+    }
+
+    /// Accept the current best fix and terminate the session.
+    ///
+    /// Transitions `Active`/`Stopped` → `Accepted` and returns
+    /// the accepted [`FfiPublishedFix`] — the tightest-
+    /// uncertainty fix collected during the active window, with
+    /// its **honest per-fix uncertainty** intact (σ_major /
+    /// σ_minor / orientation, sight count, dominant σ source,
+    /// solver provenance). The mobile UX shows exactly these
+    /// numbers so the operator accepts a fix knowing its real
+    /// confidence ellipse, never a smoothed-away one.
+    ///
+    /// After acceptance the same fix is retrievable via
+    /// [`Session::accepted_fix`]. The session is terminal;
+    /// further lifecycle calls error.
+    ///
+    /// # Errors
+    ///
+    /// - [`FfiError::InvalidArgument`] if the session has already
+    ///   terminated.
+    /// - [`FfiError::Engine`] if no fix has been published yet
+    ///   (nothing to accept) — the operator must keep sweeping
+    ///   until the engine produces a fix.
+    pub fn accept(&self) -> Result<FfiPublishedFix, FfiError> {
+        let mut guard = self.inner.lock().expect("session mutex poisoned");
+        match guard.state {
+            SessionState::Active | SessionState::Stopped => {
+                let fix = guard.best_fix.clone().ok_or_else(|| FfiError::Engine {
+                    detail: "no fix published yet; cannot accept".to_owned(),
+                })?;
+                guard.accepted_fix = Some(fix.clone());
+                guard.state = SessionState::Accepted;
+                Ok(fix)
+            }
+            SessionState::Idle => Err(FfiError::Engine {
+                detail: "session not started; cannot accept".to_owned(),
+            }),
+            SessionState::Accepted | SessionState::Abandoned => Err(FfiError::InvalidArgument {
+                detail: format!("session has terminated ({:?}); cannot accept", guard.state),
+            }),
+        }
+    }
+
+    /// Abandon the session without accepting any fix.
+    ///
+    /// Transitions `Idle`/`Active`/`Stopped` → `Abandoned`. Any
+    /// best fix collected is discarded from the accept path; the
+    /// session is terminal. The underlying engine is unaffected.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FfiError::InvalidArgument`] if the session has
+    /// already terminated (`Accepted`/`Abandoned`).
+    pub fn abandon(&self) -> Result<(), FfiError> {
+        let mut guard = self.inner.lock().expect("session mutex poisoned");
+        match guard.state {
+            SessionState::Idle | SessionState::Active | SessionState::Stopped => {
+                guard.state = SessionState::Abandoned;
+                Ok(())
+            }
+            SessionState::Accepted | SessionState::Abandoned => Err(FfiError::InvalidArgument {
+                detail: format!("session has terminated ({:?}); cannot abandon", guard.state),
+            }),
+        }
+    }
+
+    /// Current lifecycle state. Cheap; safe to poll at UI
+    /// cadence.
+    #[must_use]
+    pub fn state(&self) -> SessionState {
+        self.inner.lock().expect("session mutex poisoned").state
+    }
+
+    /// The current best (tightest-uncertainty) fix collected so
+    /// far, or `None` if the engine has not published a fix
+    /// during an active window yet.
+    ///
+    /// This is the live accept candidate — the mobile "current
+    /// best" readout. Its uncertainty fields are the engine's
+    /// honest values, unmodified.
+    #[must_use]
+    pub fn best_fix(&self) -> Option<FfiPublishedFix> {
+        self.inner
+            .lock()
+            .expect("session mutex poisoned")
+            .best_fix
+            .clone()
+    }
+
+    /// The fix locked in by [`Session::accept`], or `None` if the
+    /// session has not been accepted.
+    #[must_use]
+    pub fn accepted_fix(&self) -> Option<FfiPublishedFix> {
+        self.inner
+            .lock()
+            .expect("session mutex poisoned")
+            .accepted_fix
+            .clone()
+    }
+
+    /// The engine this session views. Lets the foreign caller
+    /// push frames / poll diagnostics through the same handle the
+    /// session is driving.
+    #[must_use]
+    pub fn engine(&self) -> Arc<Engine> {
+        Arc::clone(&self.engine)
+    }
+}
+
 /// One sight as it crosses the FFI. Mirrors the engine's
 /// internal `Sight` fields.
 #[derive(Debug, Clone, Copy, uniffi::Record)]
@@ -1938,6 +2261,236 @@ mod bundle_writer_tests {
         )
         .unwrap_err();
         assert!(matches!(err, FfiError::InvalidArgument { .. }));
+    }
+}
+
+#[cfg(test)]
+mod session_tests {
+    use super::*;
+
+    fn test_engine() -> Arc<Engine> {
+        // `engine_new` builds a real `StreamingEngine`, whose
+        // default `PlateSolverInit::AtStartup` synchronously
+        // constructs the star-hash database — tens of seconds
+        // even before the pump thread is running. These tests
+        // exercise only the session state machine over the fix
+        // stream, so we build ONE engine for the whole module and
+        // share it, rather than paying that cost per test. Held
+        // in a `static OnceLock` (never dropped for the process),
+        // which also sidesteps `Engine::drop`'s blocking
+        // pump-join: the engine's strong count never reaches zero.
+        static SHARED: std::sync::OnceLock<Arc<Engine>> = std::sync::OnceLock::new();
+        Arc::clone(SHARED.get_or_init(|| {
+            let cfg = FfiEngineConfig {
+                observer: FfiObserver {
+                    latitude_deg: 0.0,
+                    longitude_deg: 0.0,
+                    eye_height_m: 2.0,
+                    eye_height_sigma_m: 0.5,
+                },
+                stitching_window_seconds: 2.0,
+                sight_window_seconds: 600.0,
+                sight_window_capacity: 10,
+                min_fix_publication_interval_ms: 1000,
+                input_ring_capacity: 120,
+                segmentation_model_path: None,
+                horizon_analysis_width: None,
+                horizon_analysis_height: None,
+                horizon_analysis_max_long_edge_px: None,
+                cold_start_coarse_hemisphere: None,
+                assumed_max_speed_kn: None,
+                store_data_root: None,
+                enable_vertical_line_provider: None,
+                ml_gravity_model_path: None,
+                enable_ml_gravity: None,
+            };
+            engine_new(cfg).expect("engine_new")
+        }))
+    }
+
+    fn fix_with_sigma(sigma_major_nm: f64) -> FfiPublishedFix {
+        FfiPublishedFix {
+            latitude_deg: 12.5,
+            longitude_deg: -70.25,
+            sigma_major_nm,
+            sigma_minor_nm: sigma_major_nm / 2.0,
+            orientation_rad: 0.3,
+            n_sights: 3,
+            azimuth_spread_rad: 1.1,
+            oldest_sight_age_seconds: 42.0,
+            dominant_source: "horizon".to_owned(),
+            timestamp_tt_jd: 2_460_000.5,
+            contributing_frame_ids: vec![1, 2, 3],
+            provenance: "saint_hilaire".to_owned(),
+        }
+    }
+
+    /// Bit-exact f64 equality. The session copies fix fields
+    /// verbatim, so the accepted/best value must be
+    /// bit-identical to what was published — `to_bits()` is the
+    /// honest exact assertion (and satisfies clippy's
+    /// `float_cmp`, which forbids `==` on floats).
+    fn bits_eq(a: f64, b: f64) -> bool {
+        a.to_bits() == b.to_bits()
+    }
+
+    /// The fix pump calls the collector's `on_fix`; drive it
+    /// directly so tests don't depend on the async engine
+    /// producing a fix. This is exactly the path the real
+    /// `bris-ffi-fix-pump` thread exercises.
+    fn publish(session: &Session, fix: FfiPublishedFix) {
+        SessionFixCollector {
+            inner: Arc::clone(&session.inner),
+        }
+        .on_fix(fix);
+    }
+
+    #[test]
+    fn starts_idle() {
+        let s = session_new(test_engine());
+        assert_eq!(s.state(), SessionState::Idle);
+        assert!(s.best_fix().is_none());
+        assert!(s.accepted_fix().is_none());
+    }
+
+    #[test]
+    fn lifecycle_start_stop_resume() {
+        let s = session_new(test_engine());
+        s.start().unwrap();
+        assert_eq!(s.state(), SessionState::Active);
+        s.stop().unwrap();
+        assert_eq!(s.state(), SessionState::Stopped);
+        s.start().unwrap();
+        assert_eq!(s.state(), SessionState::Active);
+    }
+
+    #[test]
+    fn double_start_rejected() {
+        let s = session_new(test_engine());
+        s.start().unwrap();
+        assert!(matches!(
+            s.start().unwrap_err(),
+            FfiError::InvalidArgument { .. }
+        ));
+    }
+
+    #[test]
+    fn stop_when_not_active_rejected() {
+        let s = session_new(test_engine());
+        // Idle
+        assert!(matches!(
+            s.stop().unwrap_err(),
+            FfiError::InvalidArgument { .. }
+        ));
+    }
+
+    #[test]
+    fn fixes_collected_only_while_active() {
+        let s = session_new(test_engine());
+        // Idle: ignored.
+        publish(&s, fix_with_sigma(5.0));
+        assert!(s.best_fix().is_none());
+
+        s.start().unwrap();
+        publish(&s, fix_with_sigma(5.0));
+        assert!(bits_eq(s.best_fix().unwrap().sigma_major_nm, 5.0));
+
+        s.stop().unwrap();
+        // Stopped: a tighter fix arriving now must NOT displace
+        // the collected best (intake is paused).
+        publish(&s, fix_with_sigma(1.0));
+        assert!(bits_eq(s.best_fix().unwrap().sigma_major_nm, 5.0));
+    }
+
+    #[test]
+    fn best_fix_tracks_tightest_uncertainty() {
+        let s = session_new(test_engine());
+        s.start().unwrap();
+        publish(&s, fix_with_sigma(8.0));
+        publish(&s, fix_with_sigma(3.0)); // tighter → replaces
+        publish(&s, fix_with_sigma(6.0)); // looser → ignored
+        assert!(bits_eq(s.best_fix().unwrap().sigma_major_nm, 3.0));
+    }
+
+    #[test]
+    fn non_finite_sigma_never_displaces() {
+        let s = session_new(test_engine());
+        s.start().unwrap();
+        publish(&s, fix_with_sigma(4.0));
+        publish(&s, fix_with_sigma(f64::NAN));
+        publish(&s, fix_with_sigma(f64::INFINITY));
+        assert!(bits_eq(s.best_fix().unwrap().sigma_major_nm, 4.0));
+    }
+
+    #[test]
+    fn accept_surfaces_honest_uncertainty() {
+        let s = session_new(test_engine());
+        s.start().unwrap();
+        publish(&s, fix_with_sigma(2.5));
+        let accepted = s.accept().unwrap();
+        // The accepted fix carries the engine's real per-fix
+        // uncertainty verbatim — no smoothing, no zeroing.
+        assert!(bits_eq(accepted.sigma_major_nm, 2.5));
+        assert!(bits_eq(accepted.sigma_minor_nm, 1.25));
+        assert!(bits_eq(accepted.orientation_rad, 0.3));
+        assert_eq!(accepted.n_sights, 3);
+        assert_eq!(accepted.dominant_source, "horizon");
+        assert_eq!(accepted.provenance, "saint_hilaire");
+        // Terminal, and the fix is retained.
+        assert_eq!(s.state(), SessionState::Accepted);
+        assert!(bits_eq(s.accepted_fix().unwrap().sigma_major_nm, 2.5));
+    }
+
+    #[test]
+    fn accept_from_stopped_ok() {
+        let s = session_new(test_engine());
+        s.start().unwrap();
+        publish(&s, fix_with_sigma(9.0));
+        s.stop().unwrap();
+        let accepted = s.accept().unwrap();
+        assert!(bits_eq(accepted.sigma_major_nm, 9.0));
+        assert_eq!(s.state(), SessionState::Accepted);
+    }
+
+    #[test]
+    fn accept_without_fix_errors() {
+        let s = session_new(test_engine());
+        s.start().unwrap();
+        assert!(matches!(s.accept().unwrap_err(), FfiError::Engine { .. }));
+        // Still active — accept did not terminate on failure.
+        assert_eq!(s.state(), SessionState::Active);
+    }
+
+    #[test]
+    fn abandon_discards_and_is_terminal() {
+        let s = session_new(test_engine());
+        s.start().unwrap();
+        publish(&s, fix_with_sigma(7.0));
+        s.abandon().unwrap();
+        assert_eq!(s.state(), SessionState::Abandoned);
+        assert!(s.accepted_fix().is_none());
+    }
+
+    #[test]
+    fn terminal_states_reject_all_lifecycle_calls() {
+        let accepted = {
+            let s = session_new(test_engine());
+            s.start().unwrap();
+            publish(&s, fix_with_sigma(1.0));
+            s.accept().unwrap();
+            s
+        };
+        assert!(accepted.start().is_err());
+        assert!(accepted.stop().is_err());
+        assert!(accepted.accept().is_err());
+        assert!(accepted.abandon().is_err());
+
+        let abandoned = session_new(test_engine());
+        abandoned.abandon().unwrap();
+        assert!(abandoned.start().is_err());
+        assert!(abandoned.stop().is_err());
+        assert!(abandoned.accept().is_err());
+        assert!(abandoned.abandon().is_err());
     }
 }
 
