@@ -49,6 +49,14 @@
         packages = [
           crossCC
           pkgs.pkg-config
+          # bris-cli transitively needs libclang for bindgen (v4l2-sys-mit via
+          # bris-capture, and ort-sys) even though the target is aarch64 — the
+          # bindgen invocation itself runs on the HOST (x86_64), it just parses
+          # C headers to emit target-agnostic Rust bindings. Without a libclang
+          # on PATH/LIBCLANG_PATH the build panics
+          # "Unable to find libclang ... set LIBCLANG_PATH".
+          pkgs.clang
+          pkgs.llvmPackages.libclang
         ];
 
         # Make the cross compiler / linker discoverable to cargo + cc-rs without
@@ -59,9 +67,15 @@
         CXX_aarch64_unknown_linux_gnu = "aarch64-unknown-linux-gnu-g++";
         AR_aarch64_unknown_linux_gnu = "aarch64-unknown-linux-gnu-ar";
 
+        # bindgen (used transitively by v4l2-sys-mit / ort-sys) needs to find
+        # libclang at build time; point it at the pinned nix libclang so the
+        # shell is reproducible with no host libclang-dev required.
+        LIBCLANG_PATH = "${pkgs.llvmPackages.libclang.lib}/lib";
+
         shellHook = ''
           echo "bris Pi appliance cross-build shell (aarch64-unknown-linux-gnu)."
           echo "cross gcc: $(command -v aarch64-unknown-linux-gnu-gcc || echo MISSING)"
+          echo "LIBCLANG_PATH: ''${LIBCLANG_PATH:-MISSING}"
           echo "run: scripts/pi-appliance/build.sh"
         '';
       };

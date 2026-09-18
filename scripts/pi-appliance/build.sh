@@ -14,6 +14,13 @@
 # script auto-detects that prefix and exports the CC/linker overrides). No host
 # `sudo`/apt is required in the nix path.
 #
+# LIBCLANG: bris-cli transitively needs libclang for bindgen (v4l2-sys-mit via
+# bris-capture, and ort-sys) even though it targets aarch64 — bindgen itself
+# runs on the HOST to parse C headers. `nix develop` exports LIBCLANG_PATH for
+# you (see flake.nix); outside nix (e.g. a bare Debian/CI host) install
+# `libclang-dev` (which provides `libclang.so`) and either export
+# LIBCLANG_PATH yourself or let this script auto-detect it via `llvm-config`.
+#
 # NO INFRA IDENTIFIERS: this recipe bakes in zero site-specific facts —
 # hostnames, IPs, device names, credentials, NMEA peer addresses, and camera
 # device paths are all runtime/first-boot configuration (see the generated
@@ -64,6 +71,30 @@ else
   echo "  Reproducible fix: run inside 'nix develop' (see flake.nix)." >&2
   echo "  Debian/CI fix:    apt-get install gcc-aarch64-linux-gnu g++-aarch64-linux-gnu" >&2
   exit 1
+fi
+
+# --- libclang discovery for bindgen ------------------------------------------
+# v4l2-sys-mit (via bris-capture) and ort-sys both invoke bindgen at build
+# time, which needs libclang. `nix develop` already exports LIBCLANG_PATH (see
+# flake.nix); if it's unset (e.g. invoked outside nix), try to discover a
+# usable libclang so the build doesn't blindly panic with an opaque bindgen
+# error.
+if [[ -z "${LIBCLANG_PATH:-}" ]]; then
+  if command -v llvm-config >/dev/null 2>&1; then
+    CANDIDATE="$(llvm-config --libdir 2>/dev/null || true)"
+    if [[ -n "$CANDIDATE" && -e "$CANDIDATE/libclang.so" ]]; then
+      export LIBCLANG_PATH="$CANDIDATE"
+    fi
+  fi
+fi
+if [[ -z "${LIBCLANG_PATH:-}" ]]; then
+  echo "WARNING: LIBCLANG_PATH is not set and no libclang could be auto-detected." >&2
+  echo "  Reproducible fix: run inside 'nix develop' (flake.nix exports it)." >&2
+  echo "  Debian/CI fix:    apt-get install libclang-dev, then export" >&2
+  echo "                    LIBCLANG_PATH=\$(llvm-config --libdir)" >&2
+  echo "  Continuing — bindgen will fail below if libclang truly isn't findable." >&2
+else
+  echo "using libclang: $LIBCLANG_PATH"
 fi
 
 # --- Cross-compile the CLI ---------------------------------------------------
