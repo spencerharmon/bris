@@ -149,6 +149,57 @@ async fn healthz_responds_ok() {
     assert_eq!(&body[..], b"ok");
 }
 
+/// Every documented deploy probe path MUST resolve to the same 200
+/// "ok" liveness handler, unauthenticated:
+/// - `/healthz` — the bare path the Kubernetes readiness/liveness
+///   probes in the deploy contract (`deploy/reference/
+///   reference-deployment.yaml` + the flux
+///   `infrastructure/bris-collector` manifests) hit.
+/// - `/v1/health` — the path the deploy acceptance check curls
+///   (with an `Authorization: Bearer` header, which a liveness probe
+///   must ignore).
+/// Regression guard for the deploy seam: a 404 on either means the
+/// pod never becomes Ready / the post-deploy health check fails
+/// behind the private host. Fails without the alias routes in
+/// `build_app`.
+#[tokio::test]
+async fn deploy_probe_paths_all_resolve_to_health() {
+    let token = "admin-secret";
+    let state = test_state(token);
+    let app = build_app(state);
+
+    // Bare `/healthz`, no auth (the k8s probe path).
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/healthz")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK, "GET /healthz");
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(&body[..], b"ok");
+
+    // `/v1/health` WITH a bearer header (the acceptance curl); the
+    // liveness handler must ignore auth and still answer 200.
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/v1/health")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK, "GET /v1/health");
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(&body[..], b"ok");
+}
+
 #[tokio::test]
 async fn submission_round_trip_lands_on_disk_and_in_index() {
     let state = test_state("test-token");

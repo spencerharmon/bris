@@ -2,7 +2,9 @@
 //!
 //! Endpoints:
 //!
-//! - `GET  /v1/healthz` — liveness, no auth.
+//! - `GET  /v1/healthz` (plus the bare `GET /healthz` the Kubernetes
+//!   deploy probes hit and `GET /v1/health` the deploy acceptance
+//!   check curls — all the same handler) — liveness, no auth.
 //! - `POST /v1/devices/register` — first-contact device
 //!   registration; issues a per-device bearer token. Auth:
 //!   admin/bootstrap token.
@@ -81,14 +83,31 @@ pub fn build_app(state: Arc<AppState>) -> Router {
 
     Router::new()
         .route("/v1/healthz", get(healthz))
+        // Health aliases so EVERY documented probe path resolves to the
+        // same unauthenticated liveness handler:
+        // - `/healthz` — the bare path the Kubernetes readiness/liveness
+        //   probes in the deploy contract (`deploy/reference/
+        //   reference-deployment.yaml` and the flux
+        //   `infrastructure/bris-collector` manifests) hit.
+        // - `/v1/health` — the path the deploy acceptance check curls
+        //   (`GET /v1/health` behind the private host).
+        // Keeping all three aligned is what lets the pod reach Ready
+        // and the post-deploy health probe answer 2xx behind the
+        // private host. All are unauthenticated (a liveness probe must
+        // not require the bearer token); an Authorization header, if
+        // sent, is simply ignored.
+        .route("/healthz", get(healthz))
+        .route("/v1/health", get(healthz))
         .merge(device_submission_routes)
         .merge(admin_routes)
         .layer(DefaultBodyLimit::max(body_limit))
         .with_state(state)
 }
 
-/// `GET /v1/healthz` — liveness probe. Returns "ok" so that
-/// `docker compose healthcheck` is trivial to wire.
+/// `GET /v1/healthz` (plus the `/healthz` and `/v1/health` aliases)
+/// — liveness probe. Returns "ok" so that `docker compose
+/// healthcheck`, the Kubernetes readiness/liveness probes, and the
+/// deploy acceptance health check are all trivial to wire.
 async fn healthz() -> &'static str {
     "ok"
 }
