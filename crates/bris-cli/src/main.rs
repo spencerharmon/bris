@@ -16,6 +16,7 @@
 //! - `update` — refresh almanac/catalog/leap-seconds (stub).
 
 mod config;
+mod corpus_promote;
 mod nmea_transport;
 mod replay_report;
 
@@ -119,6 +120,9 @@ enum Command {
     /// Android app provides for on-device sessions.
     #[command(subcommand)]
     Session(SessionCommand),
+    /// Manage the regression-test corpus.
+    #[command(subcommand)]
+    Corpus(CorpusCommand),
     /// Sight log management (stub).
     Log,
     /// Download almanac/catalog/leap-second updates (stub).
@@ -412,6 +416,41 @@ struct SessionAttachArgs {
     in_place: bool,
 }
 
+#[derive(Debug, clap::Subcommand)]
+enum CorpusCommand {
+    /// Promote a stored field capture into a regression-corpus
+    /// `case.toml` skeleton.
+    ///
+    /// Reads `<capture>/bundle.json`, decodes frame 0, runs the
+    /// classifier/centroid/horizon detectors against it, and writes
+    /// `<output>/case.toml` + `<output>/frame.png`. The generated
+    /// case is a SKELETON: review the derived values before
+    /// committing it into `crates/bris-vision/tests/regression/`.
+    /// See `crates/bris-cli/src/corpus_promote.rs` for the schema
+    /// this produces.
+    Promote(CorpusPromoteArgs),
+}
+
+#[derive(Debug, Clone, clap::Args)]
+struct CorpusPromoteArgs {
+    /// Directory of the stored capture: `bundle.json` plus a
+    /// `media/` or `frames/` frame layout.
+    #[arg(long)]
+    capture: PathBuf,
+    /// Output directory for the generated case (created if
+    /// missing). Conventionally
+    /// `crates/bris-vision/tests/regression/<name>/`.
+    #[arg(long)]
+    output: PathBuf,
+    /// Case name recorded in `case.toml`'s `[case] name`. Defaults
+    /// to `output`'s final path component.
+    #[arg(long)]
+    name: Option<String>,
+    /// Free-text description recorded in `case.toml`.
+    #[arg(long, default_value = "Promoted from a field capture.")]
+    description: String,
+}
+
 #[derive(Debug, Clone, clap::Args)]
 #[allow(clippy::struct_excessive_bools)]
 struct ReplayArgs {
@@ -651,6 +690,7 @@ fn main() -> anyhow::Result<()> {
     match cli.command {
         Command::Replay(args) => run_replay(&args),
         Command::Session(cmd) => run_session(cmd),
+        Command::Corpus(cmd) => run_corpus(cmd),
         Command::Capture(args) => run_capture(&args, &raw_config),
         Command::Serve(args) => run_serve(&args, &raw_config),
         Command::Calibrate(args) => run_calibrate(&args),
@@ -2714,6 +2754,28 @@ fn median(values: &[f64]) -> f64 {
 
 fn default_corpus_root() -> PathBuf {
     PathBuf::from("./bris-corpus")
+}
+
+fn run_corpus(cmd: CorpusCommand) -> anyhow::Result<()> {
+    match cmd {
+        CorpusCommand::Promote(args) => run_corpus_promote(args),
+    }
+}
+
+fn run_corpus_promote(args: CorpusPromoteArgs) -> anyhow::Result<()> {
+    let case_name = args
+        .name
+        .unwrap_or_else(|| corpus_promote::default_case_name(&args.output));
+    let promote_args = corpus_promote::PromoteArgs {
+        capture_dir: args.capture,
+        case_dir: args.output,
+        case_name,
+        description: args.description,
+    };
+    let case_toml = corpus_promote::promote(&promote_args)?;
+    info!(path = %case_toml.display(), "corpus: case skeleton written");
+    println!("wrote {}", case_toml.display());
+    Ok(())
 }
 
 fn run_session(cmd: SessionCommand) -> anyhow::Result<()> {
