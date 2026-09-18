@@ -190,6 +190,18 @@ pub struct EngineDiagnostics {
     /// Reset per frame in which the provider runs; remains at
     /// the last-observed value otherwise.
     pub ml_gravity_inference_ms_last: f64,
+    /// Cumulative count of Stage E sight-reduction attempts
+    /// rejected `BelowHorizon` whose paired horizon came from
+    /// the `ml-gravity` provider — i.e. a single fix-frame
+    /// capture where the model's predicted horizon put a body
+    /// (that is really above the true horizon) below the
+    /// synthesised line. Distinguished from other providers'
+    /// `BelowHorizon` rejections so a systematic ml-gravity
+    /// geometry mismatch is visible instead of being folded
+    /// into an undifferentiated rejection count (see
+    /// `docs/design/ml_gravity.md`,
+    /// `docs/design/artificial_horizon.md`).
+    pub ml_gravity_below_horizon_rejections: u64,
 
     /// Frames where the seg-fraction eligibility gate refused
     /// to invoke the [day] gradient provider because the
@@ -443,6 +455,15 @@ pub enum StageEOutcomeSnapshot {
     Err {
         /// Short variant name.
         kind: String,
+        /// Stable label of the horizon provider whose line
+        /// was paired with this body candidate (e.g.
+        /// `"ml-gravity"`, `"gradient"`). Lets a `BelowHorizon`
+        /// rejection be attributed to its source instead of
+        /// being indistinguishable from a genuine
+        /// below-the-horizon body — the gap that let a
+        /// systematic `ml-gravity` fix-frame geometry mismatch
+        /// hide inside an undifferentiated rejection count.
+        horizon_provider: &'static str,
     },
 }
 
