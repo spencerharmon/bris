@@ -2185,9 +2185,21 @@ references to the regression tests that pin the behavior. See
    and ~unicam~ kernel drivers, so the same backend reaches
    them; libcamera becomes interesting when we need
    exposure/gain/ISP tuning that isn't exposed via raw V4L2.
-** TODO Pi Zero 2W appliance image
+** PARTIAL Pi Zero 2W appliance image
    Buildroot or ~pi-gen~ recipe: minimal kernel, ~bris-cli serve~ as
    systemd unit, read-only rootfs, NTP enabled, NMEA on TCP 10110.
+   *Status:* the reproducible cross-build + image-assembly recipe
+   is DONE — ~scripts/pi-appliance/build.sh~ cross-compiles ~bris-cli~
+   for ~aarch64-unknown-linux-gnu~ (the DoD check) and assembles a
+   staging tree (binary + ~bris-data~ ml-gravity payload + a
+   placeholder-only runtime config + a ~bris-appliance.service~ systemd
+   unit). The aarch64 GNU cross toolchain is pinned reproducibly by
+   ~flake.nix~ (no host apt/sudo); ~.cargo/config.toml~ names the cross
+   linker/CC. See ~docs/operator/pi-appliance.md~. No infra identifiers
+   are baked in — camera/serial/UDP-peer values are first-boot config.
+   *Pending:* the full OS image assembly (minimal kernel, read-only
+   rootfs, NTP wiring) via ~pi-gen~/~rpi-image-gen~ consuming the
+   staging tree.
 ** TODO Field log + replay
    Persist raw frames + metadata so a fix can be re-derived offline
    for debugging. Includes the same soft-delete model as the mobile

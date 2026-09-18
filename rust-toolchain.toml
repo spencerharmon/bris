@@ -1,4 +1,10 @@
 [toolchain]
 channel = "1.94"
 components = ["rustfmt", "clippy"]
+# The Pi Zero 2W appliance frontend cross-compiles for aarch64-unknown-linux-gnu
+# (see flake.nix + scripts/pi-appliance/build.sh). Declaring the target here makes
+# rustup auto-provision its std library on any host, so the appliance DoD check
+# `cargo build --release --target aarch64-unknown-linux-gnu -p bris-cli` is
+# reproducible without a manual `rustup target add`. x86_64 is the host/default.
+targets = ["aarch64-unknown-linux-gnu"]
 profile = "minimal"

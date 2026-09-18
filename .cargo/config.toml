@@ -8,3 +8,26 @@
 # setup (cave `implementer` runs in isolated git worktrees). Do NOT set
 # `build.target-dir` to a shared path -- cargo's per-target-dir build lock
 # would serialize concurrent agent builds.
+
+# Pi Zero 2W (aarch64) appliance cross-build. The appliance target
+# (`aarch64-unknown-linux-gnu`) needs a cross linker + C compiler for the
+# `cc`-built native deps (blake3, ort/tract, v4l2/ort bindgen). The linker/CC/
+# CXX/AR are routed through the `.cargo/aarch64-unknown-linux-gnu-*` shims
+# (symlinks to `.cargo/nix-cross-tool.sh`), which exec the real cross tool when
+# it is already on PATH (inside `nix develop`, or a Debian/CI host that renamed
+# gcc-aarch64-linux-gnu) and otherwise resolve the SAME pinned toolchain from
+# flake.nix's devShell. `relative = true` makes cargo resolve each path against
+# THIS config file's directory, so the paths are absolute at use time and work
+# from any build-script cwd — that is what makes the bare appliance DoD check
+#   cargo build --release --target aarch64-unknown-linux-gnu -p bris-cli
+# reproducible WITHOUT a wrapping `nix develop` (the runner runs it bare), with
+# no host apt/sudo and no manual dev-shell step. `force = false` lets an explicit
+# CC_aarch64_unknown_linux_gnu in the environment (a Debian/CI override, or a
+# developer's own toolchain) still win. No infra identifiers are baked in.
+[target.aarch64-unknown-linux-gnu]
+linker = ".cargo/aarch64-unknown-linux-gnu-gcc"
+
+[env]
+CC_aarch64_unknown_linux_gnu = { value = ".cargo/aarch64-unknown-linux-gnu-gcc", force = false, relative = true }
+CXX_aarch64_unknown_linux_gnu = { value = ".cargo/aarch64-unknown-linux-gnu-g++", force = false, relative = true }
+AR_aarch64_unknown_linux_gnu = { value = ".cargo/aarch64-unknown-linux-gnu-ar", force = false, relative = true }
