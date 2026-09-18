@@ -2091,8 +2091,8 @@ references to the regression tests that pin the behavior. See
    Vendor-prefixed sentences carrying time-since-sync, drift estimate,
    step-detected flag, horizon confidence, sights used in fix. Ignored
    by standard consumers; consumed by our own tooling.
-** PARTIAL Transport layer
-   TCP server, UDP broadcast, serial (~serialport~ crate). Configurable
+** DONE Transport layer
+   TCP server, UDP broadcast, serial. Configurable
    via a small TOML/JSON config.
 
    *Done in commit X of the headless-stack work:* TCP server
@@ -2102,9 +2102,30 @@ references to the regression tests that pin the behavior. See
    convention. Multi-client broadcast with per-client write
    timeout (slow client gets dropped, others continue).
 
-   Still missing: serial port (`serialport` crate dep + a
-   `RawNmea::Serial { device, baud }` variant) and UDP
-   broadcast (`std::net::UdpSocket`).
+   *Completed (output-nmea-transport):* the still-missing
+   serial + UDP sinks landed. `RawNmea::Udp { addr }` +
+   ~UdpSink~ (a `std::net::UdpSocket` with `SO_BROADCAST`
+   enabled; unicast or `255.255.255.255:10110` broadcast) and
+   `RawNmea::Serial { device }` + ~SerialSink~ (opens the tty
+   path for writing). CLI flags `--nmea-udp ADDR` /
+   `--nmea-serial DEVICE` union onto the file sinks like the
+   existing ones. Tests assert well-formed sentences (valid
+   `*XX` checksums) carrying the fixture fix's honest 1σ
+   uncertainty (926.0 m `$GPGST` semi-axes) over *both* new
+   sinks against a fixture fix.
+
+   *Design choice (serial):* the serial sink does **not** take
+   the `serialport` crate dependency plan.org originally
+   anticipated. `serialport` pulls in `libudev`, which
+   complicates the aarch64 Pi cross-compile and CI. Instead
+   the sink opens the device path for writing and the operator
+   sets the tty line discipline (baud) out of band with
+   `stty` — a call they already run to bring up any NMEA-0183
+   serial link. This keeps the binary dependency-free and
+   `unsafe`-free. Documented in
+   [[file:docs/operator/nmea_output.md][docs/operator/nmea_output.md]]. Consequently the config
+   variant is `RawNmea::Serial { device }` (no `baud` field);
+   baud lives in the operator's `stty` invocation.
 ** TODO OpenCPN integration test
    Scripted: spin up Bris emitting a canned fix, connect OpenCPN in a
    container/VM, assert vessel icon appears at expected position and

@@ -234,6 +234,21 @@ struct ServeArgs {
     /// `0.0.0.0:10110` for the `OpenCPN` convention.
     #[arg(long)]
     nmea_tcp: Option<std::net::SocketAddr>,
+    /// Send NMEA sentences as UDP datagrams to this
+    /// destination address. Adds to any `[[nmea]]` sinks
+    /// defined in the config file. Use
+    /// `255.255.255.255:10110` for a LAN broadcast every
+    /// plotter on the segment receives, or a unicast
+    /// `host:port` for a point-to-point push.
+    #[arg(long)]
+    nmea_udp: Option<std::net::SocketAddr>,
+    /// Write NMEA sentences to this serial device
+    /// (`/dev/ttyUSB0`, `/dev/ttyAMA0`). Adds to any
+    /// `[[nmea]]` sinks defined in the config file. Configure
+    /// the tty line discipline (baud rate) with `stty`
+    /// before starting; see `docs/operator/nmea_output.md`.
+    #[arg(long)]
+    nmea_serial: Option<PathBuf>,
     /// Path to a calibration intrinsics TOML file written
     /// by `bris calibrate`. Overrides the
     /// `[camera] intrinsics` config-file value. When neither
@@ -2302,6 +2317,8 @@ fn run_serve(args: &ServeArgs, raw_config: &config::RawConfig) -> anyhow::Result
         args.eye_height_m,
         args.nmea_stdout,
         args.nmea_tcp,
+        args.nmea_udp,
+        args.nmea_serial.clone(),
         args.intrinsics.clone(),
     )?;
 
@@ -2373,13 +2390,24 @@ fn run_serve(args: &ServeArgs, raw_config: &config::RawConfig) -> anyhow::Result
                     .with_context(|| format!("bind NMEA TCP server on {addr}"))?;
                 sinks.push(Box::new(tcp));
             }
+            config::RawNmea::Udp { addr } => {
+                let udp = nmea_transport::UdpSink::bind(*addr)
+                    .with_context(|| format!("open NMEA UDP sink for {addr}"))?;
+                sinks.push(Box::new(udp));
+            }
+            config::RawNmea::Serial { device } => {
+                let serial = nmea_transport::SerialSink::open(device)
+                    .with_context(|| format!("open NMEA serial device {}", device.display()))?;
+                sinks.push(Box::new(serial));
+            }
         }
     }
     if sinks.is_empty() {
         info!(
             "bris serve: no NMEA sinks configured; fixes are visible via the \
              structured info! log only. Add [[nmea]] entries to the config \
-             file or pass --nmea-stdout / --nmea-tcp ADDR to emit NMEA bytes."
+             file or pass --nmea-stdout / --nmea-tcp ADDR / --nmea-udp ADDR / \
+             --nmea-serial DEVICE to emit NMEA bytes."
         );
     }
 

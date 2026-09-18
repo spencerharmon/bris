@@ -9,6 +9,51 @@ For the end-to-end pipeline architecture and data flow, see
 
 ---
 
+## NMEA transport: UDP + serial sinks complete (output-nmea-transport)
+
+The NMEA transport layer (`plan.org` Phase 5 "Transport layer",
+now DONE) gained its two still-missing sinks alongside the
+existing stdout + TCP-server sinks:
+
+- **UDP** (`RawNmea::Udp { addr }` → `UdpSink`): each fix's
+  sentence batch is sent as one datagram to a fixed destination.
+  `SO_BROADCAST` is enabled so the destination may be a unicast
+  peer or the LAN broadcast `255.255.255.255:10110`. CLI flag
+  `--nmea-udp ADDR`.
+- **Serial** (`RawNmea::Serial { device }` → `SerialSink`): opens
+  the tty path (`/dev/ttyUSB0`, the Pi's `/dev/ttyAMA0`) for
+  writing and streams sentences to it. CLI flag
+  `--nmea-serial DEVICE`. The tty baud/line-discipline is set out
+  of band with `stty` — a deliberate choice to avoid the
+  `serialport`/`libudev` dependency and keep the aarch64 Pi
+  cross-compile clean and `unsafe`-free.
+
+Both flags union onto the config-file `[[nmea]]` sinks like the
+existing ones; all four sink types can run at once.
+
+The bris invariant holds end to end: the sentence formatter already
+emits `$GPGST` (1σ error ellipse), `$GPGGA` quality, `$GPRMC`
+status, and `$PBRIS,FIX` carrying the honest per-fix uncertainty;
+the new sinks ship those bytes unmodified. New tests
+(`nmea_transport::tests`) stand up a real loopback UDP receiver and
+a serial-device temp file, push a fixture fix (σ = 0.5 nm) through
+each sink, and assert the received bytes are well formed (every
+`*XX` checksum validates) and carry the fixture's real uncertainty
+(926.0 m `$GPGST` semi-axes) — never a hidden/zeroed value.
+
+Operator remediation docs: `docs/operator/nmea_output.md` documents
+every sink, the emitted sentence set, and a symptom→cause→fix guide
+for reading the uncertainty channels (what a void `$GPRMC` status /
+large `$GPGST` σ / stale `$PBRIS,FIX` age mean and what to do).
+
+Tests: `cargo test -p bris-cli` — 30 unit + 3 integration, all
+green (4 new: `udp_and_serial_sinks_parse_and_resolve`,
+`formatter_batch_is_well_formed_with_honest_uncertainty`,
+`udp_sink_delivers_well_formed_sentences`,
+`serial_sink_writes_well_formed_sentences`).
+
+---
+
 ## bris-cli: fix / log / update subcommands implemented
 
 The previously-stubbed `bris fix`, `bris log`, and `bris update`

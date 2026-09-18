@@ -9,6 +9,11 @@ Available now:
 - [`mobile-hud.md`](mobile-hud.md) — Android live-HUD chrome: the
   confidence ellipse, pool / recent-sights views, recovered-fix
   banner.
+- [`nmea_output.md`](nmea_output.md) — NMEA 0183 output: the stdout /
+  TCP / UDP / serial transport sinks, the emitted sentence set, and
+  a remediation guide for every NMEA-visible uncertainty signal
+  (how to read `$GPGST` / `$GPGGA` quality / `$GPRMC` status and
+  what to do about a low-confidence fix).
 
 Planned (alongside future plan.org phases):
 - `chartplotter-symptoms.md` — every NMEA-visible Bris signal, what it
