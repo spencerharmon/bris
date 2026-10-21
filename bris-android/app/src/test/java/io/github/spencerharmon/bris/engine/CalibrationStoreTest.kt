@@ -146,15 +146,15 @@ class CalibrationStoreTest {
         File(sessionDir, "calibration.json").writeText(manifest.toString())
         val s = CalibrationStore(externalRoot = ext, legacyInternalRoot = legacy)
         assertEquals("legacy:4032x3024", s.latestCalibrationIdFor("0", 4032, 3024))
+        assertEquals(100.0, s.latestIntrinsicsFor("0", 4032, 3024)!!.fx, 1e-9)
     }
 
     @Test
-    fun resolveCalibration_operator_carries_real_uuid_for_new_session() {
+    fun resolveCalibration_operator_preserves_uuid_in_legacy_minimal_manifest() {
         val s = store()
         val dir = s.newSession("0", 4032, 3024)
-        // Promote the in_progress stub to a complete
-        // manifest with intrinsics so latestIntrinsicsFor
-        // returns non-null.
+        // A status-less minimal manifest remains readable even in the flat
+        // layout. Full manifests are covered by native instrumented tests.
         val manifest = JSONObject(File(dir, "calibration.json").readText())
             .put(
                 "intrinsics",
@@ -165,6 +165,7 @@ class CalibrationStoreTest {
                     .put("p1", 0.0).put("p2", 0.0),
             )
             .put("rms_px", 0.5)
+        manifest.remove("status")
         File(dir, "calibration.json").writeText(manifest.toString())
         val src = resolveCalibration(s, "0", 4032, 3024)
         assertTrue(src is CalibrationSource.Operator)

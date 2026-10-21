@@ -23,7 +23,7 @@
 //! `diagnosis_issues`, `per_view_residuals`). The CLI now
 //! writes and reads this same shape; `bris-ffi` exposes
 //! [`write_intrinsics`]/[`read_intrinsics`] so Android can
-//! (going forward) delegate to the shared Rust
+//! delegate to the shared Rust
 //! implementation instead of re-deriving the JSON by hand.
 //!
 //! ```json
@@ -242,6 +242,9 @@ pub enum PersistError {
     /// are all primitives).
     #[error("serialize calibration: {0}")]
     Serialize(#[from] serde_json::Error),
+    /// A count cannot be represented by the shared frontend format.
+    #[error("calibration count exceeds the shared format: {0}")]
+    CountOverflow(#[from] std::num::TryFromIntError),
     /// Manifest status is not `"complete"` — either an
     /// in-progress Android session stub or a hand-edited
     /// file.
@@ -256,11 +259,13 @@ pub enum PersistError {
 
 impl CalibrationManifest {
     /// Build a manifest from a [`CalibrationReport`].
-    #[must_use]
-    pub fn from_report(report: &CalibrationReport<'_>) -> Self {
+    ///
+    /// # Errors
+    /// Returns [`PersistError::CountOverflow`] for counts exceeding the format.
+    pub fn from_report(report: &CalibrationReport<'_>) -> Result<Self, PersistError> {
         let result = report.result;
         let stats = report.detection_stats;
-        Self {
+        Ok(Self {
             calibration_id: report.calibration_id.clone(),
             lens_id: report.lens_id.clone(),
             status: "complete".to_string(),
@@ -278,8 +283,8 @@ impl CalibrationManifest {
             width: result.image_width,
             height: result.image_height,
             rms_px: result.mean_reproj_error_px,
-            n_frames_used: u32::try_from(result.view_count).unwrap_or(u32::MAX),
-            n_frames_total: u32::try_from(stats.tried).unwrap_or(u32::MAX),
+            n_frames_used: u32::try_from(result.view_count)?,
+            n_frames_total: u32::try_from(stats.tried)?,
             detection_stats: ManifestDetectionStats {
                 tried: stats.tried as u64,
                 skipped_no_board: stats.skipped_no_board as u64,
@@ -302,17 +307,16 @@ impl CalibrationManifest {
                 .per_view
                 .iter()
                 .map(|v| ManifestViewResidual {
-                    source: v
-                        .source
-                        .file_name()
-                        .map(|s| s.to_string_lossy().into_owned())
-                        .unwrap_or_default(),
+                    source: v.source.file_name().map_or_else(
+                        || v.source.to_string_lossy().into_owned(),
+                        |s| s.to_string_lossy().into_owned(),
+                    ),
                     rms_px: v.rms_px,
                     max_px: v.max_px,
                     n_corners: v.n_corners as u64,
                 })
                 .collect(),
-        }
+        })
     }
 
     /// Convert into a [`bris_vision::Intrinsics`] for direct
@@ -348,6 +352,16 @@ fn level_label(level: DiagnosisLevel) -> &'static str {
 ///
 /// See [`PersistError`].
 pub fn write_intrinsics(path: &Path, report: &CalibrationReport<'_>) -> Result<(), PersistError> {
+    write_manifest(path, &CalibrationManifest::from_report(report)?)
+}
+
+/// Write the shared manifest, including session metadata, using the same
+/// serialization for CLI and FFI callers.
+///
+/// # Errors
+///
+/// See [`PersistError`].
+pub fn write_manifest(path: &Path, manifest: &CalibrationManifest) -> Result<(), PersistError> {
     if let Some(parent) = path.parent() {
         if !parent.as_os_str().is_empty() {
             std::fs::create_dir_all(parent).map_err(|e| PersistError::Io {
@@ -356,8 +370,7 @@ pub fn write_intrinsics(path: &Path, report: &CalibrationReport<'_>) -> Result<(
             })?;
         }
     }
-    let manifest = CalibrationManifest::from_report(report);
-    let json_text = serde_json::to_string_pretty(&manifest)?;
+    let json_text = serde_json::to_string_pretty(manifest)?;
     std::fs::write(path, json_text).map_err(|e| PersistError::Io {
         path: path.to_path_buf(),
         source: e,
@@ -542,7 +555,10 @@ mod tests {
         )
         .unwrap();
         let err = read_intrinsics(&path).unwrap_err();
-        assert!(matches!(err, PersistError::IncompleteStatus { .. }), "got: {err:?}");
+        assert!(
+            matches!(err, PersistError::IncompleteStatus { .. }),
+            "got: {err:?}"
+        );
     }
 
     #[test]
@@ -615,12 +631,12 @@ mod tests {
         assert_eq!(manifest.lens_id.as_deref(), Some("0"));
         assert_eq!(manifest.width, 4032);
         assert_eq!(manifest.height, 3024);
-        assert!((manifest.rms_px - 0.7331791456580863).abs() < 1e-12);
+        assert!((manifest.rms_px - 0.733_179_145_658_086_3).abs() < 1e-12);
         assert_eq!(manifest.n_frames_used, 15);
         assert_eq!(manifest.per_view_residuals.len(), 1);
         assert_eq!(manifest.per_view_residuals[0].source, "frame_0006.jpg");
         let i = manifest.intrinsics();
-        assert!((i.fx - 3103.4061281557006).abs() < 1e-9);
+        assert!((i.fx - 3_103.406_128_155_700_6).abs() < 1e-9);
 
         // Now write it back out through the CLI path and
         // confirm re-reading produces the identical manifest

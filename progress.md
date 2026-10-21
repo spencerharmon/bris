@@ -9,6 +9,17 @@ For the end-to-end pipeline architecture and data flow, see
 
 ---
 
+## Shared calibration JSON
+
+CLI persistence and Android's completed calibration manifests now use
+`bris-calibrate::persist::CalibrationManifest`. Android delegates writes
+and full-manifest reads to the FFI; legacy minimal JSON remains read-only.
+Cross-frontend tests assert identical serialized bytes and coefficient bits.
+The pinned Rust toolchain passes the calibration, FFI, and CLI tests.
+Android native instrumented coverage is authored but awaits CI/device execution.
+
+---
+
 ## Pi Zero 2W appliance image: reproducible cross-build + recipe
 
 The Pi Zero 2W (aarch64) appliance build is delivered as a

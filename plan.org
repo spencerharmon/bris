@@ -409,12 +409,11 @@ references to the regression tests that pin the behavior. See
    ~per_view_residuals~ — Android's shape, which the CLI's older
    bespoke TOML format now matches field-for-field.
    ~bris-ffi~ exposes ~write_calibration_manifest~ /
-   ~read_calibration_manifest~ so the Android shell can delegate to
+   ~read_calibration_manifest~ so the Android shell delegates to
    the shared Rust implementation instead of hand-rolling the JSON
-   (~CalibrationStore.kt~ still writes it directly in Kotlin as of
-   this change — wiring the shell over to the new FFI calls is a
-   follow-up, tracked as a Kotlin-side refactor with no schema
-   change). Round-trip coverage lives in
+   (~CalibrationStore.kt~ retains only a read-only adapter for older
+   status-less minimal manifests). Exact float parsing preserves
+   coefficient bits across frontend round trips. Coverage lives in
    ~bris-calibrate::persist::tests~ (loads a hand-written
    Android-shaped manifest) and
    ~bris-ffi::calibration_manifest_tests~ (writes via the FFI path,

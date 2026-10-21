@@ -3,6 +3,8 @@ package io.github.spencerharmon.bris.engine
 import android.content.Context
 import org.json.JSONObject
 import uniffi.bris_ffi.FfiCalibrationResult
+import uniffi.bris_ffi.readCalibrationManifest
+import uniffi.bris_ffi.writeCalibrationManifest
 import java.io.File
 import java.util.UUID
 
@@ -104,66 +106,19 @@ class CalibrationStore(
      * Persist the solver result, rewriting `calibration.json`
      * with the full manifest (intrinsics + stats + per-view
      * residuals + diagnosis). Preserves the `calibration_id`
-     * and lens/resolution stamped at `newSession`.
+     * and lens stamped at `newSession`; resolution comes from
+     * the solver result. Missing session metadata is an error.
      */
     fun writeIntrinsics(sessionDir: File, result: FfiCalibrationResult) {
-        val existing = File(sessionDir, "calibration.json").let { f ->
-            if (f.isFile) runCatching { JSONObject(f.readText()) }.getOrNull() else null
-        }
-        val calibrationId = existing?.optString("calibration_id")
-            ?.takeIf { it.isNotEmpty() }
-            ?: sessionDir.name
-        val lensId = existing?.optString("lens_id") ?: ""
-        val intr = JSONObject()
-            .put("fx", result.intrinsics.fx)
-            .put("fy", result.intrinsics.fy)
-            .put("cx", result.intrinsics.cx)
-            .put("cy", result.intrinsics.cy)
-            .put("k1", result.intrinsics.k1)
-            .put("k2", result.intrinsics.k2)
-            .put("k3", result.intrinsics.k3)
-            .put("p1", result.intrinsics.p1)
-            .put("p2", result.intrinsics.p2)
-        val stats = JSONObject()
-            .put("tried", result.detectionStats.tried.toLong())
-            .put("skipped_no_board", result.detectionStats.skippedNoBoard.toLong())
-            .put("skipped_wrong_size", result.detectionStats.skippedWrongSize.toLong())
-            .put("skipped_io", result.detectionStats.skippedIo.toLong())
-        val issues = org.json.JSONArray()
-        for (issue in result.diagnosisIssues) {
-            issues.put(
-                JSONObject()
-                    .put("level", issue.level.name)
-                    .put("code", issue.code)
-                    .put("message", issue.message)
-                    .put("remediation", issue.remediation),
-            )
-        }
-        val perView = org.json.JSONArray()
-        for (v in result.perViewResiduals) {
-            perView.put(
-                JSONObject()
-                    .put("source", v.source)
-                    .put("rms_px", v.rmsPx)
-                    .put("max_px", v.maxPx)
-                    .put("n_corners", v.nCorners.toLong()),
-            )
-        }
-        val obj = JSONObject()
-            .put("calibration_id", calibrationId)
-            .put("lens_id", lensId)
-            .put("status", "complete")
-            .put("intrinsics", intr)
-            .put("width", result.width.toLong())
-            .put("height", result.height.toLong())
-            .put("rms_px", result.rmsPx)
-            .put("n_frames_used", result.nFramesUsed.toLong())
-            .put("n_frames_total", result.nFramesTotal.toLong())
-            .put("detection_stats", stats)
-            .put("diagnosis_overall", result.diagnosisOverall.name)
-            .put("diagnosis_issues", issues)
-            .put("per_view_residuals", perView)
-        File(sessionDir, "calibration.json").writeText(obj.toString())
+        val manifest = File(sessionDir, "calibration.json")
+        val existing = JSONObject(manifest.readText())
+        val calibrationId = requireNotNull(
+            (existing.opt("calibration_id") as? String)?.takeIf { it.isNotBlank() },
+        ) { "Calibration session is missing calibration_id" }
+        val lensId = requireNotNull(
+            (existing.opt("lens_id") as? String)?.takeIf { it.isNotBlank() },
+        ) { "Calibration session is missing lens_id" }
+        writeCalibrationManifest(manifest.absolutePath, result, calibrationId, lensId)
     }
 
     /**
@@ -260,20 +215,34 @@ class CalibrationStore(
     }
 
     private fun readIntrinsics(sessionDir: File): PersistedIntrinsics? {
-        // New layout: calibration.json
         val newPath = File(sessionDir, "calibration.json")
-        if (newPath.isFile) {
-            return runCatching { decode(JSONObject(newPath.readText())) }.getOrNull()
-        }
-        // Legacy: intrinsics.json
         val legacyPath = File(sessionDir, "intrinsics.json")
-        if (legacyPath.isFile) {
-            return runCatching { decode(JSONObject(legacyPath.readText())) }.getOrNull()
+        val path = when {
+            newPath.isFile -> newPath
+            legacyPath.isFile -> legacyPath
+            else -> return null
         }
-        return null
+        return runCatching {
+            val obj = JSONObject(path.readText())
+            // Only the old minimal, status-less format uses the Kotlin decoder.
+            // Never retry a malformed full manifest as legacy intrinsics.
+            val fullManifest = listOf(
+                "status", "n_frames_used", "n_frames_total", "detection_stats",
+                "diagnosis_overall", "diagnosis_issues", "per_view_residuals",
+            ).any { obj.has(it) }
+            if (!fullManifest) return@runCatching decodeLegacy(obj)
+            val result = readCalibrationManifest(path.absolutePath)
+            val intr = result.intrinsics
+            PersistedIntrinsics(
+                fx = intr.fx, fy = intr.fy, cx = intr.cx, cy = intr.cy,
+                k1 = intr.k1, k2 = intr.k2, k3 = intr.k3, p1 = intr.p1, p2 = intr.p2,
+                width = result.width.toInt(), height = result.height.toInt(),
+                rmsPx = result.rmsPx,
+            )
+        }.getOrNull()
     }
 
-    private fun decode(obj: JSONObject): PersistedIntrinsics? {
+    private fun decodeLegacy(obj: JSONObject): PersistedIntrinsics? {
         val intr = obj.optJSONObject("intrinsics") ?: return null
         return PersistedIntrinsics(
             fx = intr.getDouble("fx"),

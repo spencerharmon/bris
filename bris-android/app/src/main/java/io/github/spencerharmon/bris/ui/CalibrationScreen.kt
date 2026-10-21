@@ -336,20 +336,19 @@ fun CalibrationScreen(
                     solving = true
                     status = "Solving…"
                     scope.launch {
-                        store.writeTarget(sessionDir, rows, cols, sizeMm)
                         val result = withContext(Dispatchers.IO) {
                             runCatching {
+                                store.writeTarget(sessionDir, rows, cols, sizeMm)
                                 runCalibration(
                                     framesDir = java.io.File(sessionDir, "frames").absolutePath,
                                     rows = rows.toUInt(),
                                     cols = cols.toUInt(),
                                     squareSizeMm = sizeMm,
-                                )
+                                ).also { store.writeIntrinsics(sessionDir, it) }
                             }
                         }
                         solving = false
                         result.onSuccess { res ->
-                            store.writeIntrinsics(sessionDir, res)
                             solveResult = res
                             status = "Solved: ${res.nFramesUsed}/${res.nFramesTotal} frames, " +
                                 "rms=${"%.3f".format(res.rmsPx)} px"

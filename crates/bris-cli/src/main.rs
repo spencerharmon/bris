@@ -288,7 +288,7 @@ struct CalibrateArgs {
     /// scaling is a common source of millimeter-scale error.
     #[arg(long, default_value_t = 25.0)]
     square_size_mm: f64,
-    /// Where to write the resulting intrinsics TOML file.
+    /// Where to write the resulting intrinsics JSON manifest.
     /// Default: `$XDG_DATA_HOME/bris/intrinsics.json`.
     #[arg(long)]
     output: Option<PathBuf>,

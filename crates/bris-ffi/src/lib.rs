@@ -2111,19 +2111,10 @@ pub fn write_calibration_manifest(
             })
             .collect(),
     };
-    let json_text = serde_json::to_string_pretty(&manifest).map_err(|e| FfiError::Engine {
-        detail: format!("calibration manifest serialize: {e}"),
-    })?;
-    let path = std::path::Path::new(&path);
-    if let Some(parent) = path.parent() {
-        if !parent.as_os_str().is_empty() {
-            std::fs::create_dir_all(parent).map_err(|e| FfiError::Engine {
-                detail: format!("calibration manifest mkdir {}: {e}", parent.display()),
-            })?;
+    bris_calibrate::persist::write_manifest(std::path::Path::new(&path), &manifest).map_err(|e| {
+        FfiError::Engine {
+            detail: format!("calibration manifest write {path}: {e}"),
         }
-    }
-    std::fs::write(path, json_text).map_err(|e| FfiError::Engine {
-        detail: format!("calibration manifest write {}: {e}", path.display()),
     })
 }
 
@@ -2136,10 +2127,17 @@ pub fn write_calibration_manifest(
 ///   (`status != "complete"`) manifest.
 #[uniffi::export]
 pub fn read_calibration_manifest(path: String) -> Result<FfiCalibrationResult, FfiError> {
-    let manifest = bris_calibrate::persist::read_intrinsics(std::path::Path::new(&path))
-        .map_err(|e| FfiError::Engine {
-            detail: format!("calibration manifest read {path}: {e}"),
+    let manifest =
+        bris_calibrate::persist::read_intrinsics(std::path::Path::new(&path)).map_err(|e| {
+            FfiError::Engine {
+                detail: format!("calibration manifest read {path}: {e}"),
+            }
         })?;
+    let count = |n| {
+        u32::try_from(n).map_err(|e| FfiError::Engine {
+            detail: format!("calibration count out of range: {e}"),
+        })
+    };
     Ok(FfiCalibrationResult {
         intrinsics: FfiIntrinsics {
             fx: manifest.intrinsics.fx,
@@ -2158,34 +2156,36 @@ pub fn read_calibration_manifest(path: String) -> Result<FfiCalibrationResult, F
         n_frames_used: manifest.n_frames_used,
         n_frames_total: manifest.n_frames_total,
         detection_stats: FfiDetectionStats {
-            tried: u32::try_from(manifest.detection_stats.tried).unwrap_or(u32::MAX),
-            skipped_no_board: u32::try_from(manifest.detection_stats.skipped_no_board)
-                .unwrap_or(u32::MAX),
-            skipped_wrong_size: u32::try_from(manifest.detection_stats.skipped_wrong_size)
-                .unwrap_or(u32::MAX),
-            skipped_io: u32::try_from(manifest.detection_stats.skipped_io).unwrap_or(u32::MAX),
+            tried: count(manifest.detection_stats.tried)?,
+            skipped_no_board: count(manifest.detection_stats.skipped_no_board)?,
+            skipped_wrong_size: count(manifest.detection_stats.skipped_wrong_size)?,
+            skipped_io: count(manifest.detection_stats.skipped_io)?,
         },
-        diagnosis_overall: diagnosis_level_from_label(&manifest.diagnosis_overall),
+        diagnosis_overall: diagnosis_level_from_label(&manifest.diagnosis_overall)?,
         diagnosis_issues: manifest
             .diagnosis_issues
             .iter()
-            .map(|i| FfiDiagnosisIssue {
-                level: diagnosis_level_from_label(&i.level),
-                code: i.code.clone(),
-                message: i.message.clone(),
-                remediation: i.remediation.clone(),
+            .map(|i| {
+                Ok(FfiDiagnosisIssue {
+                    level: diagnosis_level_from_label(&i.level)?,
+                    code: i.code.clone(),
+                    message: i.message.clone(),
+                    remediation: i.remediation.clone(),
+                })
             })
-            .collect(),
+            .collect::<Result<_, FfiError>>()?,
         per_view_residuals: manifest
             .per_view_residuals
             .iter()
-            .map(|v| FfiViewResidual {
-                source: v.source.clone(),
-                rms_px: v.rms_px,
-                max_px: v.max_px,
-                n_corners: u32::try_from(v.n_corners).unwrap_or(u32::MAX),
+            .map(|v| {
+                Ok(FfiViewResidual {
+                    source: v.source.clone(),
+                    rms_px: v.rms_px,
+                    max_px: v.max_px,
+                    n_corners: count(v.n_corners)?,
+                })
             })
-            .collect(),
+            .collect::<Result<_, FfiError>>()?,
     })
 }
 
@@ -2201,14 +2201,16 @@ fn diagnosis_level_label(level: FfiDiagnosisLevel) -> &'static str {
     }
 }
 
-/// Inverse of [`diagnosis_level_label`]. An unrecognized
-/// label (a manifest from a future Bris version) maps to
-/// `Error` — fail safe rather than silently claiming health.
-fn diagnosis_level_from_label(label: &str) -> FfiDiagnosisLevel {
+/// Inverse of [`diagnosis_level_label`], rejecting unknown labels rather
+/// than silently changing their meaning on a round trip.
+fn diagnosis_level_from_label(label: &str) -> Result<FfiDiagnosisLevel, FfiError> {
     match label {
-        "OK" => FfiDiagnosisLevel::Ok,
-        "WARN" => FfiDiagnosisLevel::Warn,
-        _ => FfiDiagnosisLevel::Error,
+        "OK" => Ok(FfiDiagnosisLevel::Ok),
+        "WARN" => Ok(FfiDiagnosisLevel::Warn),
+        "ERROR" => Ok(FfiDiagnosisLevel::Error),
+        _ => Err(FfiError::Engine {
+            detail: format!("unknown calibration diagnosis: {label}"),
+        }),
     }
 }
 
@@ -2457,19 +2459,19 @@ mod calibration_manifest_tests {
     fn sample_result() -> FfiCalibrationResult {
         FfiCalibrationResult {
             intrinsics: FfiIntrinsics {
-                fx: 3103.4061281557006,
-                fy: 3090.496744366685,
-                cx: 2013.857097640865,
-                cy: 1491.4983945221607,
-                k1: 0.02287385685683836,
-                k2: -0.027249189121853052,
+                fx: 3_103.406_128_155_700_6,
+                fy: 3_090.496_744_366_685,
+                cx: 2_013.857_097_640_865,
+                cy: 1_491.498_394_522_160_7,
+                k1: 0.022_873_856_856_838_36,
+                k2: -0.027_249_189_121_853_052,
                 k3: 0.0,
-                p1: -0.0020285902622051532,
-                p2: -0.004038950067724464,
+                p1: -0.002_028_590_262_205_153_2,
+                p2: -0.004_038_950_067_724_464,
             },
             width: 4032,
             height: 3024,
-            rms_px: 0.7331791456580863,
+            rms_px: 0.733_179_145_658_086_3,
             n_frames_used: 15,
             n_frames_total: 15,
             detection_stats: FfiDetectionStats {
@@ -2533,24 +2535,115 @@ mod calibration_manifest_tests {
         assert_eq!(manifest.diagnosis_overall, "OK");
         let i = manifest.intrinsics();
         assert!((i.fx - result.intrinsics.fx).abs() < 1e-9);
+
+        let cli_path = dir.path().join("cli.json");
+        bris_calibrate::persist::write_manifest(&cli_path, &manifest).unwrap();
+        assert_eq!(
+            std::fs::read(&cli_path).unwrap(),
+            std::fs::read(&path).unwrap()
+        );
+        let ffi_path = dir.path().join("ffi.json");
+        write_calibration_manifest(
+            ffi_path.to_string_lossy().into_owned(),
+            reloaded,
+            manifest.calibration_id,
+            manifest.lens_id,
+        )
+        .unwrap();
+        assert_eq!(
+            std::fs::read(&ffi_path).unwrap(),
+            std::fs::read(&path).unwrap()
+        );
+        assert_eq!(i.fx.to_bits(), result.intrinsics.fx.to_bits());
+        assert_eq!(i.k1.to_bits(), result.intrinsics.k1.to_bits());
+    }
+
+    #[test]
+    fn cli_written_manifest_round_trips_byte_faithfully_through_ffi() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("cli.json");
+        let sample = sample_result();
+        let result = bris_calibrate::CalibrationResult {
+            intrinsics: bris_vision::Intrinsics {
+                fx: sample.intrinsics.fx,
+                fy: sample.intrinsics.fy,
+                cx: sample.intrinsics.cx,
+                cy: sample.intrinsics.cy,
+                k1: sample.intrinsics.k1,
+                k2: sample.intrinsics.k2,
+                k3: sample.intrinsics.k3,
+                p1: sample.intrinsics.p1,
+                p2: sample.intrinsics.p2,
+            },
+            image_width: sample.width,
+            image_height: sample.height,
+            mean_reproj_error_px: sample.rms_px,
+            view_count: 15,
+            observation_count: 1050,
+            per_view: vec![bris_calibrate::ViewResidual {
+                source: "frames/frame_0006.jpg".into(),
+                rms_px: 1.43,
+                max_px: 2.1,
+                n_corners: 70,
+            }],
+        };
+        let diagnosis = bris_calibrate::diagnose(&result);
+        let stats = bris_calibrate::DetectionStats {
+            tried: 19,
+            skipped_no_board: 2,
+            skipped_wrong_size: 1,
+            skipped_io: 1,
+        };
+        bris_calibrate::write_intrinsics(
+            &path,
+            &bris_calibrate::CalibrationReport {
+                result: &result,
+                diagnosis: &diagnosis,
+                detection_stats: &stats,
+                calibration_id: None,
+                lens_id: None,
+            },
+        )
+        .unwrap();
+        let loaded = read_calibration_manifest(path.to_string_lossy().into_owned()).unwrap();
+        assert_eq!(
+            loaded.intrinsics.fx.to_bits(),
+            result.intrinsics.fx.to_bits()
+        );
+        assert_eq!(
+            loaded.intrinsics.k2.to_bits(),
+            result.intrinsics.k2.to_bits()
+        );
+        let round_trip = dir.path().join("android.json");
+        write_calibration_manifest(
+            round_trip.to_string_lossy().into_owned(),
+            loaded,
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            std::fs::read(&round_trip).unwrap(),
+            std::fs::read(&path).unwrap()
+        );
     }
 
     #[test]
     fn read_calibration_manifest_rejects_missing_file() {
-        let err =
-            read_calibration_manifest("/no/such/calibration.json".to_string()).unwrap_err();
+        let err = read_calibration_manifest("/no/such/calibration.json".to_string()).unwrap_err();
         assert!(matches!(err, FfiError::Engine { .. }));
     }
 
     #[test]
     fn diagnosis_level_label_round_trips() {
+        assert!(diagnosis_level_from_label("future-level").is_err());
         for level in [
             FfiDiagnosisLevel::Ok,
             FfiDiagnosisLevel::Warn,
             FfiDiagnosisLevel::Error,
         ] {
             let label = diagnosis_level_label(level);
-            let back = diagnosis_level_from_label(label);
+            let back = diagnosis_level_from_label(label).unwrap();
             assert!(matches!(
                 (level, back),
                 (FfiDiagnosisLevel::Ok, FfiDiagnosisLevel::Ok)
@@ -2558,6 +2651,23 @@ mod calibration_manifest_tests {
                     | (FfiDiagnosisLevel::Error, FfiDiagnosisLevel::Error)
             ));
         }
+    }
+
+    #[test]
+    fn manifest_counts_are_not_silently_truncated() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("calibration.json");
+        write_calibration_manifest(
+            path.to_string_lossy().into_owned(),
+            sample_result(),
+            None,
+            None,
+        )
+        .unwrap();
+        let mut manifest = bris_calibrate::read_intrinsics(&path).unwrap();
+        manifest.detection_stats.tried = u64::from(u32::MAX) + 1;
+        bris_calibrate::persist::write_manifest(&path, &manifest).unwrap();
+        assert!(read_calibration_manifest(path.to_string_lossy().into_owned()).is_err());
     }
 }
 
