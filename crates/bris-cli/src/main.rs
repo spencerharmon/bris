@@ -18,6 +18,7 @@
 //!   signature, atomic swap). *Implemented*.
 
 mod config;
+mod corpus_promote;
 mod nmea_transport;
 mod replay_report;
 mod subcommands;
@@ -156,6 +157,9 @@ enum Command {
     /// This is Bris's one and only network surface; nothing here
     /// runs automatically.
     Submit(SubmitArgs),
+    /// Manage the regression-test corpus.
+    #[command(subcommand)]
+    Corpus(CorpusCommand),
 }
 
 #[derive(Debug, clap::Args)]
@@ -445,9 +449,50 @@ struct SessionAttachArgs {
     in_place: bool,
 }
 
+#[derive(Debug, clap::Subcommand)]
+enum CorpusCommand {
+    /// Promote a stored field capture into a regression-corpus
+    /// `case.toml` skeleton.
+    ///
+    /// Reads `<capture>/bundle.json`, decodes frame 0, runs the
+    /// classifier/centroid/horizon detectors against it, and writes
+    /// `<output>/case.toml`, `<output>/frame.png` and a standalone
+    /// `<output>/bundle/` for `bris replay --case <output>/case.toml`.
+    /// Runs replay to record observed outcome stubs. The generated
+    /// case is a SKELETON: review the derived values before
+    /// committing it into `crates/bris-vision/tests/regression/`.
+    /// See `crates/bris-cli/src/corpus_promote.rs` for the schema
+    /// this produces.
+    Promote(CorpusPromoteArgs),
+}
+
+#[derive(Debug, Clone, clap::Args)]
+struct CorpusPromoteArgs {
+    /// Directory of the stored capture: `bundle.json` plus a
+    /// `media/` or `frames/` frame layout.
+    #[arg(long)]
+    capture: PathBuf,
+    /// New output directory for the generated case (must not already
+    /// exist, to protect reviewed baselines). Conventionally
+    /// `crates/bris-vision/tests/regression/<name>/`.
+    #[arg(long)]
+    output: PathBuf,
+    /// Case name recorded in `case.toml`'s `[case] name`. Defaults
+    /// to `output`'s final path component.
+    #[arg(long)]
+    name: Option<String>,
+    /// Free-text description recorded in `case.toml`.
+    #[arg(long, default_value = "Promoted from a field capture.")]
+    description: String,
+}
+
 #[derive(Debug, Clone, clap::Args)]
 #[allow(clippy::struct_excessive_bools)]
 struct ReplayArgs {
+    /// Promoted case.toml; replay its companion bundle using paths relative
+    /// to the case file. Expected outcomes remain reviewable skeleton data.
+    #[arg(long, conflicts_with_all = ["bundle", "frames", "session", "all_sessions"])]
+    case: Option<PathBuf>,
     /// Path to a debug bundle directory. Loads `bundle.json`
     /// plus the frames + sidecars from the directory. Preferred
     /// over `--frames`; CLI overrides may still be applied on
@@ -833,6 +878,7 @@ fn main() -> anyhow::Result<()> {
     match cli.command {
         Command::Replay(args) => run_replay(&args),
         Command::Session(cmd) => run_session(cmd),
+        Command::Corpus(cmd) => run_corpus(cmd),
         Command::Capture(args) => run_capture(&args, &raw_config),
         Command::Serve(args) => run_serve(&args, &raw_config),
         Command::Calibrate(args) => run_calibrate(&args),
@@ -1052,6 +1098,20 @@ fn path_relative_to(target: &Path, base: &Path) -> String {
 }
 
 fn run_replay(args: &ReplayArgs) -> anyhow::Result<()> {
+    if let Some(path) = &args.case {
+        let spec: corpus_promote::ReplayCase = toml::from_str(
+            &fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?,
+        )
+        .context("parse promoted case.toml")?;
+        let mut replay = args.clone();
+        replay.case = None;
+        replay.bundle = Some(
+            path.parent()
+                .context("case has no parent")?
+                .join(spec.replay.bundle),
+        );
+        return run_replay(&replay);
+    }
     if args.all_sessions {
         return run_replay_all_sessions(args);
     }
@@ -2998,6 +3058,7 @@ fn drive_engine_over_capture(
 /// actually expose. Mirrors the clap defaults exactly.
 fn base_replay_args() -> ReplayArgs {
     ReplayArgs {
+        case: None,
         bundle: None,
         frames: None,
         session: None,
@@ -3130,6 +3191,28 @@ fn run_log(args: &LogArgs) -> anyhow::Result<()> {
 
 fn default_corpus_root() -> PathBuf {
     PathBuf::from("./bris-corpus")
+}
+
+fn run_corpus(cmd: CorpusCommand) -> anyhow::Result<()> {
+    match cmd {
+        CorpusCommand::Promote(args) => run_corpus_promote(args),
+    }
+}
+
+fn run_corpus_promote(args: CorpusPromoteArgs) -> anyhow::Result<()> {
+    let case_name = args
+        .name
+        .unwrap_or_else(|| corpus_promote::default_case_name(&args.output));
+    let promote_args = corpus_promote::PromoteArgs {
+        capture_dir: args.capture,
+        case_dir: args.output,
+        case_name,
+        description: args.description,
+    };
+    let case_toml = corpus_promote::promote(&promote_args)?;
+    info!(path = %case_toml.display(), "corpus: case skeleton written");
+    println!("wrote {}", case_toml.display());
+    Ok(())
 }
 
 fn run_session(cmd: SessionCommand) -> anyhow::Result<()> {
