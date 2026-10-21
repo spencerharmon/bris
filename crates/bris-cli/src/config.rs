@@ -112,6 +112,35 @@ pub(crate) enum RawNmea {
         /// the `OpenCPN` default.
         addr: SocketAddr,
     },
+    /// Send each NMEA batch as a UDP datagram to the given
+    /// destination address. Point-to-point (a unicast
+    /// consumer) or a broadcast/multicast group address —
+    /// the operator picks the destination; the socket is
+    /// bound with `SO_BROADCAST` enabled so a broadcast
+    /// destination (e.g. `255.255.255.255:10110`, the NMEA
+    /// UDP convention) works without extra config.
+    Udp {
+        /// Destination address datagrams are sent to.
+        /// Convention: `255.255.255.255:10110` for a LAN
+        /// broadcast that every plotter on the segment sees.
+        addr: SocketAddr,
+    },
+    /// Write each NMEA batch to a serial device (an RS-232 /
+    /// USB-serial tty). The device path is opened for
+    /// writing and sentences are streamed to it.
+    ///
+    /// Line discipline (baud rate, framing) is configured
+    /// out of band with `stty` before `bris serve` starts —
+    /// see `docs/operator/nmea_output.md`. This keeps the
+    /// binary free of a platform serial dependency (no
+    /// `libudev`, cross-compiles clean to aarch64) at the
+    /// cost of one `stty` call the operator already runs to
+    /// set up any NMEA-0183 serial link.
+    Serial {
+        /// Serial device path, e.g. `/dev/ttyUSB0` or
+        /// `/dev/ttyAMA0` (the Pi's UART).
+        device: PathBuf,
+    },
 }
 
 /// Default location of the config file:
@@ -225,10 +254,10 @@ impl ResolvedServeConfig {
     /// field (lat/lon at minimum). Listing them all in one
     /// message avoids the operator playing whack-a-mole.
     #[allow(
-        // 10 named overrides is one for each tunable
-        // ServeArgs field; bundling them into a struct
-        // would just push the same parameter list one
-        // call deeper.
+        // One named override for each tunable ServeArgs
+        // field (camera, observer, and the four NMEA sink
+        // flags); bundling them into a struct would just
+        // push the same parameter list one call deeper.
         clippy::too_many_arguments,
     )]
     pub(crate) fn resolve(
@@ -242,6 +271,8 @@ impl ResolvedServeConfig {
         cli_eye_height_m: Option<f64>,
         cli_nmea_stdout: bool,
         cli_nmea_tcp: Option<SocketAddr>,
+        cli_nmea_udp: Option<SocketAddr>,
+        cli_nmea_serial: Option<PathBuf>,
         cli_intrinsics: Option<PathBuf>,
     ) -> Result<Self> {
         let camera = file.camera.as_ref();
@@ -295,6 +326,12 @@ impl ResolvedServeConfig {
         }
         if let Some(addr) = cli_nmea_tcp {
             nmea_sinks.push(RawNmea::Tcp { addr });
+        }
+        if let Some(addr) = cli_nmea_udp {
+            nmea_sinks.push(RawNmea::Udp { addr });
+        }
+        if let Some(device) = cli_nmea_serial {
+            nmea_sinks.push(RawNmea::Serial { device });
         }
 
         Ok(Self {
@@ -418,6 +455,8 @@ latitudo = 47.6  # typo
             true,
             None,
             None,
+            None,
+            None,
         )
         .unwrap();
         assert_eq!(resolved.device, PathBuf::from("/dev/video1"));
@@ -440,7 +479,7 @@ device = "/dev/video2"
         )
         .unwrap();
         let resolved = ResolvedServeConfig::resolve(
-            &file, None, None, None, None, None, None, None, false, None, None,
+            &file, None, None, None, None, None, None, None, false, None, None, None, None,
         )
         .unwrap();
         assert_eq!(resolved.device, PathBuf::from("/dev/video2"));
@@ -470,6 +509,8 @@ device = "/dev/video2"
             false,
             None,
             None,
+            None,
+            None,
         )
         .unwrap_err();
         assert!(err.to_string().contains("latitude"), "got: {err}");
@@ -492,10 +533,57 @@ addr = "10.0.0.1:10110"
         let resolved = ResolvedServeConfig::resolve(
             &file, None, None, None, None, None, None, None,
             true, // --nmea-stdout adds a second sink
-            None, None,
+            None, None, None, None,
         )
         .unwrap();
         assert_eq!(resolved.nmea_sinks.len(), 2);
+    }
+
+    #[test]
+    fn udp_and_serial_sinks_parse_and_resolve() {
+        // Config-file parsing of the two new sink types.
+        let file: RawConfig = toml::from_str(
+            r#"
+[observer]
+latitude = 0.0
+longitude = 0.0
+
+[[nmea]]
+type = "udp"
+addr = "255.255.255.255:10110"
+
+[[nmea]]
+type = "serial"
+device = "/dev/ttyUSB0"
+"#,
+        )
+        .unwrap();
+        assert_eq!(file.nmea.len(), 2);
+        assert!(matches!(file.nmea[0], RawNmea::Udp { .. }));
+        assert!(matches!(file.nmea[1], RawNmea::Serial { .. }));
+
+        // CLI flags for udp + serial union onto the file sinks.
+        let resolved = ResolvedServeConfig::resolve(
+            &file,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            false,
+            None,
+            Some("127.0.0.1:10111".parse().unwrap()),
+            Some(PathBuf::from("/dev/ttyAMA0")),
+            None,
+        )
+        .unwrap();
+        // 2 file sinks + 2 CLI sinks.
+        assert_eq!(resolved.nmea_sinks.len(), 4);
+        assert!(resolved.nmea_sinks.iter().any(
+            |s| matches!(s, RawNmea::Serial { device } if device == &PathBuf::from("/dev/ttyAMA0"))
+        ));
     }
 
     #[test]
