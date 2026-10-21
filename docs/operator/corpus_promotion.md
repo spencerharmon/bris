@@ -30,3 +30,8 @@ The case represents frame 0 only, without earlier session history or optional
 external model overrides. Add further frames or astronomical reference inputs
 manually when the regression requires them. Raw bundle metadata can contain
 sensitive field data: review it before publishing the corpus.
+
+For a collector-stored submission, the capture directory is its `media/`
+(or `calibration/` for calibration-kind submissions), where `bundle.json` lives.
+To enumerate all retained frames for segmentation annotation rather than only
+promote frame 0, use the [training corpus index](training_corpus.md).

@@ -23,6 +23,7 @@ mod nmea_transport;
 mod replay_report;
 mod subcommands;
 mod submit;
+mod training_index;
 
 use anyhow::{bail, Context};
 use bris_almanac::{refraction::Atmosphere, Observer};
@@ -464,6 +465,15 @@ enum CorpusCommand {
     /// See `crates/bris-cli/src/corpus_promote.rs` for the schema
     /// this produces.
     Promote(CorpusPromoteArgs),
+    /// Index stored collector bundles as unlabeled segmentation candidates.
+    TrainingIndex {
+        /// Collector data root (containing submissions/); read-only input.
+        #[arg(long)]
+        data_root: PathBuf,
+        /// New JSON index file; refuses to overwrite an existing file.
+        #[arg(long)]
+        output: PathBuf,
+    },
 }
 
 #[derive(Debug, Clone, clap::Args)]
@@ -3186,6 +3196,9 @@ fn default_corpus_root() -> PathBuf {
 fn run_corpus(cmd: CorpusCommand) -> anyhow::Result<()> {
     match cmd {
         CorpusCommand::Promote(args) => run_corpus_promote(args),
+        CorpusCommand::TrainingIndex { data_root, output } => {
+            training_index::export(&data_root, &output)
+        }
     }
 }
 
