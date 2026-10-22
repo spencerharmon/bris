@@ -1,5 +1,7 @@
-# Build and publish the `bris` CLI image to the Gitea OCI registry,
-# pinned BY DIGEST.
+# Publish bris-cli to ghcr.io/<lowercase GitHub owner>, pinned BY DIGEST.
+# Uses the automatic GITHUB_TOKEN; no deployment registry configuration needed.
+# The source label links the package to this repo. Package visibility must be
+# public separately: the anonymous pull check below fails if it is private.
 #
 # WHY: the flux bris-collector deploy runs a nightly
 #   bris replay --all-sessions --render-frames
@@ -8,16 +10,6 @@
 # [[bin]] name = "bris") that owns the `replay` subcommand — so a dedicated
 # CLI image is required. This is the exact sibling of the collector-image /
 # corpus-explorer-image workflows.
-#
-# INFRA-AGNOSTIC: registry host, namespace, and push credentials come
-# ENTIRELY from Actions vars/secrets — NEVER committed here. This
-# workflow contains no host, domain, or registry identifier.
-#
-# Required Actions configuration (set on the Gitea repo/org, not here):
-#   vars.REGISTRY   — the Gitea OCI registry host (e.g. registry.example)
-#   vars.NAMESPACE  — the registry namespace/owner for the image
-#   secrets.REGISTRY_USERNAME — registry push user
-#   secrets.REGISTRY_PASSWORD — registry push token/password
 #
 # The published image is pushed by tag AND resolved to its digest,
 # emitted as the job output `digest` and printed to the step summary
@@ -43,21 +35,30 @@ on:
 jobs:
   build-and-push:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
     outputs:
       digest: ${{ steps.push.outputs.digest }}
       image: ${{ steps.push.outputs.image }}
     steps:
       - uses: actions/checkout@v4
 
+      - name: Set image repository
+        id: image
+        env:
+          OWNER: ${{ github.repository_owner }}
+        run: echo "repository=ghcr.io/${OWNER,,}/bris-cli" >> "$GITHUB_OUTPUT"
+
       - name: Set up Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Log in to the Gitea registry
+      - name: Log in to GHCR
         uses: docker/login-action@v3
         with:
-          registry: ${{ vars.REGISTRY }}
-          username: ${{ secrets.REGISTRY_USERNAME }}
-          password: ${{ secrets.REGISTRY_PASSWORD }}
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build and push by digest
         id: build
@@ -66,13 +67,15 @@ jobs:
           context: .
           file: crates/bris-cli/Dockerfile
           push: true
-          tags: ${{ vars.REGISTRY }}/${{ vars.NAMESPACE }}/bris-cli:${{ github.sha }}
+          tags: ${{ steps.image.outputs.repository }}:${{ github.sha }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
           provenance: false
 
       - name: Resolve and record the published digest
         id: push
         env:
-          REPO: ${{ vars.REGISTRY }}/${{ vars.NAMESPACE }}/bris-cli
+          REPO: ${{ steps.image.outputs.repository }}
           DIGEST: ${{ steps.build.outputs.digest }}
         run: |
           set -euo pipefail
@@ -104,6 +107,5 @@ jobs:
           if ! command -v skopeo >/dev/null 2>&1; then
             sudo apt-get update && sudo apt-get install -y skopeo
           fi
-          skopeo inspect \
-            --creds "${{ secrets.REGISTRY_USERNAME }}:${{ secrets.REGISTRY_PASSWORD }}" \
+          skopeo inspect --no-creds \
             "docker://${BRIS_CLI_IMAGE}"
