@@ -17,7 +17,7 @@ FROM debian:bookworm-slim
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates wget \
     && rm -rf /var/lib/apt/lists/*
-COPY --from=builder /src/target/release/bris-collector /usr/local/bin/bris-collector
+COPY --from=builder /src/target/release/bris_collector /usr/local/bin/bris-collector
 RUN mkdir -p /var/lib/bris-collector
 EXPOSE 8443
 ENTRYPOINT ["/usr/local/bin/bris-collector"]
