@@ -54,6 +54,19 @@ def verify(repository, tree):
                                "dispatch the image workflow on the branch and rerun after completion")
 
 
+def test_published_images():
+    """Pytest integration entrypoint; require real CI for this checkout."""
+    origin = subprocess.check_output(["git", "remote", "get-url", "origin"], text=True).strip()
+    repository = re.fullmatch(
+        r"(?:https://github\.com/|git@github\.com:|ssh://git@github\.com/)"
+        r"([\w.-]+/[\w.-]+?)(?:\.git)?/?", origin,
+    )
+    assert repository is not None, "origin must be a public GitHub repository"
+    assert not subprocess.check_output(["git", "status", "--porcelain"], text=True).strip(), "commit changes first"
+    tree = subprocess.check_output(["git", "rev-parse", "HEAD^{tree}"], text=True).strip()
+    verify(repository[1], tree)
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("repository", help="Public GitHub owner/repository")
