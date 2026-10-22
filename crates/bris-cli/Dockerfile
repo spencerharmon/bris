@@ -22,17 +22,27 @@
 # label only links the repository. The workflow verifies anonymous access.
 
 FROM rust:1.94-bookworm AS builder
+# Use this image's native tools, not the repository's Pi/Nix cross wrappers.
+ENV CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=gcc \
+    CC_aarch64_unknown_linux_gnu=gcc \
+    CXX_aarch64_unknown_linux_gnu=g++ \
+    AR_aarch64_unknown_linux_gnu=ar \
+    LLVM_CONFIG_PATH=/usr/bin/llvm-config
+# bris-capture's V4L2 bindings require libclang at build time.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends libclang-dev llvm-dev \
+    && rm -rf /var/lib/apt/lists/*
 WORKDIR /src
 COPY . .
 # bris-cli's dependency graph already enables bris-vision/bris-streaming
 # `segmentation` + `ml-gravity`, so the release build produces the full
 # vision/render path the CronJob's --render-frames needs.
-RUN cargo build --release -p bris-cli --bin bris
+RUN cargo build --locked --release -p bris-cli --bin bris
 # Collect the ONNX Runtime native lib(s) the ml-gravity path links, if any,
 # into a stable staging dir for the runtime stage.
 RUN mkdir -p /stage/lib \
     && find target/release -maxdepth 1 -name 'libonnxruntime*.so*' -exec cp -av {} /stage/lib/ \; \
-    && ls -l /stage/lib || true
+    && ls -l /stage/lib
 
 FROM debian:bookworm-slim
 # ca-certificates for any HTTPS the CLI performs; libstdc++6 / libgcc are

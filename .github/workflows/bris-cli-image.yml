@@ -29,18 +29,27 @@ on:
       - "crates/**"
       - "Cargo.toml"
       - "Cargo.lock"
+      - ".cargo/**"
+      - "rust-toolchain.toml"
+      - ".dockerignore"
+      - "scripts/test_container_images.py"
       - ".github/workflows/bris-cli-image.yml"
   workflow_dispatch:
 
 jobs:
-  build-and-push:
-    runs-on: ubuntu-latest
+  build-native:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-latest
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
       packages: write
-    outputs:
-      digest: ${{ steps.push.outputs.digest }}
-      image: ${{ steps.push.outputs.image }}
     steps:
       - uses: actions/checkout@v4
 
@@ -60,17 +69,69 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build and push by digest
-        id: build
+      - name: Build and load native image
         uses: docker/build-push-action@v6
         with:
           context: .
           file: crates/bris-cli/Dockerfile
-          push: true
-          tags: ${{ steps.image.outputs.repository }}:${{ github.sha }}
+          platforms: linux/${{ matrix.arch }}
+          push: false
+          load: true
+          tags: ${{ steps.image.outputs.repository }}:${{ github.sha }}-${{ matrix.arch }}
           labels: |
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
           provenance: false
+          cache-from: type=gha,scope=cli-${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=cli-${{ matrix.arch }}
+
+      - name: Run native container regressions
+        env:
+          TAG: ${{ steps.image.outputs.repository }}:${{ github.sha }}-${{ matrix.arch }}
+          PLATFORM: linux/${{ matrix.arch }}
+        run: python3 scripts/test_container_images.py --image cli --platform "$PLATFORM" --tag "$TAG" --skip-build
+
+      - name: Push tested native image
+        env:
+          TAG: ${{ steps.image.outputs.repository }}:${{ github.sha }}-${{ matrix.arch }}
+        run: docker push "$TAG"
+
+  build-and-push:
+    needs: build-native
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      digest: ${{ steps.push.outputs.digest }}
+      image: ${{ steps.push.outputs.image }}
+    steps:
+      - name: Set image repository
+        id: image
+        env:
+          OWNER: ${{ github.repository_owner }}
+        run: echo "repository=ghcr.io/${OWNER,,}/bris-cli" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Publish multiarch manifest
+        id: build
+        env:
+          REPO: ${{ steps.image.outputs.repository }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          docker buildx imagetools create --tag "${REPO}:${SHA}" \
+            "${REPO}:${SHA}-amd64" "${REPO}:${SHA}-arm64"
+          DIGEST=$(docker buildx imagetools inspect "${REPO}:${SHA}" --format '{{.Manifest.Digest}}')
+          echo "digest=${DIGEST}" >> "$GITHUB_OUTPUT"
 
       - name: Resolve and record the published digest
         id: push
@@ -80,7 +141,7 @@ jobs:
         run: |
           set -euo pipefail
           if [ -z "${DIGEST:-}" ]; then
-            echo "build-push-action did not emit a digest" >&2
+            echo "imagetools did not emit a digest" >&2
             exit 1
           fi
           IMAGE="${REPO}@${DIGEST}"
