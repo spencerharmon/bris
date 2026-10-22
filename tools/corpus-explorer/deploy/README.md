@@ -75,10 +75,21 @@ The workflow's anonymous inspection deliberately fails for private images.
 For post-merge verification, retain the publishing run's full commit SHA,
 not the current `origin/main` tip: path filters skip unrelated pushes.
 `python3 scripts/publishing_revision.py <implementation-commit-sha>`
-resolves the first mainline commit containing that implementation from
-fetched, non-shallow `origin/main` history. This is the publishing revision
-when the landing push changes the image workflow (as in the GHCR migration);
-it is not proof that an arbitrary commit triggered or passed a build.
+queries the public GitHub Actions API for `collector-image.yml` push runs
+on main, then selects the earliest run SHA on the fetched, non-shallow
+`origin/main` first-parent history that contains the implementation. This
+handles a single fast-forward push containing multiple implementation commits;
+the intermediate commits are not image tags. The repository is derived from
+the GitHub `origin` URL; no API credential or extra Python dependency is needed.
+Missing runs, unavailable history, API errors and rate limits fail closed.
+
+This resolver is for coordinated changes (such as the GHCR migration) whose
+landing push triggers all three image workflows. It does not assert build
+success: failed and pending runs remain eligible so retries keep checking the
+same SHA, even after unrelated pushes. Inspect collector, explorer and CLI
+tags at that SHA with `skopeo inspect --no-creds`. Retain the resolved SHA in
+the deployment record before GitHub run history expires or is deleted; run
+metadata is not a permanent publication ledger.
 
 Definition of done: `skopeo inspect --no-creds docker://$BRIS_EXPLORER_IMAGE`
 (the checking context supplies `$BRIS_EXPLORER_IMAGE` as the
