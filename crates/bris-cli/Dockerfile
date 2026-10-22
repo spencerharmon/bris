@@ -21,7 +21,9 @@
 # Package public visibility must be configured separately; the OCI source
 # label only links the repository. The workflow verifies anonymous access.
 
-FROM rust:1.94-bookworm AS builder
+# ort-sys's ARM64 archive requires glibc >= 2.38 and GCC 14's C++ ABI.
+# Keep builder and runtime on the same Debian release.
+FROM rust:1.94-trixie AS builder
 # Use this image's native tools, not the repository's Pi/Nix cross wrappers.
 ENV CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=gcc \
     CC_aarch64_unknown_linux_gnu=gcc \
@@ -44,7 +46,7 @@ RUN mkdir -p /stage/lib \
     && find target/release -maxdepth 1 -name 'libonnxruntime*.so*' -exec cp -av {} /stage/lib/ \; \
     && ls -l /stage/lib
 
-FROM debian:bookworm-slim
+FROM debian:trixie-slim
 # ca-certificates for any HTTPS the CLI performs; libstdc++6 / libgcc are
 # the C++ runtime the ONNX Runtime native lib depends on (present in the
 # base but pinned here so the dependency is explicit).
