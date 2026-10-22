@@ -41,7 +41,14 @@ class ImageWorkflows(unittest.TestCase):
                 })
                 build = next(s for s in steps if s.get("id") == "build")
                 self.assertTrue(build["with"]["push"])
-                self.assertEqual(build["with"]["tags"], "${{ steps.image.outputs.repository }}:${{ github.sha }}")
+                tags = build["with"]["tags"].splitlines()
+                self.assertIn("${{ steps.image.outputs.repository }}:${{ github.sha }}", tags)
+                if image in ("bris-collector", "bris-cli"):
+                    self.assertIn(
+                        "${{ github.ref == 'refs/heads/main' && "
+                        "format('{0}:latest', steps.image.outputs.repository) || '' }}",
+                        tags,
+                    )
                 self.assertIn(
                     "org.opencontainers.image.source=https://github.com/${{ github.repository }}",
                     build["with"]["labels"].splitlines(),

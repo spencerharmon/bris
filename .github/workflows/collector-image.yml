@@ -21,6 +21,8 @@ on:
       - "crates/**"
       - "Cargo.toml"
       - "Cargo.lock"
+      - ".cargo/**"
+      - "rust-toolchain.toml"
       - ".github/workflows/collector-image.yml"
   workflow_dispatch:
 
@@ -42,6 +44,11 @@ jobs:
           OWNER: ${{ github.repository_owner }}
         run: echo "repository=ghcr.io/${OWNER,,}/bris-collector" >> "$GITHUB_OUTPUT"
 
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
+
       - name: Set up Buildx
         uses: docker/setup-buildx-action@v3
 
@@ -60,7 +67,9 @@ jobs:
           file: crates/bris-collector/Dockerfile
           platforms: linux/amd64,linux/arm64
           push: true
-          tags: ${{ steps.image.outputs.repository }}:${{ github.sha }}
+          tags: |
+            ${{ steps.image.outputs.repository }}:${{ github.sha }}
+            ${{ github.ref == 'refs/heads/main' && format('{0}:latest', steps.image.outputs.repository) || '' }}
           labels: |
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
           provenance: false

@@ -23,6 +23,24 @@ jobs:
       - run: python3 scripts/test_image_workflows.py
       - run: python3 scripts/test_publishing_revision.py
 
+  image-builds:
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            test: test_collector_amd64
+          - os: ubuntu-24.04-arm
+            test: test_collector_arm64
+          - os: ubuntu-latest
+            test: test_cli_amd64
+    steps:
+      - uses: actions/checkout@v4
+      - run: python3 scripts/test_image_builds.py ImageBuilds.${{ matrix.test }}
+
   fmt:
     name: rustfmt
     runs-on: ubuntu-latest

@@ -22,6 +22,16 @@
 # label only links the repository. The workflow verifies anonymous access.
 
 FROM rust:1.94-bookworm AS builder
+# V4L2 bindgen needs Linux headers and a loadable libclang in the builder.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends libv4l-dev linux-libc-dev libclang-dev llvm-dev \
+    && rm -rf /var/lib/apt/lists/*
+# Override the workstation's Nix/Pi shims for native container builds.
+ENV LLVM_CONFIG_PATH=/usr/bin/llvm-config \
+    CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=cc \
+    CC_aarch64_unknown_linux_gnu=cc \
+    CXX_aarch64_unknown_linux_gnu=c++ \
+    AR_aarch64_unknown_linux_gnu=ar
 WORKDIR /src
 COPY . .
 # bris-cli's dependency graph already enables bris-vision/bris-streaming
