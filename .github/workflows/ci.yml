@@ -10,6 +10,18 @@ env:
   RUSTFLAGS: "-D warnings"
 
 jobs:
+  image-workflows:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python3 -m pip install PyYAML==6.0.3
+      - run: python3 scripts/test_image_workflows.py
+
   fmt:
     name: rustfmt
     runs-on: ubuntu-latest
