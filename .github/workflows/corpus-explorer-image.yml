@@ -8,7 +8,7 @@
 # so the flux side can pin `registry/namespace/bris-corpus-explorer@<digest>`.
 #
 # Definition of done (downstream check):
-#   skopeo inspect docker://$BRIS_EXPLORER_IMAGE
+#   skopeo inspect --no-creds docker://$BRIS_EXPLORER_IMAGE
 # where $BRIS_EXPLORER_IMAGE is the digest reference above — proving
 # the image really published and is pullable by digest.
 

@@ -21,6 +21,7 @@ jobs:
           python-version: "3.12"
       - run: python3 -m pip install PyYAML==6.0.3
       - run: python3 scripts/test_image_workflows.py
+      - run: python3 scripts/test_publishing_revision.py
 
   fmt:
     name: rustfmt

@@ -58,14 +58,30 @@ container. It is the honest regression test for this image.
 
 ## Publishing
 
-`.github/workflows/corpus-explorer-image.yml` (a Gitea Actions
-workflow) builds this image and pushes it **by digest** to the Gitea
-OCI registry. Registry host, namespace, and push credentials come
-from Actions vars/secrets — never committed. The published digest is
-captured as a workflow output; the flux side pins the image by that
-digest.
+`.github/workflows/corpus-explorer-image.yml` runs in GitHub Actions
+and publishes `ghcr.io/<lowercase GitHub owner>/bris-corpus-explorer`
+with the full publishing commit SHA as its tag. It authenticates with
+the automatic `GITHUB_TOKEN` and grants `packages: write` plus
+`contents: read`; no registry vars or separately provisioned push
+secrets are required. The published digest is captured as a workflow
+output; the flux side pins the image by that digest.
 
-Definition of done: `skopeo inspect docker://$BRIS_EXPLORER_IMAGE`
+GHCR package visibility is a separate requirement: new packages default
+to private. An authorized package owner must select public visibility
+in package settings for anonymous consumers. The OCI source label links
+the package to the repository; it does **not** make the package public.
+The workflow's anonymous inspection deliberately fails for private images.
+
+For post-merge verification, retain the publishing run's full commit SHA,
+not the current `origin/main` tip: path filters skip unrelated pushes.
+`python3 scripts/publishing_revision.py <implementation-commit-sha>`
+resolves the first mainline commit containing that implementation from
+fetched, non-shallow `origin/main` history. This is the publishing revision
+when the landing push changes the image workflow (as in the GHCR migration);
+it is not proof that an arbitrary commit triggered or passed a build.
+
+Definition of done: `skopeo inspect --no-creds docker://$BRIS_EXPLORER_IMAGE`
 (the checking context supplies `$BRIS_EXPLORER_IMAGE` as the
 `registry/namespace/bris-corpus-explorer@sha256:…` reference) — the
-image is pullable by digest, proving it really published.
+image metadata is accessible anonymously by digest, proving it really
+published with public visibility rather than relying on a cached login.

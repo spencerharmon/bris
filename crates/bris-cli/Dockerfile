@@ -14,9 +14,12 @@
 # target/release/ and must travel to the runtime image, so we copy every
 # libonnxruntime*.so* next to the binary path and register it with ldconfig.
 #
-# INFRA-AGNOSTIC: this file contains no registry host, namespace, domain,
-# or credential. Those are supplied entirely by the Gitea Actions workflow
-# (.github/workflows/bris-cli-image.yml) from vars/secrets.
+# INFRA-AGNOSTIC: publishing belongs to the GitHub Actions workflow
+# (.github/workflows/bris-cli-image.yml), not the image. It pushes to GHCR
+# under the lowercase GitHub owner with GITHUB_TOKEN (packages: write).
+# No registry vars or separately provisioned push secrets are required.
+# Package public visibility must be configured separately; the OCI source
+# label only links the repository. The workflow verifies anonymous access.
 
 FROM rust:1.94-bookworm AS builder
 WORKDIR /src
