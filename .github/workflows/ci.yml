@@ -22,6 +22,7 @@ jobs:
       - run: python3 -m pip install PyYAML==6.0.3
       - run: python3 scripts/test_image_workflows.py
       - run: python3 scripts/test_publishing_revision.py
+      - run: python3 scripts/test_verify_container_builds.py
 
   fmt:
     name: rustfmt

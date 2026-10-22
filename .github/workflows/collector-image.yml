@@ -118,9 +118,12 @@ jobs:
         env:
           REPO: ${{ steps.image.outputs.repository }}
           SHA: ${{ github.sha }}
+          REF: ${{ github.ref }}
         run: |
           set -euo pipefail
-          docker buildx imagetools create --tag "${REPO}:${SHA}" \
+          tags=(--tag "${REPO}:${SHA}")
+          if [[ "$REF" == refs/heads/main ]]; then tags+=(--tag "${REPO}:latest"); fi
+          docker buildx imagetools create "${tags[@]}" \
             "${REPO}:${SHA}-amd64" "${REPO}:${SHA}-arm64"
           DIGEST=$(docker buildx imagetools inspect "${REPO}:${SHA}" --format '{{.Manifest.Digest}}')
           echo "digest=${DIGEST}" >> "$GITHUB_OUTPUT"

@@ -166,6 +166,7 @@ class ImageWorkflows(unittest.TestCase):
             manifest = next(s for s in steps if s.get("id") == "build")
             self.assertEqual(manifest["env"], {
                 "REPO": "${{ steps.image.outputs.repository }}", "SHA": "${{ github.sha }}",
+                "REF": "${{ github.ref }}",
             })
             # Run the workflow shell with a fake Docker command: no registry or
             # builds, but real argument expansion and failure propagation.
@@ -176,18 +177,20 @@ docker() {
     if [ "$3" = inspect ]; then printf '%s\\n' "$DIGEST"; fi
 }
 '''
-            for fail in ("", "create", "inspect"):
-                with self.subTest(workflow=workflow, fail=fail), tempfile.TemporaryDirectory() as tmp:
+            for ref, fail in ((ref, fail) for ref in ("refs/heads/main", "refs/heads/feature")
+                              for fail in ("", "create", "inspect")):
+                with self.subTest(workflow=workflow, ref=ref, fail=fail), tempfile.TemporaryDirectory() as tmp:
                     output = Path(tmp) / "output"
                     calls = Path(tmp) / "calls"
                     repo = f"ghcr.io/exampleowner/{IMAGES[workflow]}"
                     sha = "b" * 40
                     digest = "sha256:" + "a" * 64
-                    env = dict(os.environ, REPO=repo, SHA=sha, DIGEST=digest,
+                    env = dict(os.environ, REPO=repo, SHA=sha, REF=ref, DIGEST=digest,
                                FAIL=fail, CALLS=str(calls), GITHUB_OUTPUT=str(output))
                     result = subprocess.run(["bash", "-e", "-c", docker + manifest["run"]],
                                             env=env, capture_output=True, text=True)
-                    expected = [f"buildx imagetools create --tag {repo}:{sha} "
+                    latest = f"--tag {repo}:latest " if ref == "refs/heads/main" else ""
+                    expected = [f"buildx imagetools create --tag {repo}:{sha} {latest}"
                                 f"{repo}:{sha}-amd64 {repo}:{sha}-arm64"]
                     if fail != "create":
                         expected.append(f"buildx imagetools inspect {repo}:{sha} "
