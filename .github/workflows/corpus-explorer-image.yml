@@ -19,6 +19,8 @@ on:
     branches: [main]
     paths:
       - "tools/corpus-explorer/**"
+      - "scripts/test_container_images.py"
+      - ".dockerignore"
       - ".github/workflows/corpus-explorer-image.yml"
   workflow_dispatch:
 
@@ -50,12 +52,16 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Build and test explorer HTTP routing before publication
+        run: python3 scripts/test_container_images.py --engine docker --image explorer --platform linux/amd64
+
       - name: Build and push by digest
         id: build
         uses: docker/build-push-action@v6
         with:
           context: .
           file: tools/corpus-explorer/deploy/Dockerfile
+          platforms: linux/amd64
           push: true
           tags: ${{ steps.image.outputs.repository }}:${{ github.sha }}
           labels: |

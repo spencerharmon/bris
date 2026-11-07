@@ -88,6 +88,22 @@ class ImageWorkflows(unittest.TestCase):
                     self.assertIn("did not emit a digest", failed.stderr)
                     self.assertEqual(output.read_text(), before)
 
+    def test_explorer_runtime_before_publishing(self):
+        config = yaml.safe_load(
+            (ROOT / ".github/workflows/corpus-explorer-image.yml").read_text()
+        )
+        self.assertIn("scripts/test_container_images.py", config[True]["push"]["paths"])
+        self.assertIn(".dockerignore", config[True]["push"]["paths"])
+        steps = config["jobs"]["build-and-push"]["steps"]
+        smoke = next(s for s in steps if "scripts/test_container_images.py" in s.get("run", ""))
+        self.assertEqual(smoke["run"], "python3 scripts/test_container_images.py "
+                         "--engine docker --image explorer --platform linux/amd64")
+        build = next(s for s in steps if s.get("id") == "build")
+        self.assertLess(steps.index(smoke), steps.index(build))
+        self.assertEqual(build["with"]["platforms"], "linux/amd64")
+        self.assertNotIn("if", smoke)
+        self.assertNotIn("continue-on-error", smoke)
+
     def test_native_builds_test_before_publishing(self):
         for workflow, image in NATIVE_IMAGES.items():
             with self.subTest(workflow=workflow):
