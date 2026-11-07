@@ -1523,15 +1523,21 @@ fn run_replay_session(args: &ReplayArgs, session_id: uuid::Uuid) -> anyhow::Resu
     Ok(())
 }
 
-/// Replay every session under `<corpus>/sessions/`.
-fn run_replay_all_sessions(args: &ReplayArgs) -> anyhow::Result<()> {
-    let corpus = args
-        .corpus
-        .clone()
-        .unwrap_or_else(|| PathBuf::from("./bris-corpus"));
-    let sessions_root = corpus.join("sessions");
-    let entries = fs::read_dir(&sessions_root)
-        .with_context(|| format!("read sessions root {}", sessions_root.display()))?;
+/// Enumerate session UUIDs under `sessions_root`. A missing root (a
+/// collector with no submissions yet) is treated as an empty corpus;
+/// any other IO error stays fatal.
+fn enumerate_session_ids(sessions_root: &std::path::Path) -> anyhow::Result<Vec<uuid::Uuid>> {
+    let entries = match fs::read_dir(sessions_root) {
+        Ok(e) => e,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            info!(root = %sessions_root.display(), "replay --all-sessions: sessions root absent; nothing to replay");
+            return Ok(Vec::new());
+        }
+        Err(e) => {
+            return Err(anyhow::Error::new(e)
+                .context(format!("read sessions root {}", sessions_root.display())));
+        }
+    };
     let mut session_ids: Vec<uuid::Uuid> = Vec::new();
     for entry in entries {
         let entry = entry?;
@@ -1547,6 +1553,54 @@ fn run_replay_all_sessions(args: &ReplayArgs) -> anyhow::Result<()> {
             }
         }
     }
+    Ok(session_ids)
+}
+
+#[cfg(test)]
+mod enumerate_sessions_tests {
+    use super::*;
+
+    #[test]
+    fn missing_sessions_root_is_empty() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ids = enumerate_session_ids(&tmp.path().join("sessions")).unwrap();
+        assert!(ids.is_empty());
+    }
+
+    #[test]
+    fn sessions_root_that_is_a_file_is_fatal() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("sessions");
+        fs::write(&root, b"x").unwrap();
+        let err = enumerate_session_ids(&root).unwrap_err();
+        assert!(format!("{err:#}").contains("read sessions root"));
+    }
+
+    #[test]
+    fn all_sessions_replay_on_empty_corpus_exits_ok() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cli = Cli::parse_from([
+            "bris",
+            "replay",
+            "--all-sessions",
+            "--corpus",
+            tmp.path().to_str().unwrap(),
+        ]);
+        let Command::Replay(args) = cli.command else {
+            panic!("expected replay subcommand");
+        };
+        run_replay_all_sessions(&args).unwrap();
+    }
+}
+
+/// Replay every session under `<corpus>/sessions/`.
+fn run_replay_all_sessions(args: &ReplayArgs) -> anyhow::Result<()> {
+    let corpus = args
+        .corpus
+        .clone()
+        .unwrap_or_else(|| PathBuf::from("./bris-corpus"));
+    let sessions_root = corpus.join("sessions");
+    let mut session_ids = enumerate_session_ids(&sessions_root)?;
     session_ids.sort();
     info!(
         count = session_ids.len(),
