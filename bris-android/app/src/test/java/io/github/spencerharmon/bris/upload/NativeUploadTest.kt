@@ -187,4 +187,36 @@ class NativeUploadTest {
             assertEquals(3, server.requestCount)
         } finally { job.cancelAndJoin(); server.shutdown() }
     }
+
+    @Test fun onBeforeConfigurationThenSaveAndRegisterDeliversSameArtifact() = runBlocking {
+        val job = SupervisorJob()
+        val settings = CollectorSettingsStore(PreferenceDataStoreFactory.create(
+            scope = CoroutineScope(Dispatchers.IO + job)) { File(tmp.root, "prefs.preferences_pb") })
+        val server = MockWebServer()
+        server.start()
+        try {
+            val capture = bundle()
+            val coordinator = UploadCoordinator(port(), settings) { "device-uuid" }
+            coordinator.setAutomaticUpload(true)
+            coordinator.captureCompleted(capture.absolutePath)
+            assertEquals(1, coordinator.counts().first)
+            // Settings "Save & register": save, then register with the enrollment token.
+            coordinator.saveSettings(server.url("/").toString(), "enroll-admin")
+            assertEquals(1, coordinator.counts().first)
+            assertEquals(0, coordinator.flush().sent) // held from the enrollment credential
+            assertEquals(0, server.requestCount)
+            server.enqueue(MockResponse().setBody("{\"token\":\"issued-device\"}"))
+            assertEquals(RegistrationResult.Registered("issued-device"), coordinator.register())
+            val reg = server.takeRequest(5, TimeUnit.SECONDS)!!
+            assertEquals("/v1/devices/register", reg.path)
+            assertEquals(1, coordinator.counts().first)
+            server.enqueue(MockResponse().setBody("{\"id\":\"accepted\"}"))
+            assertEquals(1, coordinator.flush().sent)
+            val submit = server.takeRequest(5, TimeUnit.SECONDS)!!
+            assertEquals("Bearer issued-device", submit.getHeader("Authorization"))
+            assertTrue(submit.body.readUtf8().contains(File(capture, "bundle.json").readText()))
+            assertEquals(0, coordinator.counts().first)
+            assertEquals(2, server.requestCount)
+        } finally { job.cancelAndJoin(); server.shutdown() }
+    }
 }

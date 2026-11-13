@@ -34,6 +34,14 @@ data class CollectorSettings(
     val configGeneration: String = "0",
     val manualEpoch: String = "0",
     val automaticEpoch: String = "0",
+    /**
+     * Automatic captures authorized (ON) before the first collector configuration are
+     * held under the preserved [automaticEpoch] until the device enrolls, so the
+     * operator-entered enrollment/admin token never submits them. Cleared by a
+     * successful enrollment (or a NotEnrollmentToken verdict, meaning the entered
+     * token is itself a device token) and by any revocation.
+     */
+    val automaticAwaitingEnrollment: Boolean = false,
 ) {
     val manualScope: String? get() = if (debugMode && configured) "manual:$configGeneration:$manualEpoch" else null
     // The opt-in alone authorizes local queueing, even before first configuration.
@@ -111,6 +119,7 @@ class CollectorSettingsStore(private val store: DataStore<Preferences>) {
             configGeneration = p[KEY_GENERATION] ?: "0",
             manualEpoch = p[KEY_MANUAL_EPOCH] ?: "0",
             automaticEpoch = p[KEY_AUTOMATIC_EPOCH] ?: "0",
+            automaticAwaitingEnrollment = p[KEY_AUTOMATIC_AWAITING_ENROLLMENT] ?: false,
         )
 
     suspend fun current(): CollectorSettings = flow.first()
@@ -134,6 +143,7 @@ class CollectorSettingsStore(private val store: DataStore<Preferences>) {
             p[KEY_GENERATION] = result.configGeneration
             p[KEY_MANUAL_EPOCH] = result.manualEpoch
             p[KEY_AUTOMATIC_EPOCH] = result.automaticEpoch
+            p[KEY_AUTOMATIC_AWAITING_ENROLLMENT] = result.automaticAwaitingEnrollment
         }
         return result
     }
@@ -148,5 +158,6 @@ class CollectorSettingsStore(private val store: DataStore<Preferences>) {
         val KEY_GENERATION = stringPreferencesKey("collector_config_generation")
         val KEY_MANUAL_EPOCH = stringPreferencesKey("collector_manual_epoch")
         val KEY_AUTOMATIC_EPOCH = stringPreferencesKey("collector_automatic_epoch")
+        val KEY_AUTOMATIC_AWAITING_ENROLLMENT = booleanPreferencesKey("collector_automatic_awaiting_enrollment")
     }
 }

@@ -363,4 +363,78 @@ class UploadCoordinatorTest {
         assertFalse(coord.flush().needsRetry)
         assertTrue(store.current().lastError!!.contains("HTTP 400"))
     }
+
+    @Test fun initialEnrollmentPreservesHeldAutomaticCapturesWithoutEnrollmentCredential() = runBlocking {
+        coord.setAutomaticUpload(true)
+        coord.captureCompleted("/b/pre-config")
+        assertEquals(1, port.pendingIds().size)
+        coord.saveSettings("https://collector.example.com", "enroll-admin")
+        assertEquals(1, port.pendingIds().size)
+        assertTrue(store.current().automaticAwaitingEnrollment)
+        // Held: the enrollment/admin credential never submits device data.
+        assertEquals(0, coord.flush().sent)
+        assertTrue(port.flushedWith.isEmpty())
+        coord.captureCompleted("/b/configured-unregistered")
+        val before = scheduled.get()
+        assertEquals(RegistrationResult.Registered("device-token"), coord.register())
+        assertTrue(scheduled.get() > before)
+        assertFalse(store.current().automaticAwaitingEnrollment)
+        assertEquals(2, port.pendingIds().size)
+        assertEquals(2, coord.flush().sent)
+        assertEquals(listOf("device-token"), port.flushedWith.map { it.bearerToken })
+    }
+
+    @Test fun failedInitialEnrollmentKeepsHoldUntilRetrySucceeds() = runBlocking {
+        var result: RegistrationResult = RegistrationResult.Failed("down")
+        coord = coordinator { _, _, _ -> result }
+        coord.setAutomaticUpload(true)
+        coord.captureCompleted("/b/pre")
+        coord.saveSettings("https://collector.example.com", "enroll")
+        coord.register()
+        assertTrue(store.current().automaticAwaitingEnrollment)
+        assertEquals(0, coord.flush().sent)
+        result = RegistrationResult.Registered("dev")
+        coord.register()
+        assertEquals(1, coord.flush().sent)
+        assertEquals("dev", port.flushedWith.single().bearerToken)
+    }
+
+    @Test fun notEnrollmentTokenReleasesHeldCapturesToEnteredDeviceToken() = runBlocking {
+        coord = coordinator { _, _, _ -> RegistrationResult.NotEnrollmentToken(401) }
+        coord.setAutomaticUpload(true)
+        coord.captureCompleted("/b/pre")
+        coord.saveSettings("https://collector.example.com", "already-device")
+        coord.register()
+        assertEquals(1, coord.flush().sent)
+        assertEquals("already-device", port.flushedWith.single().bearerToken)
+    }
+
+    @Test fun endpointChangeOrToggleOffDuringHoldStillRevokes() = runBlocking {
+        coord.setAutomaticUpload(true)
+        coord.captureCompleted("/b/pre")
+        coord.saveSettings("https://collector.example.com", "enroll")
+        coord.saveSettings("https://other.example.com", "enroll")
+        assertEquals(0, port.pendingIds().size)
+        assertFalse(store.current().automaticAwaitingEnrollment)
+        coord.captureCompleted("/b/a")
+        coord.saveSettings("", "")
+        coord.saveSettings("https://collector.example.com", "enroll")
+        coord.setAutomaticUpload(false)
+        assertFalse(store.current().automaticAwaitingEnrollment)
+        assertEquals(0, port.pendingIds().size)
+    }
+
+    @Test fun reRegistrationAfterEnrollmentAndTokenChangeStillRevoke() = runBlocking {
+        coord.setAutomaticUpload(true)
+        coord.saveSettings("https://collector.example.com", "enroll")
+        coord.register()
+        coord.captureCompleted("/b/enrolled")
+        assertEquals(1, port.pendingIds().size)
+        coord.register() // re-registration while enrolled is not initial enrollment
+        assertEquals(0, port.pendingIds().size)
+        coord.captureCompleted("/b/again")
+        coord.saveSettings("https://collector.example.com", "new-token")
+        assertEquals(0, port.pendingIds().size)
+        assertFalse(store.current().automaticAwaitingEnrollment)
+    }
 }

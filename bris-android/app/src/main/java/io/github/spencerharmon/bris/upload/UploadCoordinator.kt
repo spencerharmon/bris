@@ -109,16 +109,22 @@ class UploadCoordinator(
         val entered = token.trim()
         mutate {
             if (it.baseUrl == url && it.enteredToken == entered) it
-            else it.copy(baseUrl = url, enteredToken = entered, deviceToken = null,
-                automaticEpoch = if (it.configured) UUID.randomUUID().toString() else it.automaticEpoch,
-                configGeneration = UUID.randomUUID().toString(), lastError = null)
+            else {
+                // Initial configuration keeps already-authorized automatic captures, but holds
+                // them until enrollment; a genuine endpoint/token change revokes them.
+                val initial = !it.configured
+                val next = it.copy(baseUrl = url, enteredToken = entered, deviceToken = null,
+                    automaticEpoch = if (initial) it.automaticEpoch else UUID.randomUUID().toString(),
+                    configGeneration = UUID.randomUUID().toString(), lastError = null)
+                next.copy(automaticAwaitingEnrollment = initial && next.configured)
+            }
         }
     }
 
     suspend fun setAutomaticUpload(enabled: Boolean) {
         mutate {
             if (it.automaticUpload == enabled) it else it.copy(automaticUpload = enabled,
-                automaticEpoch = UUID.randomUUID().toString())
+                automaticEpoch = UUID.randomUUID().toString(), automaticAwaitingEnrollment = false)
         }
     }
 
@@ -147,16 +153,24 @@ class UploadCoordinator(
             if (current.configGeneration != snapshot.configGeneration) current else {
                 applied = true
                 when (result) {
+                    // Initial enrollment releases the held pre-configuration captures to the
+                    // issued device token; any other re-registration still revokes.
                     is RegistrationResult.Registered -> current.copy(deviceToken = result.deviceToken,
-                        automaticEpoch = UUID.randomUUID().toString(),
+                        automaticEpoch = if (current.automaticAwaitingEnrollment) current.automaticEpoch
+                            else UUID.randomUUID().toString(),
+                        automaticAwaitingEnrollment = false,
                         configGeneration = UUID.randomUUID().toString(), lastError = null)
-                    is RegistrationResult.NotEnrollmentToken -> current.copy(lastError = null)
+                    // The entered token is itself a device token: submitting with it is intended.
+                    is RegistrationResult.NotEnrollmentToken ->
+                        current.copy(automaticAwaitingEnrollment = false, lastError = null)
                     is RegistrationResult.Failed -> current.copy(lastError = result.message)
                     RegistrationResult.Superseded -> current
                 }
             }
         }
-        if (applied) result else RegistrationResult.Superseded
+        if (!applied) return@withLock RegistrationResult.Superseded
+        if (result is RegistrationResult.Registered || result is RegistrationResult.NotEnrollmentToken) scheduleFlush()
+        result
     }
 
     suspend fun review(bundleDir: String, note: String? = null): PendingReview {
@@ -216,6 +230,8 @@ class UploadCoordinator(
                 settings.current().also(::configure)
             }
             val scope = (if (automatic) config.automaticScope else config.manualScope) ?: continue
+            // Never submit held device data with an unverified enrollment/admin credential.
+            if (automatic && config.automaticAwaitingEnrollment) continue
             val endpoint = config.endpoint(deviceUuid()) ?: continue
             attemptedScopes += scope
             try {
