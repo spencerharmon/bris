@@ -89,6 +89,9 @@ android {
 
     // Pick up the generated UniFFI bindings as Kotlin sources.
     sourceSets {
+        if (providers.gradleProperty("brisConnectedCollector").orNull == "true") {
+            getByName("debug").manifest.srcFile("src/androidTest/collector/AndroidManifest.xml")
+        }
         getByName("main") {
             kotlin.srcDir(layout.buildDirectory.dir("generated/source/uniffi/kotlin"))
             jniLibs.srcDir(layout.projectDirectory.dir("src/main/jniLibs"))

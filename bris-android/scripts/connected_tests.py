@@ -2,15 +2,21 @@
 """Provision and run real Android instrumentation on an isolated Linux/KVM AVD."""
 
 import fcntl
+from contextlib import contextmanager
+import hashlib
+import json
 import os
 from pathlib import Path
 import shutil
+import secrets
 import signal
 import socket
 import subprocess
 import sys
 import tempfile
 import time
+import urllib.error
+import urllib.request
 import xml.etree.ElementTree as ET
 
 
@@ -22,11 +28,18 @@ PACKAGES = ("platform-tools", "platforms;android-37.0", "build-tools;37.0.0",
 REQUIRED_CLASSES = (
     "io.github.spencerharmon.bris.engine.CalibrationStoreManifestTest",
     "io.github.spencerharmon.bris.ui.ConfidenceEllipseOverlayTest",
+    "io.github.spencerharmon.bris.ui.FirstCaptureUploadTest",
+    "io.github.spencerharmon.bris.ui.ExplicitSessionUploadTest",
 )
+APP = "io.github.spencerharmon.bris"
+MINIMUM_TESTS = dict(zip(REQUIRED_CLASSES, (4, 3, 1, 1)))
 
 
 def run(args, env, **kwargs):
-    print("+ " + " ".join(map(str, args)), flush=True)
+    print("+ " + " ".join(
+        str(arg).split("=", 1)[0] + "=<redacted>"
+        if str(arg).startswith("-Pandroid.testInstrumentationRunnerArguments.collectorToken=")
+        else str(arg) for arg in args), flush=True)
     return subprocess.run(list(map(str, args)), env=env, check=True, **kwargs)
 
 
@@ -42,7 +55,7 @@ def verify_results(directory):
             name = case.get("classname")
             if name in counts:
                 counts[name] += 1
-    if not all(counts.values()):
+    if any(counts[name] < minimum for name, minimum in MINIMUM_TESTS.items()):
         raise RuntimeError(f"Required instrumentation classes did not execute: {counts}")
     print(f"Instrumentation verified: {total} tests passed; {counts}", flush=True)
 
@@ -51,6 +64,99 @@ def free_port():
     with socket.socket() as sock:
         sock.bind(("127.0.0.1", 0))
         return sock.getsockname()[1]
+
+
+@contextmanager
+def collector(env, directory):
+    """Run this checkout's actual authenticated collector, never an HTTP stand-in."""
+    port = free_port()
+    token = secrets.token_hex(24)
+    child_env = {key: value for key, value in env.items()
+                 if not key.startswith("BRIS_COLLECTOR_")}
+    child_env.update(BRIS_COLLECTOR_DATA_ROOT=str(directory / "data"),
+                     BRIS_COLLECTOR_BIND=f"127.0.0.1:{port}",
+                     BRIS_COLLECTOR_BEARER_TOKEN=token)
+    with (directory / "collector.log").open("w") as log:
+        process = subprocess.Popen([str(ROOT / "target/debug/bris_collector"), "serve"],
+                                   cwd=ROOT, env=child_env, stdout=log, stderr=subprocess.STDOUT)
+        try:
+            deadline = time.monotonic() + 30
+            while time.monotonic() < deadline:
+                if process.poll() is not None:
+                    raise RuntimeError(f"Collector exited; see {directory / 'collector.log'}")
+                try:
+                    with urllib.request.urlopen(f"http://127.0.0.1:{port}/healthz", timeout=1) as response:
+                        if response.status == 200:
+                            break
+                except (urllib.error.URLError, TimeoutError):
+                    time.sleep(0.1)
+            else:
+                raise RuntimeError("Collector readiness timed out")
+            yield port, token
+        finally:
+            if process.poll() is None:
+                process.terminate()
+                try:
+                    process.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait()
+
+
+def verify_collector(data, device):
+    """Cross-check actual stored multipart bytes against the canonical device tree."""
+    sessions = list(device.glob("sessions/*/session.json"))
+    manifests = list(data.glob("submissions/*/*/*/*/manifest.json"))
+    if len(sessions) != 1 or len(manifests) != 2:
+        raise RuntimeError(f"Expected one session and two submissions: {sessions}, {manifests}")
+    session = json.loads(sessions[0].read_bytes())
+    session_id = sessions[0].parent.name
+    ids = session["ordered_capture_ids"]
+    captures = sessions[0].parent / "captures"
+    if (session["session_id"] != session_id or len(ids) != 2 or len(set(ids)) != 2
+            or set(ids) != {path.name for path in captures.iterdir()}):
+        raise RuntimeError("Canonical session identity/capture index mismatch")
+    if any(path.is_file() for path in (device / "sights").rglob("*")):
+        raise RuntimeError("Legacy orphan capture artifacts found")
+    received_ids = []
+    for path in manifests:
+        manifest = json.loads(path.read_bytes())
+        bundle_bytes = (path.parent / "media/bundle.json").read_bytes()
+        bundle = json.loads(bundle_bytes)
+        capture_id = bundle["bundle_id"]
+        if bundle.get("session_id") != session_id or capture_id not in ids:
+            raise RuntimeError("Collector received an unbound or unexpected capture")
+        received_ids.append(capture_id)
+        capture = captures / capture_id
+        for name in ("manifest.json", "bundle.json", "pbris.log"):
+            if not (capture / name).is_file():
+                raise RuntimeError(f"Missing canonical artifact: {capture_id}/{name}")
+        if bundle.get("gps_truth") is not None:
+            raise RuntimeError("Debug OFF capture contains GPS truth")
+        for sidecar in (capture / "frames").glob("*.json"):
+            if json.loads(sidecar.read_bytes()).get("retention") != "fix_frame":
+                raise RuntimeError("Debug OFF capture contains non-fix frames")
+        # The production multipart contract excludes the sight-log manifest and
+        # session.json; those are checked locally, not fabricated into the upload.
+        expected = {"bundle.json": capture / "bundle.json", "pbris.log": capture / "pbris.log"}
+        if (capture / "index.jsonl").exists():
+            expected["index.jsonl"] = capture / "index.jsonl"
+        for frame in (capture / "frames").glob("*"):
+            if frame.is_file():
+                expected[frame.name] = frame
+        media = manifest["media"]
+        if len(media) != len(expected) or {item["filename"] for item in media} != set(expected):
+            raise RuntimeError("Collector media set differs from canonical capture")
+        for item in media:
+            name = item["filename"]
+            received = path.parent / ("pbris.log" if item.get("role") == "pbris_log" else f"media/{name}")
+            original = expected[name].read_bytes()
+            if (received.read_bytes() != original or item["size_bytes"] != len(original)
+                    or item["checksum_sha256"] != hashlib.sha256(original).hexdigest()):
+                raise RuntimeError(f"Collector changed canonical bytes: {capture_id}/{name}")
+    if sorted(received_ids) != sorted(ids):
+        raise RuntimeError("Completion duplicated or omitted a capture submission")
+    print(f"Real collector verified: {session_id}, captures {ids}, byte-identical media", flush=True)
 
 
 def emulator_port():
@@ -162,10 +268,59 @@ def execute(args, state, avd_home):
                 raise RuntimeError(f"Emulator boot timed out; see {log_path}")
 
             reports = ANDROID / "app/build/outputs/androidTest-results/connected"
-            if reports.exists():
-                shutil.rmtree(reports)  # Old XML must never satisfy this run's assertion.
-            run([ANDROID / "gradlew", *args, "--no-daemon"], env)
-            verify_results(reports)
+            evidence = Path(tempfile.mkdtemp(prefix="results-", dir=state))
+            print(f"Connected evidence: {evidence}", flush=True)
+            run(["cargo", "build", "--locked", "--target-dir", ROOT / "target",
+                 "-p", "bris-collector", "--bin", "bris_collector"],
+                env, cwd=ROOT)
+            failures = []
+            # Separate invocations are deliberate: pm clear also resets process-wide
+            # SessionHolder/Upload/DataStore singletons, unlike deleting test files.
+            groups = [REQUIRED_CLASSES[:2], *[(name,) for name in REQUIRED_CLASSES[2:]]]
+            for number, classes in enumerate(groups):
+                group = evidence / str(number)
+                group.mkdir()
+                if reports.exists():
+                    shutil.rmtree(reports)  # Never accept stale XML from an earlier group.
+                selection = (f"notClass={','.join(REQUIRED_CLASSES[2:])}" if number == 0
+                             else f"class={','.join(classes)}")
+                extra = [f"-Pandroid.testInstrumentationRunnerArguments.{selection}",
+                         "-PbrisConnectedCollector=true"]
+                try:
+                    if number == 0:
+                        run([ANDROID / "gradlew", *args, *extra, "--no-daemon"], env)
+                    else:
+                        installed = run([adb, "shell", "pm", "list", "packages", APP], env,
+                                        capture_output=True, text=True)
+                        if f"package:{APP}" in installed.stdout.splitlines():
+                            cleared = run([adb, "shell", "pm", "clear", APP], env,
+                                          capture_output=True, text=True)
+                            if cleared.stdout.strip() != "Success":
+                                raise RuntimeError(f"Could not clear app data: {cleared.stdout}")
+                        with collector(env, group) as (collector_port, token):
+                            run([adb, "reverse", f"tcp:{collector_port}", f"tcp:{collector_port}"], env)
+                            try:
+                                extra += [f"-Pandroid.testInstrumentationRunnerArguments.collectorUrl=http://127.0.0.1:{collector_port}",
+                                          f"-Pandroid.testInstrumentationRunnerArguments.collectorToken={token}"]
+                                run([ANDROID / "gradlew", *args, *extra, "--no-daemon"], env)
+                                run([adb, "pull", f"/data/local/tmp/{classes[0].rsplit('.', 1)[-1]}",
+                                     group / "device"], env)
+                                verify_collector(group / "data", group / "device")
+                            finally:
+                                run([adb, "reverse", "--remove", f"tcp:{collector_port}"], env)
+                except (RuntimeError, OSError, ValueError, subprocess.SubprocessError) as error:
+                    # CalledProcessError includes argv, which contains the ephemeral token.
+                    detail = (f"command exited {error.returncode}" if isinstance(error, subprocess.CalledProcessError)
+                              else str(error))
+                    failures.append(f"{classes}: {detail}")
+                finally:
+                    if reports.exists():
+                        shutil.copytree(reports, group / "reports")
+                    with (group / "logcat.txt").open("w") as logcat:
+                        run([adb, "logcat", "-d"], env, stdout=logcat)
+            if failures:
+                raise RuntimeError(f"Connected checks failed; evidence {evidence}:\n" + "\n".join(failures))
+            verify_results(evidence)
     finally:
         # Only terminate processes owned by this invocation, never a user's device/server.
         if emulator is not None and emulator.poll() is None:

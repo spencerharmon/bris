@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- Opt-in harness overlay only: the real collector listens on adb-reversed loopback. -->
+    <application android:usesCleartextTraffic="true" />
+</manifest>

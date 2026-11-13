@@ -121,8 +121,17 @@ move that file aside or use the existing-device opt-out below.
 Gradle's existing tasks build **both arm64-v8a and x86_64** native libraries and
 generate UniFFI Kotlin bindings into the APK. No native build is skipped.
 After Gradle succeeds, the harness parses fresh instrumentation XML and refuses
-zero tests, skipped/failing tests, or missing `CalibrationStoreManifestTest` /
-`ConfidenceEllipseOverlayTest` execution. Reports are under
+zero tests, skipped/failing tests, or missing `CalibrationStoreManifestTest`,
+`ConfidenceEllipseOverlayTest`, `FirstCaptureUploadTest`, or
+`ExplicitSessionUploadTest` execution. The capture tests run in separate fresh
+app processes, configure Automatic upload through Settings with Debug OFF, and
+perform two Start/Stop cycles. The harness builds and runs this checkout's real
+collector with ephemeral credentials over adb-reversed loopback, then compares
+its stored media and SHA-256 checksums with the canonical device artifacts.
+Cleartext is enabled only in the opt-in `brisConnectedCollector` test build;
+ordinary APKs retain their network policy. Per-group XML, collector data, device
+artifacts, and logcat are retained under `.connected-harness/results-*/`.
+Gradle reports for the last group are under
 `app/build/reports/androidTests/connected/`; XML is under
 `app/build/outputs/androidTest-results/connected/`. Boot diagnostics are in
 `.connected-harness/emulator.log`.
@@ -134,7 +143,9 @@ BRIS_CONNECTED_DEVICE=existing ./bris-android/gradlew -p bris-android connectedD
 ```
 
 That opt-out uses ordinary Gradle behavior and requires SDK/NDK, Rust targets,
-and cargo-ndk to be installed already. The result-validator regression tests
+and cargo-ndk to be installed already. The capture-upload classes require the
+harness's fresh-process and collector setup; select other classes explicitly
+when using an existing device. The result-validator regression tests
 do not require Android tooling:
 
 ```sh

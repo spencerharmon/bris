@@ -31,6 +31,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.dp
 import androidx.documentfile.provider.DocumentFile
 import androidx.compose.material3.OutlinedTextField
@@ -178,6 +179,7 @@ fun SettingsScreen(prefs: Prefs, onBack: () -> Unit) {
             Switch(
                 checked = debugMode,
                 onCheckedChange = { v -> scope.launch { prefs.setDebugMode(v) } },
+                modifier = Modifier.testTag("debug-mode-switch"),
             )
         }
         Text(
@@ -257,7 +259,8 @@ private fun CollectorSection() {
     Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween,
         verticalAlignment = Alignment.CenterVertically) {
         Text("Automatic upload")
-        Switch(checked = settings.automaticUpload, onCheckedChange = { enabled ->
+        Switch(modifier = Modifier.testTag("automatic-upload-switch"),
+            checked = settings.automaticUpload, onCheckedChange = { enabled ->
             scope.launch {
                 try { Upload.setAutomaticUpload(context, enabled) }
                 catch (e: Exception) {
