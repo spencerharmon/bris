@@ -40,7 +40,6 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import io.github.spencerharmon.bris.Prefs
 import io.github.spencerharmon.bris.upload.CollectorSettings
-import io.github.spencerharmon.bris.upload.DeviceRegistrar
 import io.github.spencerharmon.bris.upload.RegistrationResult
 import io.github.spencerharmon.bris.upload.Upload
 import io.github.spencerharmon.bris.upload.maskToken
@@ -200,10 +199,8 @@ fun SettingsScreen(prefs: Prefs, onBack: () -> Unit) {
             }
         }
 
-        if (debugMode) {
-            HorizontalDivider()
-            CollectorSection()
-        }
+        HorizontalDivider()
+        CollectorSection()
 
         HorizontalDivider()
 
@@ -229,7 +226,7 @@ fun SettingsScreen(prefs: Prefs, onBack: () -> Unit) {
 }
 
 /**
- * Debug-gated collector settings: runtime base URL + token
+ * Collector settings: runtime base URL + token
  * (never compiled in), per-device registration, queue status.
  */
 @Composable
@@ -242,12 +239,37 @@ private fun CollectorSection() {
     var token by remember(settings.enteredToken) { mutableStateOf(settings.enteredToken) }
     var status by remember { mutableStateOf<String?>(null) }
     var counts by remember { mutableStateOf<Pair<Int, Int>?>(null) }
+    var saving by remember { mutableStateOf(false) }
 
-    LaunchedEffect(Unit) {
-        counts = runCatching { withContext(Dispatchers.IO) { Upload.coordinator(context).counts() } }.getOrNull()
+    LaunchedEffect(settings) {
+        while (true) {
+            try {
+                counts = withContext(Dispatchers.IO) { Upload.coordinator(context).counts() }
+            } catch (e: Exception) {
+                if (e is kotlinx.coroutines.CancellationException) throw e
+                status = "Queue unavailable (${e.javaClass.simpleName})"
+            }
+            kotlinx.coroutines.delay(2000)
+        }
     }
 
     Text("Collector", style = androidx.compose.material3.MaterialTheme.typography.titleMedium)
+    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically) {
+        Text("Automatic upload")
+        Switch(checked = settings.automaticUpload, onCheckedChange = { enabled ->
+            scope.launch {
+                try { Upload.setAutomaticUpload(context, enabled) }
+                catch (e: Exception) {
+                    if (e is kotlinx.coroutines.CancellationException) throw e
+                    status = "Could not change automatic upload (${e.javaClass.simpleName})"
+                }
+            }
+        })
+    }
+    Text("Off by default. When on, completed captures upload silently to this collector, " +
+        "including their bundle, retained frames and diagnostics. Debug mode is not required. " +
+        "Turning off cancels pending automatic uploads; data already received cannot be recalled.")
     OutlinedTextField(
         value = url,
         onValueChange = { url = it },
@@ -272,25 +294,25 @@ private fun CollectorSection() {
     settings.lastError?.let { Text("Last error: $it") }
     status?.let { Text(it) }
     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-        Button(onClick = {
+        Button(enabled = !saving, onClick = {
             scope.launch {
+                saving = true
                 status = try {
-                    store.save(url, token)
-                    val s = store.current()
-                    val uuid = Prefs(context).deviceUuid()
-                    val res = withContext(Dispatchers.IO) {
-                        DeviceRegistrar().register(s.baseUrl, s.enteredToken, uuid)
-                    }
+                    Upload.saveSettings(context, url, token)
+                    val res = if (url.isBlank() || token.isBlank()) null else Upload.register(context)
                     when (res) {
-                        is RegistrationResult.Registered -> {
-                            store.setDeviceToken(res.deviceToken); "Saved; device registered."
-                        }
+                        null -> "Saved; uploads disabled until URL and token are configured."
+                        is RegistrationResult.Registered -> "Saved; device registered."
                         is RegistrationResult.NotEnrollmentToken ->
                             "Saved; token is not an enrollment token (HTTP ${res.httpStatus}), using it as-is."
                         is RegistrationResult.Failed -> "Saved; registration failed: ${res.message}"
+                        RegistrationResult.Superseded -> "Configuration changed; registration result discarded."
                     }
-                } catch (e: IllegalArgumentException) {
-                    e.message
+                } catch (e: Exception) {
+                    if (e is kotlinx.coroutines.CancellationException) throw e
+                    "Could not save collector settings (${e.javaClass.simpleName})"
+                } finally {
+                    saving = false
                 }
             }
         }) { Text("Save & register") }

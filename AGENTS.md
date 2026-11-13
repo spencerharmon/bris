@@ -163,10 +163,12 @@ the same change.
 These rules come from `plan.org`'s "Decisions baked in" block and
 are non-negotiable without explicit operator approval:
 
-- **No telemetry, no analytics, no automatic network calls.** The
-  diagnostic-collection subsystem is the one network surface and
-  it is *explicitly* user-initiated (debug mode + per-submission
-  review). Do not add silent or scheduled network requests.
+- **No telemetry or analytics.** Diagnostic collection is the one
+  upload surface. Manual uploads require Debug mode and per-submission
+  review. The operator-approved amendment (2026-11-13) also permits
+  silent completion uploads through the same Submitter queue when the
+  persisted **Automatic upload** toggle is ON (default OFF), independent
+  of Debug mode. Turning it OFF revokes pending/in-flight automatic work.
 - **Honest uncertainty everywhere.** Every measurement carries a
   1σ contribution. Fixes carry a full position covariance. Do
   not silently fudge, smooth, or fuse without recording the

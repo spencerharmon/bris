@@ -24,10 +24,14 @@
 //! crash mid-enqueue never leaves a half-written pending entry.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
+use crate::authorization::{coordinator, Coordinator, PersistentAuthorization, UploadScope};
+#[cfg(feature = "http")]
+use crate::authorization::{Binding, Cancellation};
 use crate::manifest::SubmissionManifest;
 use crate::payload::SubmissionPart;
 use crate::review::ReviewedSubmission;
@@ -37,6 +41,9 @@ use crate::Submission;
 /// Persisted per-entry state.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct QueuedState {
+    /// Absent only for the existing explicitly-reviewed CLI queue entries.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upload_scope: Option<UploadScope>,
     /// Local queue id (ULID). Distinct from the collector's id.
     pub id: String,
     /// Number of send attempts made so far.
@@ -77,6 +84,15 @@ pub struct PartDescriptor {
 /// Queue error.
 #[derive(Debug, thiserror::Error)]
 pub enum QueueError {
+    /// Authorization is absent, revoked, or bound to another destination.
+    #[error("upload scope is not authorized for this operation or endpoint")]
+    Unauthorized,
+    /// Cancellation is not a failed attempt; authorized entries remain retryable.
+    #[error("upload drain cancelled")]
+    Cancelled,
+    /// A shared lock was poisoned; do not guess at its authorization state.
+    #[error("submission queue lock poisoned")]
+    Poisoned,
     /// I/O error with the offending path.
     #[error("queue io error at {path}: {source}")]
     Io {
@@ -149,6 +165,7 @@ pub enum AttemptResult {
 #[derive(Debug)]
 pub struct SubmissionQueue {
     root: PathBuf,
+    shared: Arc<Coordinator>,
     /// Max attempts before giving up on a *transient* error and
     /// dead-lettering. A permanent error dead-letters
     /// immediately regardless.
@@ -171,8 +188,11 @@ impl SubmissionQueue {
             let dir = root.join(sub);
             std::fs::create_dir_all(&dir).map_err(|e| io_err(&dir, e))?;
         }
+        let root = root.canonicalize().map_err(|e| io_err(&root, e))?;
+        let shared = coordinator(&root)?;
         Ok(Self {
             root,
+            shared,
             max_attempts: 8,
             base_backoff_ms: 5_000,
             max_backoff_ms: 6 * 60 * 60 * 1_000,
@@ -197,6 +217,220 @@ impl SubmissionQueue {
         self.root.join("pending")
     }
 
+    fn read_authorization(&self) -> Result<PersistentAuthorization, QueueError> {
+        let path = self.root.join("authorization.json");
+        match std::fs::read(&path) {
+            Ok(bytes) => Ok(serde_json::from_slice(&bytes)?),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                Ok(PersistentAuthorization::default())
+            }
+            Err(e) => Err(io_err(&path, e)),
+        }
+    }
+
+    fn write_authorization(&self, state: &PersistentAuthorization) -> Result<(), QueueError> {
+        use std::io::Write;
+        let path = self.root.join("authorization.json");
+        let tmp = self.root.join("authorization.json.tmp");
+        let mut file = std::fs::File::create(&tmp).map_err(|e| io_err(&tmp, e))?;
+        file.write_all(&serde_json::to_vec(state)?)
+            .map_err(|e| io_err(&tmp, e))?;
+        file.sync_all().map_err(|e| io_err(&tmp, e))?;
+        std::fs::rename(&tmp, &path).map_err(|e| io_err(&path, e))?;
+        std::fs::File::open(&self.root)
+            .and_then(|f| f.sync_all())
+            .map_err(|e| io_err(&self.root, e))
+    }
+
+    /// Replace the shared manual/automatic authorizations. `None` disables a
+    /// mode. Generations must be nonempty and must never be reused after revocation.
+    /// Revoked requests are cancelled before disk cleanup, without taking the
+    /// drain lock. A new process must explicitly configure before scoped sends.
+    pub fn configure_uploads(
+        &self,
+        manual_scope: Option<String>,
+        automatic_scope: Option<String>,
+    ) -> Result<(), QueueError> {
+        let mut auth = self
+            .shared
+            .authorization
+            .lock()
+            .map_err(|_| QueueError::Poisoned)?;
+        let result = (|| {
+            if manual_scope.as_ref().is_some_and(|s| s.trim().is_empty())
+                || automatic_scope
+                    .as_ref()
+                    .is_some_and(|s| s.trim().is_empty())
+            {
+                return Err(QueueError::Unauthorized);
+            }
+            // Revoke in memory first so failures on disk cannot preserve permission.
+            auth.manual.clone_from(&manual_scope);
+            auth.automatic.clone_from(&automatic_scope);
+            for (scope, token) in &auth.active {
+                if scope.as_ref().is_some_and(|s| !auth.permits(s)) {
+                    if let Some(token) = token.upgrade() {
+                        token.cancel();
+                    }
+                }
+            }
+            let mut persistent = self.read_authorization()?;
+            for (scope, automatic) in [
+                (persistent.manual.clone(), false),
+                (persistent.automatic.clone(), true),
+            ] {
+                if let Some(scope) = scope {
+                    let scope = UploadScope { scope, automatic };
+                    if !auth.permits(&scope) && !persistent.revoked.contains(&scope) {
+                        persistent.revoked.push(scope);
+                    }
+                }
+            }
+            if persistent.revoked.iter().any(|scope| auth.permits(scope)) {
+                return Err(QueueError::Unauthorized);
+            }
+            persistent.manual = manual_scope;
+            persistent.automatic = automatic_scope;
+            // Persist revocation before moving any entries. A crash during cleanup
+            // cannot reauthorize old entries, even if a stale worker reuses A.
+            self.write_authorization(&persistent)?;
+            for id in self.pending_ids()? {
+                let mut state = self.load_state(&id)?;
+                // Legacy Android approvals had no destination binding. They
+                // cannot safely be retried after adopting scoped configuration.
+                if state.upload_scope.as_ref().is_none_or(|s| !auth.permits(s)) {
+                    state.rejection = Some("upload authorization revoked".into());
+                    self.move_entry(&id, "dead", &state)?;
+                }
+            }
+            auth.active.retain(|(_, token)| token.strong_count() > 0);
+            Ok(())
+        })();
+        if result.is_err() {
+            auth.manual = None;
+            auth.automatic = None;
+            auth.cancel_all();
+        }
+        result
+    }
+
+    /// Immediately cancel all active or waiting HTTP drains on this root.
+    /// Does not revoke authorization or increment attempts; entries remain retryable.
+    pub fn cancel_flush(&self) -> Result<(), QueueError> {
+        self.shared
+            .authorization
+            .lock()
+            .map_err(|_| QueueError::Poisoned)?
+            .cancel_all();
+        Ok(())
+    }
+
+    /// Flush only entries of this mode and generation, using cancellable HTTP.
+    /// The first flush binds the generation to the endpoint, token and device UUID
+    /// durably. A mismatched endpoint is rejected, including after process restart.
+    #[cfg(feature = "http")]
+    pub fn flush_scoped(
+        &self,
+        endpoint: crate::CollectorEndpoint,
+        scope: String,
+        automatic: bool,
+    ) -> Result<Vec<AttemptResult>, QueueError> {
+        self.drain_http(endpoint, Some(&UploadScope { scope, automatic }))
+    }
+
+    /// Cancellable version of the reviewed CLI drain. Never sends scoped entries.
+    #[cfg(feature = "http")]
+    pub fn flush(
+        &self,
+        endpoint: crate::CollectorEndpoint,
+    ) -> Result<Vec<AttemptResult>, QueueError> {
+        self.drain_http(endpoint, None)
+    }
+
+    #[cfg(feature = "http")]
+    fn drain_http(
+        &self,
+        endpoint: crate::CollectorEndpoint,
+        scope: Option<&UploadScope>,
+    ) -> Result<Vec<AttemptResult>, QueueError> {
+        let transport = crate::transport::HttpTransport::new(endpoint);
+        let fingerprint = transport.fingerprint()?;
+        let cancellation = Arc::new(Cancellation::default());
+        {
+            let mut auth = self
+                .shared
+                .authorization
+                .lock()
+                .map_err(|_| QueueError::Poisoned)?;
+            if let Some(scope) = scope {
+                if !auth.permits(scope) {
+                    return Err(QueueError::Unauthorized);
+                }
+                let mut persistent = self.read_authorization()?;
+                if persistent.revoked.contains(scope) {
+                    return Err(QueueError::Unauthorized);
+                }
+                if let Some(binding) = persistent.bindings.iter().find(|b| b.scope == *scope) {
+                    if binding.fingerprint != fingerprint {
+                        return Err(QueueError::Unauthorized);
+                    }
+                } else {
+                    persistent.bindings.push(Binding {
+                        scope: scope.clone(),
+                        fingerprint,
+                    });
+                    self.write_authorization(&persistent)?;
+                }
+            }
+            auth.active.retain(|(_, token)| token.strong_count() > 0);
+            auth.active
+                .push((scope.cloned(), Arc::downgrade(&cancellation)));
+        }
+        // Register cancellation BEFORE waiting: WorkManager stop also cancels a
+        // drain waiting behind another instance, rather than letting it send later.
+        let _drain = self.shared.drain.lock().map_err(|_| QueueError::Poisoned)?;
+        if cancellation.is_cancelled() {
+            return Err(QueueError::Cancelled);
+        }
+        let mut results = Vec::new();
+        for id in self.pending_ids()? {
+            let state = {
+                let auth = self
+                    .shared
+                    .authorization
+                    .lock()
+                    .map_err(|_| QueueError::Poisoned)?;
+                if cancellation.is_cancelled() {
+                    return Err(QueueError::Cancelled);
+                }
+                if scope.as_ref().is_some_and(|s| !auth.permits(s)) {
+                    return Err(QueueError::Unauthorized);
+                }
+                self.load_state(&id)?
+            };
+            if state.upload_scope.as_ref() != scope || state.next_not_before_unix_ms > now_unix_ms()
+            {
+                results.push(AttemptResult::Deferred { id });
+                continue;
+            }
+            let submission = self.load_submission(&id, &state)?;
+            let outcome = transport.send_cancellable(&submission, &cancellation);
+            let auth = self
+                .shared
+                .authorization
+                .lock()
+                .map_err(|_| QueueError::Poisoned)?;
+            if cancellation.is_cancelled() {
+                return Err(QueueError::Cancelled);
+            }
+            if scope.as_ref().is_some_and(|s| !auth.permits(s)) {
+                return Err(QueueError::Unauthorized);
+            }
+            results.push(self.record_outcome(&id, state, outcome)?);
+        }
+        Ok(results)
+    }
+
     /// Persist an operator-approved submission to the queue,
     /// returning its local queue id. Crash-safe: assembled under
     /// `.staging/` then atomically renamed into `pending/`.
@@ -204,7 +438,55 @@ impl SubmissionQueue {
     /// # Errors
     /// I/O or JSON error while writing the entry.
     pub fn enqueue(&self, approved: &ReviewedSubmission) -> Result<String, QueueError> {
-        let submission = &approved.submission;
+        self.enqueue_submission(&approved.submission, None)
+    }
+
+    /// Queue a manually reviewed submission under the current manual generation.
+    pub fn enqueue_scoped(
+        &self,
+        approved: &ReviewedSubmission,
+        scope: String,
+    ) -> Result<String, QueueError> {
+        self.enqueue_submission(
+            &approved.submission,
+            Some(UploadScope {
+                scope,
+                automatic: false,
+            }),
+        )
+    }
+
+    /// Queue the same payload without a manual review, only under explicit
+    /// automatic-upload authorization. Does not perform network activity.
+    pub fn enqueue_automatic(
+        &self,
+        submission: &Submission,
+        scope: String,
+    ) -> Result<String, QueueError> {
+        self.enqueue_submission(
+            submission,
+            Some(UploadScope {
+                scope,
+                automatic: true,
+            }),
+        )
+    }
+
+    fn enqueue_submission(
+        &self,
+        submission: &Submission,
+        scope: Option<UploadScope>,
+    ) -> Result<String, QueueError> {
+        {
+            let auth = self
+                .shared
+                .authorization
+                .lock()
+                .map_err(|_| QueueError::Poisoned)?;
+            if scope.as_ref().is_some_and(|s| !auth.permits(s)) {
+                return Err(QueueError::Unauthorized);
+            }
+        }
         let id = ulid::Ulid::new().to_string();
         let staging = self.root.join(".staging").join(&id);
         if staging.exists() {
@@ -234,6 +516,7 @@ impl SubmissionQueue {
 
         // state.json
         let state = QueuedState {
+            upload_scope: scope,
             id: id.clone(),
             attempts: 0,
             next_not_before_unix_ms: 0,
@@ -244,6 +527,19 @@ impl SubmissionQueue {
         Self::write_state(&staging, &state)?;
 
         // Atomic move into pending/.
+        let auth = self
+            .shared
+            .authorization
+            .lock()
+            .map_err(|_| QueueError::Poisoned)?;
+        if state
+            .upload_scope
+            .as_ref()
+            .is_some_and(|s| !auth.permits(s))
+        {
+            std::fs::remove_dir_all(&staging).map_err(|e| io_err(&staging, e))?;
+            return Err(QueueError::Unauthorized);
+        }
         let dest = self.pending_dir().join(&id);
         std::fs::rename(&staging, &dest).map_err(|e| io_err(&dest, e))?;
         tracing::info!(queue_id = %id, "submission enqueued (durable)");
@@ -357,13 +653,36 @@ impl SubmissionQueue {
         id: &str,
         transport: &T,
     ) -> Result<AttemptResult, QueueError> {
-        let mut state = self.load_state(id)?;
+        let _drain = self.shared.drain.lock().map_err(|_| QueueError::Poisoned)?;
+        self.attempt_unscoped(id, transport)
+    }
+
+    fn attempt_unscoped<T: Transport>(
+        &self,
+        id: &str,
+        transport: &T,
+    ) -> Result<AttemptResult, QueueError> {
+        let state = self.load_state(id)?;
+        // Old CLI APIs must never become an escape hatch for Android entries.
+        if state.upload_scope.is_some() {
+            return Ok(AttemptResult::Deferred { id: id.to_owned() });
+        }
         if state.next_not_before_unix_ms > now_unix_ms() {
             return Ok(AttemptResult::Deferred { id: id.to_owned() });
         }
         let submission = self.load_submission(id, &state)?;
         let approved = ReviewedSubmission { submission };
-        match transport.send(&approved) {
+        self.record_outcome(id, state, transport.send(&approved))
+    }
+
+    fn record_outcome(
+        &self,
+        id: &str,
+        mut state: QueuedState,
+        outcome: Result<crate::SubmissionOutcome, TransportError>,
+    ) -> Result<AttemptResult, QueueError> {
+        match outcome {
+            Err(TransportError::Cancelled) => Err(QueueError::Cancelled),
             Ok(outcome) => {
                 state.collector_id = Some(outcome.id.clone());
                 self.move_entry(id, "sent", &state)?;
@@ -420,9 +739,10 @@ impl SubmissionQueue {
         &self,
         transport: &T,
     ) -> Result<Vec<AttemptResult>, QueueError> {
+        let _drain = self.shared.drain.lock().map_err(|_| QueueError::Poisoned)?;
         let mut results = Vec::new();
         for id in self.pending_ids()? {
-            results.push(self.attempt_pending(&id, transport)?);
+            results.push(self.attempt_unscoped(&id, transport)?);
         }
         Ok(results)
     }

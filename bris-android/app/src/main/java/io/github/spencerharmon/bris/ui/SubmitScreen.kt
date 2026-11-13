@@ -47,7 +47,8 @@ fun SubmitScreen(bundleDir: String, onBack: () -> Unit) {
     var status by remember { mutableStateOf<String?>(null) }
     var counts by remember { mutableStateOf(0 to 0) }
 
-    LaunchedEffect(bundleDir) {
+    LaunchedEffect(bundleDir, settings.manualScope) {
+        review = null
         try {
             withContext(Dispatchers.IO) {
                 val c = Upload.coordinator(context)
@@ -66,7 +67,7 @@ fun SubmitScreen(bundleDir: String, onBack: () -> Unit) {
     ) {
         Text("Submit to collector", style = MaterialTheme.typography.titleLarge)
         if (!settings.configured) {
-            Text("Collector not configured: Settings \u2192 Debug mode \u2192 Collector.")
+            Text("Collector not configured: Settings \u2192 Collector.")
         } else {
             Text("Collector: ${settings.baseUrl}" + if (settings.registered) " (device registered)" else "")
         }
@@ -79,7 +80,7 @@ fun SubmitScreen(bundleDir: String, onBack: () -> Unit) {
         status?.let { Text(it) }
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             Button(
-                enabled = review != null && settings.configured,
+                enabled = review != null && settings.manualScope != null,
                 onClick = {
                     val r = review ?: return@Button
                     val c = coordinator ?: return@Button
@@ -87,7 +88,6 @@ fun SubmitScreen(bundleDir: String, onBack: () -> Unit) {
                         try {
                             val id = withContext(Dispatchers.IO) { c.approve(r) }
                             review = null
-                            Upload.scheduleFlush(context)
                             counts = withContext(Dispatchers.IO) { c.counts() }
                             status = "Queued $id; uploading in background."
                         } catch (t: Throwable) {

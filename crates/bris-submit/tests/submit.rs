@@ -143,6 +143,281 @@ fn test_source() -> SubmissionSource {
     }
 }
 
+#[cfg(feature = "http")]
+mod scoped_uploads {
+    use super::*;
+    use bris_submit::{CollectorEndpoint, QueueError};
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::sync::{mpsc, Arc};
+    use std::time::Duration;
+
+    // Read a complete real multipart POST before optionally blocking its response.
+    fn server(
+        statuses: Vec<u16>,
+        blocked: bool,
+    ) -> (
+        String,
+        mpsc::Receiver<String>,
+        mpsc::Sender<()>,
+        std::thread::JoinHandle<()>,
+    ) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let (seen_tx, seen) = mpsc::channel();
+        let (release, released) = mpsc::channel();
+        let thread = std::thread::spawn(move || {
+            for status in statuses {
+                let (mut socket, _) = listener.accept().unwrap();
+                socket
+                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .unwrap();
+                let mut bytes = Vec::new();
+                let mut buffer = [0; 4096];
+                loop {
+                    let n = socket.read(&mut buffer).unwrap();
+                    assert_ne!(n, 0);
+                    bytes.extend_from_slice(&buffer[..n]);
+                    if let Some(end) = bytes.windows(4).position(|w| w == b"\r\n\r\n") {
+                        let header = String::from_utf8_lossy(&bytes[..end]).to_lowercase();
+                        let len: usize = header
+                            .lines()
+                            .find_map(|line| line.strip_prefix("content-length: "))
+                            .unwrap()
+                            .parse()
+                            .unwrap();
+                        if bytes.len() >= end + 4 + len {
+                            break;
+                        }
+                    }
+                }
+                seen_tx
+                    .send(String::from_utf8_lossy(&bytes).into_owned())
+                    .unwrap();
+                if blocked {
+                    released.recv_timeout(Duration::from_secs(5)).unwrap();
+                }
+                let body = r#"{"id":"accepted"}"#;
+                // A cancelled client may already have closed its socket.
+                let _ = write!(socket, "HTTP/1.1 {status} Result\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+            }
+        });
+        (url, seen, release, thread)
+    }
+
+    #[test]
+    fn automatic_zero_frame_bundle_retries_after_restart_without_review() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bundle = make_bundle(tmp.path(), 0);
+        let submission = build_submission(&bundle, &test_source(), None).unwrap();
+        let root = tmp.path().join("queue");
+        let (url, seen, _, thread) = server(vec![503, 200], false);
+        let endpoint = CollectorEndpoint::new(url, "device-token").with_device_uuid("device-uuid");
+        let queue = SubmissionQueue::open(&root).unwrap().with_policy(8, 0, 0);
+        assert!(queue
+            .enqueue_automatic(&submission, "auto-1".into())
+            .is_err());
+        queue
+            .configure_uploads(None, Some("auto-1".into()))
+            .unwrap();
+        let id = queue
+            .enqueue_automatic(&submission, "auto-1".into())
+            .unwrap();
+        assert!(matches!(
+            queue
+                .flush_scoped(endpoint.clone(), "auto-1".into(), true)
+                .unwrap()[0],
+            AttemptResult::Retrying { .. }
+        ));
+        drop(queue);
+        let queue = SubmissionQueue::open(&root).unwrap();
+        assert!(
+            queue
+                .flush_scoped(endpoint.clone(), "auto-1".into(), true)
+                .is_err(),
+            "restart is fail-closed until settings restored"
+        );
+        queue
+            .configure_uploads(None, Some("auto-1".into()))
+            .unwrap();
+        let other = CollectorEndpoint::new("http://127.0.0.1:1", "other-token");
+        assert!(queue.flush_scoped(other, "auto-1".into(), true).is_err());
+        assert!(matches!(
+            queue.flush_scoped(endpoint, "auto-1".into(), true).unwrap()[0],
+            AttemptResult::Sent { .. }
+        ));
+        assert!(queue.pending_ids().unwrap().is_empty());
+        for _ in 0..2 {
+            let request = seen.recv_timeout(Duration::from_secs(5)).unwrap();
+            assert!(request
+                .to_lowercase()
+                .contains("x-bris-device-uuid: device-uuid"));
+            assert!(request.contains("Bearer device-token"));
+            assert!(request.contains("12.34"));
+            assert!(request.contains("99.0"));
+        }
+        assert!(root.join("sent").join(id).exists());
+        thread.join().unwrap();
+    }
+
+    #[test]
+    fn revocation_cancels_real_inflight_http_and_prevents_later_requests() {
+        let tmp = tempfile::tempdir().unwrap();
+        let submission =
+            build_submission(&make_bundle(tmp.path(), 1), &test_source(), None).unwrap();
+        let queue = Arc::new(SubmissionQueue::open(tmp.path().join("queue")).unwrap());
+        queue
+            .configure_uploads(Some("manual-1".into()), Some("auto-1".into()))
+            .unwrap();
+        queue
+            .enqueue_automatic(&submission, "auto-1".into())
+            .unwrap();
+        queue
+            .enqueue_automatic(&submission, "auto-1".into())
+            .unwrap();
+        let (url, seen, release, server) = server(vec![200], true);
+        let (done_tx, done) = mpsc::channel();
+        let flushing = queue.clone();
+        let worker = std::thread::spawn(move || {
+            done_tx
+                .send(flushing.flush_scoped(
+                    CollectorEndpoint::new(url, "token"),
+                    "auto-1".into(),
+                    true,
+                ))
+                .unwrap();
+        });
+        seen.recv_timeout(Duration::from_secs(5)).unwrap();
+        queue
+            .configure_uploads(Some("manual-1".into()), None)
+            .unwrap();
+        assert!(
+            done.recv_timeout(Duration::from_secs(2)).unwrap().is_err(),
+            "must cancel before server response"
+        );
+        assert!(queue.pending_ids().unwrap().is_empty());
+        assert_eq!(queue.dead_ids().unwrap().len(), 2);
+        assert!(
+            queue
+                .configure_uploads(Some("manual-1".into()), Some("auto-1".into()))
+                .is_err(),
+            "revoked generation cannot be resurrected"
+        );
+        release.send(()).unwrap();
+        worker.join().unwrap();
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn worker_stop_cancels_http_without_revoking_retry_and_drains_serialize() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("queue");
+        let submission =
+            build_submission(&make_bundle(tmp.path(), 1), &test_source(), None).unwrap();
+        let queue = Arc::new(SubmissionQueue::open(&root).unwrap());
+        queue.configure_uploads(None, Some("auto".into())).unwrap();
+        let id = queue.enqueue_automatic(&submission, "auto".into()).unwrap();
+        let (url, seen, release, server) = server(vec![200, 200], true);
+        let endpoint = CollectorEndpoint::new(url, "token");
+        let q = queue.clone();
+        let ep = endpoint.clone();
+        let first = std::thread::spawn(move || q.flush_scoped(ep, "auto".into(), true));
+        seen.recv_timeout(Duration::from_secs(5)).unwrap();
+        queue.cancel_flush().unwrap();
+        assert!(matches!(first.join().unwrap(), Err(QueueError::Cancelled)));
+        assert_eq!(queue.load_state(&id).unwrap().attempts, 0);
+        release.send(()).unwrap();
+        let q = queue.clone();
+        let ep = endpoint.clone();
+        let retry = std::thread::spawn(move || q.flush_scoped(ep, "auto".into(), true));
+        seen.recv_timeout(Duration::from_secs(5)).unwrap();
+        let second_instance = SubmissionQueue::open(&root).unwrap();
+        let second =
+            std::thread::spawn(move || second_instance.flush_scoped(endpoint, "auto".into(), true));
+        assert!(
+            seen.recv_timeout(Duration::from_millis(100)).is_err(),
+            "second drain must not send concurrently"
+        );
+        release.send(()).unwrap();
+        assert!(matches!(
+            retry.join().unwrap().unwrap()[0],
+            AttemptResult::Sent { .. }
+        ));
+        assert!(second.join().unwrap().unwrap().is_empty());
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn offline_destination_change_and_mode_revocation_never_redirect_approved_payload() {
+        let tmp = tempfile::tempdir().unwrap();
+        let submission =
+            build_submission(&make_bundle(tmp.path(), 1), &test_source(), None).unwrap();
+        let queue = SubmissionQueue::open(tmp.path().join("queue")).unwrap();
+        queue
+            .configure_uploads(Some("manual-a".into()), Some("auto-a".into()))
+            .unwrap();
+        let manual = queue
+            .enqueue_scoped(
+                &SubmissionReview::new(submission.clone()).approve(),
+                "manual-a".into(),
+            )
+            .unwrap();
+        queue
+            .enqueue_automatic(&submission, "auto-a".into())
+            .unwrap();
+        queue
+            .configure_uploads(Some("manual-a".into()), None)
+            .unwrap();
+        assert_eq!(queue.pending_ids().unwrap(), vec![manual]);
+        queue
+            .configure_uploads(Some("manual-b".into()), Some("auto-b".into()))
+            .unwrap();
+        assert!(queue.pending_ids().unwrap().is_empty());
+        assert_eq!(queue.dead_ids().unwrap().len(), 2);
+        assert!(queue
+            .enqueue_automatic(&submission, "auto-a".into())
+            .is_err());
+    }
+
+    #[test]
+    fn automatic_device_token_upload_is_accepted_by_real_collector_auth() {
+        let tmp = tempfile::tempdir().unwrap();
+        let source = test_source();
+        let store = bris_collector::store::Store::open(tmp.path().join("collector")).unwrap();
+        let token = store.register_device(&source.device_uuid).unwrap();
+        let app = bris_collector::build_app(Arc::new(bris_collector::routes::AppState {
+            config: bris_collector::Config {
+                data_root: tmp.path().join("collector"),
+                bearer_token: "admin-only".into(),
+                ..Default::default()
+            },
+            store,
+        }));
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let listener = runtime
+            .block_on(tokio::net::TcpListener::bind("127.0.0.1:0"))
+            .unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let server = runtime.spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let submission = build_submission(&make_bundle(tmp.path(), 0), &source, None).unwrap();
+        let queue = SubmissionQueue::open(tmp.path().join("queue")).unwrap();
+        queue.configure_uploads(None, Some("auto".into())).unwrap();
+        queue.enqueue_automatic(&submission, "auto".into()).unwrap();
+        let outcome = queue
+            .flush_scoped(
+                CollectorEndpoint::new(url, token).with_device_uuid(source.device_uuid),
+                "auto".into(),
+                true,
+            )
+            .unwrap();
+        assert!(
+            matches!(outcome[0], AttemptResult::Sent { .. }),
+            "{outcome:?}"
+        );
+        server.abort();
+    }
+}
+
 #[test]
 fn bundle_json_is_shipped_verbatim_with_honest_ap() {
     let tmp = tempfile::tempdir().unwrap();
@@ -247,6 +522,7 @@ async fn built_payload_is_accepted_by_the_real_collector() {
         bind: "127.0.0.1:0".to_owned(),
         bearer_token: "test-token".to_owned(),
         max_submission_bytes: 32 * 1024 * 1024,
+        ..Config::default()
     };
     let store = Store::open(&cfg.data_root).unwrap();
     let state = std::sync::Arc::new(AppState { config: cfg, store });
@@ -298,6 +574,7 @@ async fn tampered_checksum_is_rejected_by_the_real_collector() {
         bind: "127.0.0.1:0".to_owned(),
         bearer_token: "test-token".to_owned(),
         max_submission_bytes: 32 * 1024 * 1024,
+        ..Config::default()
     };
     let store = Store::open(&cfg.data_root).unwrap();
     let state = std::sync::Arc::new(AppState { config: cfg, store });

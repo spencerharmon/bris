@@ -97,6 +97,9 @@ android {
 
     testOptions {
         unitTests.isReturnDefaultValues = true
+        unitTests.all {
+            it.systemProperty("jna.library.path", rootProject.file("../target/debug").absolutePath)
+        }
     }
 
     signingConfigs {
@@ -172,6 +175,7 @@ dependencies {
 
     // JVM unit tests (run under Gradle's `test` task in CI).
     testImplementation("junit:junit:4.13.2")
+    testImplementation("net.java.dev.jna:jna:5.14.0")
     testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.8.1")
     // android.jar ships org.json as stubs ("Stub!" at runtime);
     // JVM unit tests need the real implementation.

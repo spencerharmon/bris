@@ -37,8 +37,8 @@ build.
 
 ## Configuration
 
-Nothing about the collector is compiled into the APK. Settings ->
-Debug mode -> on reveals a **Collector** section:
+Nothing about the collector is compiled into the APK. Settings has a
+**Collector** section, independent of Debug mode:
 
 - **Base URL** and **Token** (masked), persisted in an app-private
   DataStore (`bris_collector`; app backup is disabled).
@@ -48,21 +48,42 @@ Debug mode -> on reveals a **Collector** section:
   upload (with the `X-Bris-Device-Uuid` header); a 401/403 means
   the token is not an enrollment token and it is used as-is.
   Changing URL or token drops a previously-issued device token.
+- **Automatic upload**, persisted and OFF by default, silently uploads each
+  completed capture when ON. No review or Debug prerequisite. URL and token
+  are required to send; errors remain in Settings, never a prompt.
+  Without credentials, completed bundles stay queued locally until configured.
 - Queue status (pending / rejected) and the last upload error.
 
 ## Uploading a capture
 
-Sight log -> open a capture -> **Submit to collector...** (Debug
+Sight log -> session capture -> **Submit to collector...** (Debug
 mode only) shows the one-screen pre-upload review produced by
 `Submitter.review`. Nothing is queued until **Approve & upload**
-(`Submitter.approve_and_enqueue`); a network-constrained,
+(`Submitter.approve_scoped`); a network-constrained,
 exponential-backoff WorkManager job (`FlushWorker`) then flushes
 the durable queue under `files/submission-queue/`, retrying
 while entries remain pending. **Upload now** in Settings
 re-schedules the flush.
 
+Automatic completion uses `Submitter.enqueue_automatic` on that same bundle
+and queue, including zero-frame/no-fix captures. Debug affects retained frames
+and GPS truth, not automatic-upload authorization. Neither path derives AP
+from GPS truth. Changing destination/credentials invalidates pending approvals;
+old queued data is never redirected to the new collector. Turning automatic
+upload OFF cancels its pending and in-flight native HTTP; Debug OFF cancels only
+manual work. Revoked entries appear in rejected counts and cannot be revived by
+toggling back on. Data already received by the collector cannot be recalled.
+
+Registration is serialized and generation-checked so delayed responses cannot
+install credentials for a superseded destination. Entered device tokens also
+carry the installation UUID. Native drains serialize across queue handles;
+WorkManager cancellation reaches the HTTP future instead of abandoning a
+blocking thread. App restart restores scopes and schedules pending work.
+
 ## Tests
 
 `./gradlew testDebugUnitTest` runs JVM unit tests only; the
 Android cross-compile (`cargo ndk`) is attached to the jniLibs
-merge, so unit tests need only a host Rust toolchain.
+merge. Native upload integration tests use host JNA and the host Rust library,
+including actual recorder stop/timeout, canonical session review, HTTP retries
+after DataStore reopen, and blocked-request cancellation.

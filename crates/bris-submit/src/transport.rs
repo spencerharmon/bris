@@ -4,8 +4,8 @@
 //! The [`Transport`] trait is the seam between this crate's
 //! transport-agnostic logic (payload building, the operator
 //! gate, the retry queue) and the actual bytes-on-the-wire. It
-//! takes ONLY a [`ReviewedSubmission`], so no transport can ever
-//! send an unreviewed submission.
+//! retains the reviewed CLI API. Scoped automatic uploads use the same
+//! encoder and HTTP implementation, gated by the queue's authorization.
 //!
 //! [`CollectorEndpoint`] carries the two RUNTIME config values —
 //! the collector base URL and the bearer token — that must never
@@ -99,6 +99,9 @@ pub struct SubmissionOutcome {
 /// failures so the queue knows whether to re-try.
 #[derive(Debug, thiserror::Error)]
 pub enum TransportError {
+    /// The actual HTTP future was dropped; this is not a failed attempt.
+    #[error("upload cancelled")]
+    Cancelled,
     /// The request never reached a decision (DNS, connect,
     /// timeout, TLS, 5xx). The queue SHOULD retry.
     #[error("transient transport error (retryable): {0}")]
@@ -153,7 +156,10 @@ const BOUNDARY: &str = "----bris-submit-boundary-b8f1c2a4d6e09371";
 /// contains the multipart boundary (astronomically unlikely;
 /// surfaced rather than silently corrupting the stream).
 pub fn encode_multipart(submission: &ReviewedSubmission) -> Result<Vec<u8>, TransportError> {
-    let s = &submission.submission;
+    encode_submission(&submission.submission)
+}
+
+fn encode_submission(s: &crate::Submission) -> Result<Vec<u8>, TransportError> {
     let manifest_json = serde_json::to_vec(&s.manifest).map_err(|e| TransportError::Permanent {
         status: 0,
         message: format!("manifest serialize: {e}"),
@@ -278,20 +284,16 @@ pub fn media_matches_parts(submission: &ReviewedSubmission) -> bool {
 #[cfg(feature = "http")]
 mod http_impl {
     use super::{
-        encode_multipart, multipart_content_type, CollectorEndpoint, ReviewedSubmission,
+        encode_submission, multipart_content_type, CollectorEndpoint, ReviewedSubmission,
         SubmissionOutcome, Transport, TransportError,
     };
+    use crate::authorization::Cancellation;
 
-    /// A blocking HTTPS transport built on `ureq` (rustls TLS).
-    ///
-    /// Suitable for the CLI (`bris submit`) and for a
-    /// synchronous on-device caller. The Android shell may
-    /// instead implement [`Transport`] over its own coroutine
-    /// HTTP stack; this is the reference implementation.
+    /// Synchronous HTTPS API driving cancellable async I/O with rustls.
+    /// Runtime callers use a joined worker so the synchronous API remains usable.
     #[derive(Debug)]
     pub struct HttpTransport {
         endpoint: CollectorEndpoint,
-        agent: ureq::Agent,
     }
 
     impl HttpTransport {
@@ -299,11 +301,117 @@ mod http_impl {
         /// timeout profile.
         #[must_use]
         pub fn new(endpoint: CollectorEndpoint) -> Self {
-            let agent = ureq::AgentBuilder::new()
-                .timeout_connect(std::time::Duration::from_secs(15))
-                .timeout(std::time::Duration::from_secs(120))
-                .build();
-            Self { endpoint, agent }
+            Self { endpoint }
+        }
+
+        /// Validate config and hash the destination, credential, and device identity.
+        /// Only the hash is persisted; bearer credentials never enter queue state.
+        pub(crate) fn fingerprint(&self) -> Result<String, crate::QueueError> {
+            use sha2::{Digest, Sha256};
+            let url = reqwest::Url::parse(&self.endpoint.submissions_url())
+                .map_err(|_| crate::QueueError::Unauthorized)?;
+            if !matches!(url.scheme(), "http" | "https")
+                || url.host_str().is_none()
+                || !url.username().is_empty()
+                || url.password().is_some()
+                || url.query().is_some()
+                || url.fragment().is_some()
+                || self.endpoint.bearer_token.trim().is_empty()
+                || self
+                    .endpoint
+                    .device_uuid
+                    .as_ref()
+                    .is_some_and(|s| s.trim().is_empty())
+            {
+                return Err(crate::QueueError::Unauthorized);
+            }
+            reqwest::header::HeaderValue::from_str(&format!(
+                "Bearer {}",
+                self.endpoint.bearer_token
+            ))
+            .map_err(|_| crate::QueueError::Unauthorized)?;
+            if let Some(uuid) = &self.endpoint.device_uuid {
+                reqwest::header::HeaderValue::from_str(uuid)
+                    .map_err(|_| crate::QueueError::Unauthorized)?;
+            }
+            let bytes = serde_json::to_vec(&(
+                url.as_str(),
+                &self.endpoint.bearer_token,
+                &self.endpoint.device_uuid,
+            ))?;
+            Ok(hex::encode(Sha256::digest(bytes)))
+        }
+
+        pub(crate) fn send_cancellable(
+            &self,
+            submission: &crate::Submission,
+            cancellation: &Cancellation,
+        ) -> Result<SubmissionOutcome, TransportError> {
+            if cancellation.is_cancelled() {
+                return Err(TransportError::Cancelled);
+            }
+            self.fingerprint().map_err(|_| TransportError::Permanent {
+                status: 0,
+                message: "invalid collector endpoint".into(),
+            })?;
+            if tokio::runtime::Handle::try_current().is_ok() {
+                // Preserve the existing synchronous transport API for callers
+                // already inside a runtime. Join, never detach, the I/O owner.
+                return std::thread::scope(|scope| {
+                    scope
+                        .spawn(|| self.send_cancellable(submission, cancellation))
+                        .join()
+                        .map_err(|_| TransportError::Transient("HTTP worker panicked".into()))?
+                });
+            }
+            let body = encode_submission(submission)?;
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(|e| TransportError::Transient(format!("HTTP runtime: {e}")))?;
+            runtime.block_on(async {
+                // This runtime owns the connection tasks too. Returning from the
+                // select drops the request AND runtime, not a detached HTTP thread.
+                tokio::select! {
+                    biased;
+                    () = cancellation.cancelled() => Err(TransportError::Cancelled),
+                    result = async {
+                        let client = reqwest::Client::builder()
+                            .redirect(reqwest::redirect::Policy::none())
+                            .connect_timeout(std::time::Duration::from_secs(15))
+                            .timeout(std::time::Duration::from_secs(120))
+                            .build()
+                            .map_err(|_| TransportError::Transient("HTTP client setup failed".into()))?;
+                        let mut request = client.post(self.endpoint.submissions_url())
+                            .bearer_auth(&self.endpoint.bearer_token)
+                            .header("Content-Type", multipart_content_type())
+                            .body(body);
+                        if let Some(uuid) = &self.endpoint.device_uuid {
+                            request = request.header("X-Bris-Device-Uuid", uuid);
+                        }
+                        let response = request.send().await
+                            .map_err(|_| TransportError::Transient("HTTP request failed".into()))?;
+                        let status = response.status();
+                        let bytes = response.bytes().await
+                            .map_err(|_| TransportError::Transient("HTTP response read failed".into()))?;
+                        if status.is_success() {
+                            let parsed: SubmissionAccepted = serde_json::from_slice(&bytes)
+                                .map_err(|_| TransportError::Transient("invalid acceptance response".into()))?;
+                            if parsed.id.is_empty() {
+                                return Err(TransportError::Transient("empty collector id".into()));
+                            }
+                            Ok(SubmissionOutcome { id: parsed.id })
+                        } else if status.is_server_error() || status.as_u16() == 429 {
+                            Err(TransportError::Transient(format!("collector returned {status}")))
+                        } else {
+                            Err(TransportError::Permanent {
+                                status: status.as_u16(),
+                                message: "collector rejected submission (redirects disabled)".into(),
+                            })
+                        }
+                    } => result,
+                }
+            })
         }
     }
 
@@ -312,57 +420,7 @@ mod http_impl {
             &self,
             submission: &ReviewedSubmission,
         ) -> Result<SubmissionOutcome, TransportError> {
-            let body = encode_multipart(submission)?;
-            let url = self.endpoint.submissions_url();
-            let mut req = self
-                .agent
-                .post(&url)
-                .set(
-                    "Authorization",
-                    &format!("Bearer {}", self.endpoint.bearer_token),
-                )
-                .set("Content-Type", &multipart_content_type());
-            // A per-device token is meaningless to the collector
-            // without the device UUID it was minted for (see
-            // `bris_collector::auth::device_or_admin_bearer`) —
-            // omitting this header is exactly why a per-device
-            // submission over this transport used to 401 even
-            // with a correct token.
-            if let Some(device_uuid) = &self.endpoint.device_uuid {
-                req = req.set("X-Bris-Device-Uuid", device_uuid);
-            }
-            let resp = req.send_bytes(&body);
-            match resp {
-                Ok(response) => {
-                    let text = response
-                        .into_string()
-                        .map_err(|e| TransportError::Transient(format!("read body: {e}")))?;
-                    let parsed: SubmissionAccepted =
-                        serde_json::from_str(&text).map_err(|e| TransportError::Permanent {
-                            status: 200,
-                            message: format!("unparseable accept body: {e}: {text}"),
-                        })?;
-                    Ok(SubmissionOutcome { id: parsed.id })
-                }
-                Err(ureq::Error::Status(code, response)) => {
-                    let message = response.into_string().unwrap_or_default();
-                    // 4xx is a definitive rejection; 5xx / 429 are
-                    // retryable.
-                    if (400..500).contains(&code) && code != 429 {
-                        Err(TransportError::Permanent {
-                            status: code,
-                            message,
-                        })
-                    } else {
-                        Err(TransportError::Transient(format!(
-                            "collector returned {code}: {message}"
-                        )))
-                    }
-                }
-                Err(ureq::Error::Transport(t)) => {
-                    Err(TransportError::Transient(format!("transport: {t}")))
-                }
-            }
+            self.send_cancellable(&submission.submission, &Cancellation::default())
         }
     }
 

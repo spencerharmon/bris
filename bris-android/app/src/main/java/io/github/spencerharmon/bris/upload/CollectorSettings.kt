@@ -2,6 +2,7 @@ package io.github.spencerharmon.bris.upload
 
 import androidx.datastore.core.DataStore
 import androidx.datastore.preferences.core.Preferences
+import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.stringPreferencesKey
 import kotlinx.coroutines.flow.Flow
@@ -28,7 +29,15 @@ data class CollectorSettings(
     val enteredToken: String = "",
     val deviceToken: String? = null,
     val lastError: String? = null,
+    val automaticUpload: Boolean = false,
+    val debugMode: Boolean = false,
+    val configGeneration: String = "0",
+    val manualEpoch: String = "0",
+    val automaticEpoch: String = "0",
 ) {
+    val manualScope: String? get() = if (debugMode && configured) "manual:$configGeneration:$manualEpoch" else null
+    // The opt-in alone authorizes local queueing, even before first configuration.
+    val automaticScope: String? get() = if (automaticUpload) "automatic:$automaticEpoch" else null
     val registered: Boolean get() = !deviceToken.isNullOrBlank()
 
     val configured: Boolean
@@ -40,7 +49,7 @@ data class CollectorSettings(
         return if (registered) {
             CollectorEndpointConfig(baseUrl, deviceToken!!, deviceUuid)
         } else {
-            CollectorEndpointConfig(baseUrl, enteredToken, null)
+            CollectorEndpointConfig(baseUrl, enteredToken, deviceUuid)
         }
     }
 
@@ -78,6 +87,7 @@ fun normalizeBaseUrl(raw: String): String? {
     val scheme = uri.scheme?.lowercase() ?: return null
     if (scheme != "http" && scheme != "https") return null
     if (uri.host.isNullOrBlank()) return null
+    if (uri.rawUserInfo != null || uri.rawQuery != null || uri.rawFragment != null) return null
     return trimmed
 }
 
@@ -89,45 +99,43 @@ fun normalizeBaseUrl(raw: String): String? {
  */
 class CollectorSettingsStore(private val store: DataStore<Preferences>) {
 
-    val flow: Flow<CollectorSettings> = store.data.map { p ->
-        CollectorSettings(
+    val flow: Flow<CollectorSettings> = store.data.map(::decode)
+
+    private fun decode(p: Preferences) = CollectorSettings(
             baseUrl = p[KEY_URL] ?: "",
             enteredToken = p[KEY_TOKEN] ?: "",
             deviceToken = p[KEY_DEVICE_TOKEN],
             lastError = p[KEY_LAST_ERROR],
+            automaticUpload = p[KEY_AUTOMATIC] ?: false,
+            debugMode = p[KEY_DEBUG] ?: false,
+            configGeneration = p[KEY_GENERATION] ?: "0",
+            manualEpoch = p[KEY_MANUAL_EPOCH] ?: "0",
+            automaticEpoch = p[KEY_AUTOMATIC_EPOCH] ?: "0",
         )
-    }
 
     suspend fun current(): CollectorSettings = flow.first()
 
-    /**
-     * Save URL + entered token. Changing either invalidates any
-     * previously-issued per-device token (it belongs to the old
-     * collector / enrollment).
-     *
-     * @throws IllegalArgumentException on an invalid URL.
-     */
-    suspend fun save(baseUrl: String, token: String) {
-        val url = requireNotNull(normalizeBaseUrl(baseUrl)) { "invalid collector URL: $baseUrl" }
-        val tok = token.trim()
+    // Only the coordinator writes authorization. Its mutation lock also covers
+    // native configureUploads, so a stale drain cannot restore revoked scopes.
+    internal suspend fun update(
+        beforePersist: (CollectorSettings) -> Unit = {},
+        transform: (CollectorSettings) -> CollectorSettings,
+    ): CollectorSettings {
+        lateinit var result: CollectorSettings
         store.edit { p ->
-            val changed = p[KEY_URL] != url || p[KEY_TOKEN] != tok
-            p[KEY_URL] = url
-            p[KEY_TOKEN] = tok
-            if (changed) p.remove(KEY_DEVICE_TOKEN)
+            result = transform(decode(p))
+            beforePersist(result)
+            p[KEY_URL] = result.baseUrl
+            p[KEY_TOKEN] = result.enteredToken
+            result.deviceToken?.let { p[KEY_DEVICE_TOKEN] = it } ?: p.remove(KEY_DEVICE_TOKEN)
+            result.lastError?.let { p[KEY_LAST_ERROR] = it } ?: p.remove(KEY_LAST_ERROR)
+            p[KEY_AUTOMATIC] = result.automaticUpload
+            p[KEY_DEBUG] = result.debugMode
+            p[KEY_GENERATION] = result.configGeneration
+            p[KEY_MANUAL_EPOCH] = result.manualEpoch
+            p[KEY_AUTOMATIC_EPOCH] = result.automaticEpoch
         }
-    }
-
-    suspend fun setDeviceToken(token: String) {
-        store.edit { it[KEY_DEVICE_TOKEN] = token }
-    }
-
-    suspend fun setLastError(error: String?) {
-        store.edit { if (error == null) it.remove(KEY_LAST_ERROR) else it[KEY_LAST_ERROR] = error }
-    }
-
-    suspend fun clear() {
-        store.edit { it.clear() }
+        return result
     }
 
     private companion object {
@@ -135,5 +143,10 @@ class CollectorSettingsStore(private val store: DataStore<Preferences>) {
         val KEY_TOKEN = stringPreferencesKey("collector_entered_token")
         val KEY_DEVICE_TOKEN = stringPreferencesKey("collector_device_token")
         val KEY_LAST_ERROR = stringPreferencesKey("collector_last_error")
+        val KEY_AUTOMATIC = booleanPreferencesKey("collector_automatic_upload")
+        val KEY_DEBUG = booleanPreferencesKey("collector_manual_debug")
+        val KEY_GENERATION = stringPreferencesKey("collector_config_generation")
+        val KEY_MANUAL_EPOCH = stringPreferencesKey("collector_manual_epoch")
+        val KEY_AUTOMATIC_EPOCH = stringPreferencesKey("collector_automatic_epoch")
     }
 }

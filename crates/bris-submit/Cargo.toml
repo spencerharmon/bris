@@ -10,13 +10,13 @@ license.workspace = true
 repository.workspace = true
 
 [features]
-# `http` pulls in the blocking ureq client that turns a built
+# `http` pulls in the cancellable HTTP client that turns a built
 # multipart payload into a real HTTPS POST. Off by default so a
 # consumer that supplies its own transport (e.g. the Android
 # shell, which does networking on the Kotlin side) links no HTTP
 # stack. bris-cli turns it on.
 default = []
-http = ["dep:ureq"]
+http = ["dep:reqwest"]
 
 [dependencies]
 thiserror = { workspace = true }
@@ -30,10 +30,10 @@ ulid = "1"
 
 bris-bundle = { workspace = true }
 
-# Blocking HTTP client for the on-device POST path. rustls TLS
-# (no OpenSSL system dep), MIT/Apache — cargo-deny clean. Only
-# linked under the `http` feature.
-ureq = { version = "2", default-features = false, features = ["tls", "gzip"], optional = true }
+# Async I/O is driven behind a synchronous API so cancellation drops
+# the actual request future, rather than abandoning a blocking thread.
+tokio = { version = "1", features = ["rt", "sync", "macros", "net", "time"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"], optional = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

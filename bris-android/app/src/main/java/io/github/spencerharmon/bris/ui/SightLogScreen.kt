@@ -51,6 +51,7 @@ fun SightLogScreen(
     onBack: () -> Unit,
     onOpen: (String) -> Unit,
     engine: EngineWrapper? = null,
+    onSubmit: ((String) -> Unit)? = null,
 ) {
     val context = LocalContext.current
     val sightLog = remember(context) { SightLog.forApp(context) }
@@ -127,6 +128,11 @@ fun SightLogScreen(
                                 "  • ${cap.id.take(13)}…  ($kindLabel)",
                                 style = androidx.compose.material3.MaterialTheme.typography.bodySmall,
                             )
+                            if (onSubmit != null && cap.kind == CaptureCatalog.CaptureKind.Bundle) {
+                                OutlinedButton(onClick = { onSubmit(cap.dir.absolutePath) }) {
+                                    Text("Submit to collector...")
+                                }
+                            }
                         }
                         HorizontalDivider(modifier = Modifier.padding(top = 4.dp))
                     }

@@ -150,6 +150,13 @@ pub fn build_submission(
     let bundle_json_path = bundle_dir.join("bundle.json");
     let bundle_bytes = read_bytes(&bundle_json_path)?;
     let bundle: BundleManifest = serde_json::from_slice(&bundle_bytes)?;
+    if bundle.schema_version != bris_bundle::SCHEMA_VERSION {
+        return Err(bris_bundle::BundleError::UnsupportedSchema {
+            found: bundle.schema_version,
+            supported: bris_bundle::SCHEMA_VERSION,
+        }
+        .into());
+    }
 
     let mut parts: Vec<SubmissionPart> = Vec::new();
     let mut media: Vec<MediaItem> = Vec::new();
@@ -235,9 +242,16 @@ pub fn build_submission(
         }
     }
 
-    if frames.is_empty() && !has_calibration {
+    // Debug-off captures with no fix legitimately retain no frames. A
+    // completed manifest plus its narrative is still useful diagnostic data.
+    if frames.is_empty()
+        && !has_calibration
+        && (bundle.capture.frame_count != 0
+            || bundle.capture.ended_unix_ms < bundle.capture.started_unix_ms
+            || !parts.iter().any(|p| p.role == "pbris_log"))
+    {
         return Err(SubmitError::Invalid(format!(
-            "bundle {} has no frames and no calibration artifacts to submit",
+            "bundle {} has no frames and is not a completed zero-frame capture with a log",
             bundle_dir.display()
         )));
     }

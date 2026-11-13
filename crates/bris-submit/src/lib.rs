@@ -12,19 +12,13 @@
 //!
 //! # The non-negotiable invariants
 //!
-//! Bris does **no automatic network calls** ([`AGENTS.md`] hard
-//! rule). This crate is the one network surface, and it upholds
-//! the rule structurally:
+//! Manual approval and explicit automatic-upload opt-in share one payload
+//! builder and durable queue:
 //!
-//! 1. **Every submission is an explicit operator action.** There
-//!    is no code path that POSTs without a caller first
-//!    constructing a [`SubmissionReview`] (the one-screen
-//!    pre-upload review) and calling
-//!    [`SubmissionReview::approve`]. A [`ReviewedSubmission`] —
-//!    the *only* type any transport accepts — cannot be built
-//!    except through that approval. There is no timer, no
-//!    background poll, no "submit on capture" hook anywhere in
-//!    this crate.
+//! 1. **Every submission is authorized.** Manual submissions require
+//!    [`SubmissionReview::approve`]. Automatic submissions require an active
+//!    automatic scope configured by the platform's default-off toggle. Scoped
+//!    queues revoke old generations and cancel their in-flight HTTP requests.
 //! 2. **The manifest sent is the SAME [`BundleManifest`] the
 //!    engine ran against.** [`build_submission`] reads the
 //!    capture's on-disk `bundle.json` and ships it *verbatim* as
@@ -55,6 +49,7 @@
 //! [`AGENTS.md`]: https://github.com/anomalyco/bris
 //! [`BundleManifest`]: bris_bundle::BundleManifest
 
+pub mod authorization;
 pub mod manifest;
 pub mod payload;
 pub mod queue;
@@ -72,8 +67,7 @@ use std::path::PathBuf;
 
 /// A fully-built, not-yet-approved submission: the manifest plus
 /// every part (each with its role, bytes, and SHA-256). It is
-/// inert — it carries no transport and cannot be sent until it
-/// passes through the operator gate ([`SubmissionReview`]).
+/// inert until manually reviewed or enqueued under an authorized automatic scope.
 #[derive(Debug, Clone)]
 pub struct Submission {
     /// The submission manifest (the `manifest` multipart part).

@@ -6,7 +6,7 @@ import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import kotlinx.coroutines.flow.Flow
-import kotlinx.coroutines.flow.first
+import io.github.spencerharmon.bris.upload.Upload
 import kotlinx.coroutines.flow.map
 import java.util.UUID
 
@@ -52,6 +52,11 @@ class Prefs(private val context: Context) {
     val activeSessionIdFlow: Flow<String?> = context.dataStore.data.map { it[KEY_ACTIVE_SESSION_ID] }
 
     suspend fun setDebugMode(enabled: Boolean) {
+        Upload.setDebugMode(context, enabled)
+    }
+
+    /** Runtime calls this only after synchronously revoking manual uploads. */
+    internal suspend fun persistDebugMode(enabled: Boolean) {
         context.dataStore.edit { it[KEY_DEBUG_MODE] = enabled }
     }
 
@@ -78,11 +83,10 @@ class Prefs(private val context: Context) {
 
     /** Get or lazily generate the per-install device UUID. */
     suspend fun deviceUuid(): String {
-        val current = context.dataStore.data.map { it[KEY_DEVICE_UUID] }.first()
-        if (current != null) return current
-        val fresh = UUID.randomUUID().toString()
-        context.dataStore.edit { it[KEY_DEVICE_UUID] = fresh }
-        return fresh
+        val saved = context.dataStore.edit {
+            if (it[KEY_DEVICE_UUID] == null) it[KEY_DEVICE_UUID] = UUID.randomUUID().toString()
+        }
+        return checkNotNull(saved[KEY_DEVICE_UUID])
     }
 
     companion object {

@@ -15,6 +15,7 @@ import uniffi.bris_ffi.version as brisFfiVersion
 class FfiSubmitterPort(
     queueRoot: File,
     private val deviceUuid: String,
+    private val submissionSource: ((String?) -> FfiSubmissionSource)? = null,
 ) : SubmitterPort {
     private val submitter = Submitter.open(queueRoot.absolutePath)
 
@@ -23,25 +24,33 @@ class FfiSubmitterPort(
         override val lines: List<ReviewLine> = ffi.lines().map { ReviewLine(it.label, it.value) }
     }
 
-    override fun review(bundleDir: String, note: String?): PendingReview {
-        val source = FfiSubmissionSource(
+    private fun source(note: String?) = submissionSource?.invoke(note) ?: FfiSubmissionSource(
             deviceUuid = deviceUuid,
-            deviceModel = Build.MODEL ?: "unknown",
+            deviceModel = checkNotNull(Build.MODEL),
             deviceOs = "Android ${Build.VERSION.RELEASE} (API ${Build.VERSION.SDK_INT})",
             appVersion = BuildConfig.BRIS_APP_VERSION,
-            brisCoreVersion = runCatching { brisFfiVersion().brisFfi }.getOrDefault("unknown"),
+            brisCoreVersion = brisFfiVersion().brisFfi,
             brisDataVersion = null,
             note = note,
         )
-        return Wrapped(submitter.review(bundleDir, source, null))
-    }
+    override fun review(bundleDir: String, note: String?): PendingReview =
+        Wrapped(submitter.review(bundleDir, source(note), null))
 
-    override fun approveAndEnqueue(review: PendingReview): String =
-        submitter.approveAndEnqueue((review as Wrapped).ffi)
+    override fun configureUploads(manualScope: String?, automaticScope: String?) =
+        submitter.configureUploads(manualScope, automaticScope)
 
-    override fun flush(endpoint: CollectorEndpointConfig): List<FlushOutcome> =
-        submitter.flush(
+    override fun approveScoped(review: PendingReview, scope: String): String =
+        submitter.approveScoped((review as Wrapped).ffi, scope)
+
+    override fun enqueueAutomatic(bundleDir: String, scope: String): String =
+        submitter.enqueueAutomatic(bundleDir, source(null), scope)
+
+    override fun cancelFlush() = submitter.cancelFlush()
+
+    override fun flushScoped(endpoint: CollectorEndpointConfig, scope: String, automatic: Boolean): List<FlushOutcome> =
+        submitter.flushScoped(
             FfiCollectorEndpoint(endpoint.baseUrl, endpoint.bearerToken, endpoint.deviceUuid),
+            scope, automatic,
         ).map {
             when (it) {
                 is FfiFlushOutcome.Sent -> FlushOutcome.Sent(it.queueId, it.collectorId)

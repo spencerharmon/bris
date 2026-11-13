@@ -91,6 +91,7 @@ class CaptureRecorder(
     private val appVersion: String,
     private val coreVersionProvider: () -> String,
     private val onCaptureSaved: ((String) -> Unit)? = null,
+    private val onBundleCompleted: (suspend (java.io.File) -> Unit)? = null,
     /**
      * Returns the on-disk directory the capture's bundle
      * payload should be written to. The recorder writes
@@ -118,6 +119,7 @@ class CaptureRecorder(
     val status: StateFlow<CaptureStatus> = _status.asStateFlow()
 
     private var captureJob: Job? = null
+    private val finalizing = java.util.concurrent.atomic.AtomicBoolean(false)
     private var bestFix: FfiPublishedFix? = null
     private var bestVerdict: FixVerdict = FixVerdict.RED
     private var pbrisLines: MutableList<String> = mutableListOf()
@@ -185,6 +187,7 @@ class CaptureRecorder(
             return captureId
         }
         captureId = ulid()
+        finalizing.set(false)
         captureStartedAtMs = System.currentTimeMillis()
         bestFix = null
         bestVerdict = FixVerdict.RED
@@ -295,6 +298,8 @@ class CaptureRecorder(
         // _status as we go, then null captureJob at the end.
         val job = captureJob ?: return
         if (!job.isActive) return
+        if (_status.value !is CaptureStatus.Capturing) return
+        if (!finalizing.compareAndSet(false, true)) return
         _status.value = CaptureStatus.Saving
 
         val outcome: CaptureOutcome = bestFix?.let { fix ->
@@ -379,6 +384,9 @@ class CaptureRecorder(
             if (writer != null && dir != null) {
                 writer.close()
                 frameWriter = null
+                java.io.File(dir, "pbris.log").writeText(
+                    pbrisLines.joinToString("\n", postfix = if (pbrisLines.isEmpty()) "" else "\n"),
+                )
                 val inputs = bundleInputsProvider?.invoke()
                 if (inputs != null) {
                     val rotated = firstFrameRotationDeg?.let { rot ->
@@ -395,12 +403,13 @@ class CaptureRecorder(
                         firstFrameWidth = writer.firstFrameWidth(),
                         firstFrameHeight = writer.firstFrameHeight(),
                     )
-                    DebugBundleWriter.write(
+                    check(DebugBundleWriter.write(
                         bundleDir = dir,
                         bundleId = captureId,
                         snapshot = snap,
                         inputs = rotated,
-                    )
+                    )) { "capture bundle manifest could not be written" }
+                    onBundleCompleted?.invoke(dir)
                 }
             }
 

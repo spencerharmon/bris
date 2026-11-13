@@ -52,6 +52,16 @@ class MainActivity : ComponentActivity() {
                     val debugMode by prefs.debugModeFlow.collectAsState(initial = false)
                     val selectedLensId by prefs.selectedLensIdFlow.collectAsState(initial = null)
                     val context = androidx.compose.ui.platform.LocalContext.current
+                    androidx.compose.runtime.LaunchedEffect(Unit) {
+                        try {
+                            io.github.spencerharmon.bris.upload.Upload.coordinator(context)
+                        } catch (e: Exception) {
+                            if (e is kotlinx.coroutines.CancellationException) throw e
+                            io.github.spencerharmon.bris.upload.Upload.settings(context).update {
+                                it.copy(lastError = "upload initialization failed (${e.javaClass.simpleName})")
+                            }
+                        }
+                    }
                     val defaultBackId = androidx.compose.runtime.remember(context) {
                         LensCatalog.defaultBackCameraId(context) ?: LensCatalog.FALLBACK_LENS_ID
                     }
@@ -105,6 +115,9 @@ class MainActivity : ComponentActivity() {
                                     nav.navigate("sight-log/$encoded")
                                 },
                                 engine = io.github.spencerharmon.bris.engine.SessionHolder.peek(),
+                                onSubmit = if (debugMode) {
+                                    { path -> nav.navigate("submit/" + URLEncoder.encode(path, "UTF-8")) }
+                                } else null,
                             )
                         }
                         composable("sight-log/{dir}") { backStack ->

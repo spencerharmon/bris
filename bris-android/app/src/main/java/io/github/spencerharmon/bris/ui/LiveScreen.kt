@@ -265,6 +265,9 @@ fun LiveScreen(
                 // walks them in chronological order.
                 activeSessionUuid?.let { sessionStore.appendCapture(it, captureId) }
             },
+            onBundleCompleted = { dir ->
+                io.github.spencerharmon.bris.upload.Upload.captureCompleted(context, dir)
+            },
             captureDirProvider = { capId ->
                 // Active session set → canonical path:
                 // <files>/sessions/<UUID>/captures/<capId>/

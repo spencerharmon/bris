@@ -42,4 +42,15 @@ class DeviceRegistrarTest {
         server.enqueue(MockResponse().setBody("{}"))
         assertTrue(DeviceRegistrar().register(base(), "e", "u") is RegistrationResult.Failed)
     }
+
+    @Test
+    fun refusesRedirectInsteadOfSendingCredentialsToAnotherDestination() {
+        val other = MockWebServer()
+        other.start()
+        try {
+            server.enqueue(MockResponse().setResponseCode(307).setHeader("Location", other.url("/v1/devices/register")))
+            assertTrue(DeviceRegistrar().register(base(), "enrollment", "uuid") is RegistrationResult.Failed)
+            assertEquals(0, other.requestCount)
+        } finally { other.shutdown() }
+    }
 }

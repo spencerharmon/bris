@@ -7,16 +7,10 @@
 //! UniFFI value/handle shapes and exposes them to the Android
 //! (Kotlin) shell.
 //!
-//! # Operator gate is preserved across the boundary
-//!
-//! Bris makes **no automatic network calls**. This surface keeps
-//! that structural: [`Submitter::review`] builds a review the
-//! Android shell renders on its one-screen pre-upload screen;
-//! only [`Submitter::approve_and_enqueue`], called in direct
-//! response to the operator's tap, persists the submission. And
-//! only [`Submitter::flush`] — again an explicit operator action
-//! ("Upload now") — POSTs. There is no timer, poll, or
-//! capture-time hook.
+//! Manual uploads require review. Toggle-authorized automatic uploads use
+//! the identical payload builder without manufacturing a manual approval.
+//! Both Android modes require explicit, independently revocable generations.
+//! The legacy reviewed API cannot flush scoped Android entries.
 //!
 //! # Runtime config, never compiled
 //!
@@ -27,7 +21,7 @@
 use std::sync::Arc;
 
 use bris_submit::review::SubmissionReview;
-use bris_submit::transport::{CollectorEndpoint, HttpTransport};
+use bris_submit::transport::CollectorEndpoint;
 use bris_submit::{build_submission, AttemptResult, SubmissionQueue, SubmissionSource};
 
 use crate::FfiError;
@@ -189,6 +183,92 @@ impl Submitter {
         Ok(Arc::new(Self { queue }))
     }
 
+    /// Configure shared upload authorization for this queue root. `None`
+    /// disables a mode. Supply opaque generations bound by Android to config
+    /// and mode epoch; never reuse a revoked generation. Revocation cancels
+    /// real HTTP immediately without waiting for an active drain to finish.
+    /// A process restart defaults to disabled until this method succeeds.
+    pub fn configure_uploads(
+        &self,
+        manual_scope: Option<String>,
+        automatic_scope: Option<String>,
+    ) -> Result<(), FfiError> {
+        self.queue
+            .configure_uploads(manual_scope, automatic_scope)
+            .map_err(|e| FfiError::Engine {
+                detail: format!("configure uploads: {e}"),
+            })
+    }
+
+    /// Consume explicit manual review under the current manual generation.
+    /// Returns the durable local queue id. Errors never enqueue unscoped work.
+    pub fn approve_scoped(
+        &self,
+        review: Arc<FfiSubmissionReview>,
+        scope: String,
+    ) -> Result<String, FfiError> {
+        let approved = review
+            .review
+            .lock()
+            .map_err(|_| FfiError::Engine {
+                detail: "review lock poisoned".into(),
+            })?
+            .take()
+            .ok_or_else(|| FfiError::InvalidArgument {
+                detail: "review already approved/consumed".into(),
+            })?
+            .approve();
+        self.queue
+            .enqueue_scoped(&approved, scope)
+            .map_err(|e| FfiError::Engine {
+                detail: format!("enqueue reviewed submission: {e}"),
+            })
+    }
+
+    /// Build the same BundleManifest payload and enqueue only under current
+    /// automatic-toggle authorization. No manual review and no network call.
+    pub fn enqueue_automatic(
+        &self,
+        bundle_dir: String,
+        source: FfiSubmissionSource,
+        scope: String,
+    ) -> Result<String, FfiError> {
+        let submission = build_submission(std::path::Path::new(&bundle_dir), &source.into(), None)
+            .map_err(|e| FfiError::InvalidArgument {
+                detail: format!("build submission: {e}"),
+            })?;
+        self.queue
+            .enqueue_automatic(&submission, scope)
+            .map_err(|e| FfiError::Engine {
+                detail: format!("enqueue automatic submission: {e}"),
+            })
+    }
+
+    /// Drain exactly one authorized mode/generation, serialized across all
+    /// Submitter instances sharing the root. Cancellation is an error, not a
+    /// failed attempt. Endpoint/token/UUID binding persists across restarts.
+    pub fn flush_scoped(
+        &self,
+        endpoint: FfiCollectorEndpoint,
+        scope: String,
+        automatic: bool,
+    ) -> Result<Vec<FfiFlushOutcome>, FfiError> {
+        self.queue
+            .flush_scoped(endpoint.into(), scope, automatic)
+            .map(|results| results.into_iter().map(Into::into).collect())
+            .map_err(|e| FfiError::Engine {
+                detail: format!("flush scoped queue: {e}"),
+            })
+    }
+
+    /// Cancel active and waiting drains immediately (WorkManager stop).
+    /// Still-authorized entries remain retryable without consuming an attempt.
+    pub fn cancel_flush(&self) -> Result<(), FfiError> {
+        self.queue.cancel_flush().map_err(|e| FfiError::Engine {
+            detail: format!("cancel flush: {e}"),
+        })
+    }
+
     /// Build a pre-upload review for a capture bundle. This does
     /// NO network activity and grants NO permission to upload —
     /// it only prepares what the operator must approve.
@@ -267,14 +347,9 @@ impl Submitter {
     /// failure is reflected per-entry in the outcomes, not as an
     /// error).
     pub fn flush(&self, endpoint: FfiCollectorEndpoint) -> Result<Vec<FfiFlushOutcome>, FfiError> {
-        let mut ep = CollectorEndpoint::new(endpoint.base_url, endpoint.bearer_token);
-        if let Some(uuid) = endpoint.device_uuid {
-            ep = ep.with_device_uuid(uuid);
-        }
-        let transport = HttpTransport::new(ep);
         let results = self
             .queue
-            .drain_once(&transport)
+            .flush(endpoint.into())
             .map_err(|e| FfiError::Engine {
                 detail: format!("flush queue: {e}"),
             })?;
@@ -300,5 +375,13 @@ impl Submitter {
         self.queue.dead_ids().map_err(|e| FfiError::Engine {
             detail: format!("list dead: {e}"),
         })
+    }
+}
+
+impl From<FfiCollectorEndpoint> for CollectorEndpoint {
+    fn from(endpoint: FfiCollectorEndpoint) -> Self {
+        let mut result = Self::new(endpoint.base_url, endpoint.bearer_token);
+        result.device_uuid = endpoint.device_uuid;
+        result
     }
 }

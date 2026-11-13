@@ -9,6 +9,8 @@ import java.io.IOException
 
 /** Result of a per-device registration attempt. */
 sealed interface RegistrationResult {
+    /** Settings changed while the request ran; no result was persisted. */
+    data object Superseded : RegistrationResult
     /** Collector issued a per-device token. */
     data class Registered(val deviceToken: String) : RegistrationResult {
         override fun toString() = "Registered(deviceToken=${maskToken(deviceToken)})"
@@ -32,7 +34,8 @@ sealed interface RegistrationResult {
  * operator-entered enrollment token; the issued per-device token
  * is then stored and used for every submission.
  */
-class DeviceRegistrar(private val client: OkHttpClient = OkHttpClient()) {
+class DeviceRegistrar(client: OkHttpClient = OkHttpClient()) {
+    private val client = client.newBuilder().followRedirects(false).followSslRedirects(false).build()
 
     fun register(baseUrl: String, enrollmentToken: String, deviceUuid: String): RegistrationResult {
         val body = JSONObject().put("device_uuid", deviceUuid).toString()
@@ -56,9 +59,9 @@ class DeviceRegistrar(private val client: OkHttpClient = OkHttpClient()) {
                 }
             }
         } catch (e: IOException) {
-            RegistrationResult.Failed("${e.javaClass.simpleName}: ${e.message}")
+            RegistrationResult.Failed("registration network failure (${e.javaClass.simpleName})")
         } catch (e: org.json.JSONException) {
-            RegistrationResult.Failed("bad register response: ${e.message}")
+            RegistrationResult.Failed("invalid registration response")
         }
     }
 }

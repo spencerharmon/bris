@@ -18,6 +18,12 @@ import java.io.File
 class CollectorSettingsStoreTest {
     @get:Rule val tmp = TemporaryFolder()
 
+    private fun coordinator(store: CollectorSettingsStore) = UploadCoordinator(
+        FakePort(), store,
+        registerDevice = { _, _, _ -> RegistrationResult.Registered("dev-tok") },
+        deviceUuid = { "uuid-1" },
+    )
+
     private fun <T> withStore(file: File, block: suspend (CollectorSettingsStore) -> T): T {
         // DataStore allows one active instance per file: join the
         // scope so the next instance in the same test may open it.
@@ -39,6 +45,8 @@ class CollectorSettingsStoreTest {
             assertEquals("", c.baseUrl)
             assertEquals("", c.enteredToken)
             assertFalse(c.configured)
+            assertFalse(c.automaticUpload)
+            assertFalse(c.debugMode)
             assertNull(c.endpoint("dev"))
         }
     }
@@ -46,12 +54,22 @@ class CollectorSettingsStoreTest {
     @Test
     fun persistsAcrossStoreInstances() {
         val f = File(tmp.root, "b.preferences_pb")
-        withStore(f) { it.save("https://collector.example.com/", "enroll-tok"); it.setDeviceToken("dev-tok") }
+        var saved: CollectorSettings? = null
+        withStore(f) {
+            val c = coordinator(it)
+            c.saveSettings("https://collector.example.com/", "enroll-tok")
+            c.register()
+            c.setAutomaticUpload(true)
+            c.setDebugMode(true)
+            saved = it.current()
+        }
         withStore(f) { s ->
             val c = s.current()
             assertEquals("https://collector.example.com", c.baseUrl)
             assertEquals("enroll-tok", c.enteredToken)
             assertTrue(c.registered)
+            assertTrue(c.automaticUpload)
+            assertEquals(saved, c)
             assertEquals(CollectorEndpointConfig("https://collector.example.com", "dev-tok", "uuid-1"), c.endpoint("uuid-1"))
         }
     }
@@ -60,20 +78,23 @@ class CollectorSettingsStoreTest {
     fun changingTokenInvalidatesDeviceToken() {
         val f = File(tmp.root, "c.preferences_pb")
         withStore(f) { s ->
-            s.save("https://collector.example.com", "t1")
-            s.setDeviceToken("dev")
-            s.save("https://collector.example.com", "t1")
+            val coordinator = coordinator(s)
+            coordinator.saveSettings("https://collector.example.com", "t1")
+            coordinator.register()
+            val generation = s.current().configGeneration
+            coordinator.saveSettings("https://collector.example.com", "t1")
             assertTrue(s.current().registered)
-            s.save("https://collector.example.com", "t2")
+            assertEquals(generation, s.current().configGeneration)
+            coordinator.saveSettings("https://collector.example.com", "t2")
             val c = s.current()
             assertFalse(c.registered)
-            assertEquals(CollectorEndpointConfig("https://collector.example.com", "t2", null), c.endpoint("u"))
+            assertEquals(CollectorEndpointConfig("https://collector.example.com", "t2", "u"), c.endpoint("u"))
         }
     }
 
     @Test(expected = IllegalArgumentException::class)
     fun rejectsInvalidUrl() {
-        withStore(File(tmp.root, "d.preferences_pb")) { it.save("ftp://x", "t") }
+        withStore(File(tmp.root, "d.preferences_pb")) { coordinator(it).saveSettings("ftp://x", "t") }
     }
 
     @Test
