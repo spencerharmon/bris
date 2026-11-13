@@ -68,6 +68,7 @@ import io.github.spencerharmon.bris.engine.CaptureStatus
 import io.github.spencerharmon.bris.engine.SightLog
 import io.github.spencerharmon.bris.engine.resolveCalibration
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
@@ -182,7 +183,14 @@ fun LiveScreen(
     val sessionStore = remember(context) {
         io.github.spencerharmon.bris.engine.SessionStore.forApp(context)
     }
-    val activeSessionId by prefs.activeSessionIdFlow.collectAsState(initial = null)
+    var activeSessionId by remember { mutableStateOf<String?>(null) }
+    var sessionLoaded by remember { mutableStateOf(false) }
+    LaunchedEffect(prefs) {
+        prefs.activeSessionIdFlow.collect {
+            activeSessionId = it
+            sessionLoaded = true
+        }
+    }
     val activeSessionUuid = activeSessionId?.let {
         runCatching { java.util.UUID.fromString(it) }.getOrNull()
     }
@@ -334,6 +342,37 @@ fun LiveScreen(
     val captureActive = captureStatus is CaptureStatus.Capturing ||
         captureStatus is CaptureStatus.Saving
     val snackbarHost = remember { SnackbarHostState() }
+    var startRequested by remember { mutableStateOf(false) }
+    var startError by remember { mutableStateOf<String?>(null) }
+    LaunchedEffect(startError) {
+        startError?.let { snackbarHost.showSnackbar(it) }
+        startError = null
+    }
+    LaunchedEffect(startRequested, activeSessionUuid, recorder) {
+        if (!startRequested) return@LaunchedEffect
+        try {
+            if (activeSessionUuid == null) {
+                val session = io.github.spencerharmon.bris.engine.Session.new(
+                    "Untitled " + java.time.format.DateTimeFormatter
+                        .ofPattern("yyyy-MM-dd HH:mm")
+                        .withZone(java.time.ZoneId.systemDefault())
+                        .format(java.time.Instant.now()),
+                )
+                withContext(Dispatchers.IO) { sessionStore.save(session) }
+                prefs.setActiveSessionId(session.sessionId.toString())
+                // The preference emission rebuilds the session-bound engine and recorder.
+                // Only that recorder may consume this pending Start request.
+            } else {
+                recorder.start()
+                startRequested = false
+            }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            startRequested = false
+            startError = "Could not start capture: ${e.message ?: e.javaClass.simpleName}"
+        }
+    }
 
     Box(modifier = Modifier.fillMaxSize()) {
         // Top-right confidence-ellipse HUD. Sits above the
@@ -389,40 +428,10 @@ fun LiveScreen(
                 if (captureActive) {
                     Button(onClick = { recorder.stop() }) { Text("Stop capture") }
                 } else {
-                    Button(onClick = {
-                        // Default-session fallback: if no active
-                        // session is set, auto-create one named
-                        // "Untitled <date>" so this capture is
-                        // never an orphan on disk. The operator
-                        // can rename later from the Sessions
-                        // screen.
-                        if (activeSessionUuid == null) {
-                            val now = System.currentTimeMillis()
-                            val s = io.github.spencerharmon.bris.engine.Session.new(
-                                "Untitled " + java.time.format.DateTimeFormatter
-                                    .ofPattern("yyyy-MM-dd HH:mm")
-                                    .withZone(java.time.ZoneId.systemDefault())
-                                    .format(java.time.Instant.ofEpochMilli(now)),
-                            )
-                            sessionStore.save(s)
-                            engineScope.launch {
-                                prefs.setActiveSessionId(s.sessionId.toString())
-                            }
-                            // Note: this recorder is the one bound
-                            // to the prior `activeSessionUuid` via
-                            // `remember(...)`. Recomposition after
-                            // setActiveSessionId rebuilds a new
-                            // recorder rooted at the new session
-                            // path. The first capture's frames
-                            // land in the orphan path; subsequent
-                            // captures use the new session. This
-                            // is a known UX wart and goes away
-                            // once Phase 7 collapses the path
-                            // choice into the recorder's
-                            // per-capture lookup.
-                        }
-                        recorder.start()
-                    }) { Text("Start capture") }
+                    Button(
+                        enabled = sessionLoaded && !startRequested,
+                        onClick = { startRequested = true },
+                    ) { Text("Start capture") }
                 }
                 OutlinedButton(onClick = onOpenSightLog) { Text("Sight log") }
             }

@@ -1,4 +1,6 @@
 import importlib.util
+import hashlib
+import json
 from pathlib import Path
 import tempfile
 import unittest
@@ -19,8 +21,10 @@ class InstrumentationResultsTest(unittest.TestCase):
         self.directory = Path(self.tmp.name)
 
     def report(self, classes, status=""):
-        cases = "".join(f'<testcase classname="{name}" name="test">{status}</testcase>'
-                        for name in classes)
+        cases = "".join(f'<testcase classname="{name}" name="{method}">{status}</testcase>'
+                        for name in classes
+                        for method in (harness.CAPTURE_TESTS if name == harness.REQUIRED_CLASSES[-1]
+                                       else ["test"]))
         (self.directory / "TEST-device.xml").write_text(f"<testsuite>{cases}</testsuite>")
 
     def test_requires_real_results(self):
@@ -47,6 +51,58 @@ class InstrumentationResultsTest(unittest.TestCase):
     def test_accepts_both_executed_classes(self):
         self.report(harness.REQUIRED_CLASSES)
         harness.verify_results(self.directory)
+
+    def test_requires_both_capture_scenarios(self):
+        self.report(harness.REQUIRED_CLASSES)
+        report = self.directory / "TEST-device.xml"
+        report.write_text(report.read_text().replace("explicitSessionUploadsOnce", "unrelatedTest"))
+        with self.assertRaisesRegex(RuntimeError, "capture scenarios"):
+            harness.verify_results(self.directory)
+
+
+class CollectorEvidenceTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.data = Path(self.tmp.name)
+        for index in range(2):
+            directory = self.data / f"submissions/2026/01/01/{index}"
+            (directory / "media").mkdir(parents=True)
+            payload = b'{"bundle_id":"capture"}'
+            (directory / "media/bundle.json").write_bytes(payload)
+            (directory / "manifest.json").write_text(json.dumps({
+                "device": {"uuid": str(index)}, "media": [{
+                    "filename": "bundle.json", "size_bytes": len(payload),
+                    "checksum_sha256": hashlib.sha256(payload).hexdigest(),
+                }],
+            }))
+
+    def test_accepts_real_store_evidence(self):
+        harness.verify_collector(self.data)
+
+    def test_rejects_missing_or_duplicate_submission(self):
+        (self.data / "submissions/2026/01/01/0/manifest.json").unlink()
+        with self.assertRaisesRegex(RuntimeError, "real submissions"):
+            harness.verify_collector(self.data)
+
+    def test_rejects_changed_bytes_even_at_same_size(self):
+        path = self.data / "submissions/2026/01/01/0/media/bundle.json"
+        path.write_bytes(b"x" * path.stat().st_size)
+        with self.assertRaisesRegex(RuntimeError, "bytes mismatch"):
+            harness.verify_collector(self.data)
+
+    def test_rejects_extra_artifact(self):
+        (self.data / "submissions/2026/01/01/0/media/extra").write_bytes(b"extra")
+        with self.assertRaisesRegex(RuntimeError, "count mismatch"):
+            harness.verify_collector(self.data)
+
+    def test_rejects_reused_app_data(self):
+        path = self.data / "submissions/2026/01/01/0/manifest.json"
+        manifest = json.loads(path.read_text())
+        manifest["device"]["uuid"] = "1"
+        path.write_text(json.dumps(manifest))
+        with self.assertRaisesRegex(RuntimeError, "fresh app data"):
+            harness.verify_collector(self.data)
 
 
 class HarnessEntryTest(unittest.TestCase):

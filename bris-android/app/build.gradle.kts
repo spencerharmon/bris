@@ -55,6 +55,7 @@ android {
         versionCode = gitCommitCount
         versionName = gitDescribe
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+        testInstrumentationRunnerArguments["clearPackageData"] = "true"
         // Restrict packaged ABIs to the two we actually cross-
         // compile bris-ffi for: arm64-v8a (real devices) and
         // x86_64 (emulator).
@@ -96,6 +97,7 @@ android {
     }
 
     testOptions {
+        execution = "ANDROIDX_TEST_ORCHESTRATOR"
         unitTests.isReturnDefaultValues = true
         unitTests.all {
             it.systemProperty("jna.library.path", rootProject.file("../target/debug").absolutePath)
@@ -188,6 +190,7 @@ dependencies {
     androidTestImplementation("androidx.test:runner:1.6.2")
     androidTestImplementation("androidx.test:rules:1.6.1")
     androidTestImplementation("androidx.test.ext:junit:1.2.1")
+    androidTestUtil("androidx.test:orchestrator:1.5.1")
     androidTestImplementation(composeBom)
     androidTestImplementation("androidx.compose.ui:ui-test-junit4")
     debugImplementation("androidx.compose.ui:ui-test-manifest")

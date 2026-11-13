@@ -109,7 +109,7 @@ installs both Android Rust targets on the repository's pinned toolchain plus
 The harness uses a checkout-local SDK overlay under `.connected-harness/`,
 reuses installed SDK packages without modifying them, and provisions a Pixel 6
 API 34 AOSP ATD x86_64 AVD. It boots with KVM, software graphics, no window/audio
-or snapshots, and a fresh data partition. Its private adb server, port pair, and
+or snapshots, and a fresh 2 GiB data partition. Its private adb server, port pair, and
 AVD state do not reuse or stop any existing devices. Boot has a five-minute
 timeout; the emulator and private adb server are stopped on success or failure,
 and the invocation's temporary AVD is removed. SIGTERM is handled; SIGKILL cannot
@@ -122,10 +122,22 @@ Gradle's existing tasks build **both arm64-v8a and x86_64** native libraries and
 generate UniFFI Kotlin bindings into the APK. No native build is skipped.
 After Gradle succeeds, the harness parses fresh instrumentation XML and refuses
 zero tests, skipped/failing tests, or missing `CalibrationStoreManifestTest` /
-`ConfidenceEllipseOverlayTest` execution. Reports are under
+`ConfidenceEllipseOverlayTest` / `CaptureUploadTest` execution. Reports are under
 `app/build/reports/androidTests/connected/`; XML is under
 `app/build/outputs/androidTest-results/connected/`. Boot diagnostics are in
 `.connected-harness/emulator.log`.
+
+The harness also builds and starts this checkout's Rust collector on a random
+loopback port, with an ephemeral token and isolated data root. It forwards the
+port with adb reverse and supplies instrumentation arguments `collectorBaseUrl`
+and `collectorToken`. Android Test Orchestrator clears app data between cases.
+Capture tests configure Automatic upload through Settings, then exercise both
+first Start (without visiting Sessions) and explicit-session Start/Stop through
+MainActivity. They compare canonical bundle/frame/log bytes with the native
+queue and collector, assert exactly one submission per capture, and reject
+orphan captures. The host checks both submissions and stored checksums too.
+Collector evidence remains in `.connected-harness/collector-*/`. Only debug
+builds permit cleartext loopback traffic; release network policy is unchanged.
 
 To deliberately use an already-connected device instead of provisioning one:
 
@@ -134,7 +146,9 @@ BRIS_CONNECTED_DEVICE=existing ./bris-android/gradlew -p bris-android connectedD
 ```
 
 That opt-out uses ordinary Gradle behavior and requires SDK/NDK, Rust targets,
-and cargo-ndk to be installed already. The result-validator regression tests
+and cargo-ndk to be installed already. Supply `collectorBaseUrl` and
+`collectorToken` runner arguments pointing at an isolated real collector when
+running the capture tests this way. The result-validator regression tests
 do not require Android tooling:
 
 ```sh

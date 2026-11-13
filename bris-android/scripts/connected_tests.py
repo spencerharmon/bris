@@ -2,15 +2,21 @@
 """Provision and run real Android instrumentation on an isolated Linux/KVM AVD."""
 
 import fcntl
+from contextlib import contextmanager
+import hashlib
+import json
 import os
 from pathlib import Path
 import shutil
+import secrets
 import signal
 import socket
 import subprocess
 import sys
 import tempfile
 import time
+import urllib.error
+import urllib.request
 import xml.etree.ElementTree as ET
 
 
@@ -22,7 +28,9 @@ PACKAGES = ("platform-tools", "platforms;android-37.0", "build-tools;37.0.0",
 REQUIRED_CLASSES = (
     "io.github.spencerharmon.bris.engine.CalibrationStoreManifestTest",
     "io.github.spencerharmon.bris.ui.ConfidenceEllipseOverlayTest",
+    "io.github.spencerharmon.bris.ui.CaptureUploadTest",
 )
+CAPTURE_TESTS = {"firstStartWithoutSessionsUploadsOnce", "explicitSessionUploadsOnce"}
 
 
 def run(args, env, **kwargs):
@@ -33,6 +41,7 @@ def run(args, env, **kwargs):
 def verify_results(directory):
     """Reject empty, skipped, failing, or incomplete instrumentation runs."""
     counts = dict.fromkeys(REQUIRED_CLASSES, 0)
+    captures = set()
     total = 0
     for report in directory.rglob("TEST-*.xml"):
         for case in ET.parse(report).iter("testcase"):
@@ -42,8 +51,12 @@ def verify_results(directory):
             name = case.get("classname")
             if name in counts:
                 counts[name] += 1
+            if name == REQUIRED_CLASSES[-1]:
+                captures.add(case.get("name"))
     if not all(counts.values()):
         raise RuntimeError(f"Required instrumentation classes did not execute: {counts}")
+    if not CAPTURE_TESTS <= captures:
+        raise RuntimeError(f"Required capture scenarios did not execute: {captures}")
     print(f"Instrumentation verified: {total} tests passed; {counts}", flush=True)
 
 
@@ -51,6 +64,78 @@ def free_port():
     with socket.socket() as sock:
         sock.bind(("127.0.0.1", 0))
         return sock.getsockname()[1]
+
+
+@contextmanager
+def real_collector(state, env):
+    """Build this checkout's collector; retain its isolated store/log for diagnosis."""
+    run(["cargo", "build", "--locked", "-p", "bris-collector", "--bin", "bris_collector",
+         "--target-dir", ROOT / "target"], env, cwd=ROOT)
+    directory = Path(tempfile.mkdtemp(prefix="collector-", dir=state))
+    port, token = free_port(), secrets.token_hex(32)
+    collector_env = {key: value for key, value in env.items()
+                     if not key.startswith("BRIS_COLLECTOR_")}
+    collector_env.update(BRIS_COLLECTOR_DATA_ROOT=str(directory / "data"),
+                         BRIS_COLLECTOR_BIND=f"127.0.0.1:{port}",
+                         BRIS_COLLECTOR_BEARER_TOKEN=token)
+    log_path = directory / "collector.log"
+    print(f"Real collector evidence: {directory}", flush=True)
+    with log_path.open("w") as log:
+        process = subprocess.Popen([str(ROOT / "target/debug/bris_collector")],
+                                   env=collector_env, cwd=ROOT, stdout=log,
+                                   stderr=subprocess.STDOUT)
+        try:
+            deadline = time.monotonic() + 30
+            while time.monotonic() < deadline:
+                if process.poll() is not None:
+                    raise RuntimeError(f"Collector exited with {process.returncode}; see {log_path}")
+                try:
+                    with urllib.request.urlopen(f"http://127.0.0.1:{port}/healthz", timeout=1) as response:
+                        if response.status == 200 and response.read() == b"ok":
+                            break
+                except (urllib.error.URLError, TimeoutError):
+                    pass
+                time.sleep(0.1)
+            else:
+                raise RuntimeError(f"Collector readiness timed out; see {log_path}")
+            yield port, token, directory / "data"
+            if process.poll() is not None:
+                raise RuntimeError(f"Collector died during instrumentation; see {log_path}")
+        finally:
+            if process.poll() is None:
+                process.terminate()
+                try:
+                    process.wait(timeout=20)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait()
+
+
+def verify_collector(data):
+    """Complement on-device byte comparisons with real-store count/checksum checks."""
+    manifests = list((data / "submissions").glob("*/*/*/*/manifest.json"))
+    if len(manifests) != len(CAPTURE_TESTS):
+        raise RuntimeError(f"Expected {len(CAPTURE_TESTS)} real submissions, got {len(manifests)}")
+    devices = set()
+    for path in manifests:
+        manifest = json.loads(path.read_text())
+        devices.add(manifest["device"]["uuid"])
+        media = manifest["media"]
+        files = [file for file in path.parent.rglob("*") if file.is_file() and file != path]
+        if len(files) != len(media):
+            raise RuntimeError(f"Collector artifact count mismatch: {path}")
+        by_name = {file.name: file for file in files}
+        names = [item["filename"] for item in media]
+        if len(set(names)) != len(names) or set(names) != set(by_name) or "bundle.json" not in names:
+            raise RuntimeError(f"Collector artifact names mismatch: {path}")
+        for item in media:
+            payload = by_name[item["filename"]].read_bytes()
+            if (len(payload) != item["size_bytes"] or
+                    hashlib.sha256(payload).hexdigest() != item["checksum_sha256"]):
+                raise RuntimeError(f"Collector artifact bytes mismatch: {by_name[item['filename']]}")
+    if len(devices) != len(CAPTURE_TESTS):
+        raise RuntimeError("Capture scenarios did not use independent fresh app data")
+    print(f"Real collector verified: {len(manifests)} submissions and all artifact checksums", flush=True)
 
 
 def emulator_port():
@@ -147,7 +232,9 @@ def execute(args, state, avd_home):
             emulator = subprocess.Popen(
                 [str(sdk / "emulator/emulator"), "-avd", "pixel6Api34", "-port", str(port),
                  "-no-window", "-no-audio", "-no-metrics", "-no-snapshot", "-wipe-data", "-accel", "on",
-                 "-gpu", "swiftshader_indirect", "-memory", "2048", "-cores", "2"],
+                  "-gpu", "swiftshader_indirect", "-memory", "2048", "-cores", "2",
+                  "-partition-size", "2048",
+                 "-camera-back", "emulated", "-camera-front", "none"],
                 env=env, stdout=log, stderr=subprocess.STDOUT)
             deadline = time.monotonic() + 300
             while time.monotonic() < deadline:
@@ -164,8 +251,14 @@ def execute(args, state, avd_home):
             reports = ANDROID / "app/build/outputs/androidTest-results/connected"
             if reports.exists():
                 shutil.rmtree(reports)  # Old XML must never satisfy this run's assertion.
-            run([ANDROID / "gradlew", *args, "--no-daemon"], env)
-            verify_results(reports)
+            with real_collector(state, env) as (collector_port, token, data):
+                run([adb, "reverse", f"tcp:{collector_port}", f"tcp:{collector_port}"], env)
+                run([ANDROID / "gradlew", *args,
+                     f"-Pandroid.testInstrumentationRunnerArguments.collectorBaseUrl=http://127.0.0.1:{collector_port}",
+                     f"-Pandroid.testInstrumentationRunnerArguments.collectorToken={token}",
+                     "--no-daemon"], env)
+                verify_results(reports)
+                verify_collector(data)
     finally:
         # Only terminate processes owned by this invocation, never a user's device/server.
         if emulator is not None and emulator.poll() is None:

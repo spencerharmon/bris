@@ -1,5 +1,8 @@
 package io.github.spencerharmon.bris.ui
 
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
+
 import android.Manifest
 import android.content.ContentResolver
 import android.content.Context
@@ -257,7 +260,8 @@ private fun CollectorSection() {
     Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween,
         verticalAlignment = Alignment.CenterVertically) {
         Text("Automatic upload")
-        Switch(checked = settings.automaticUpload, onCheckedChange = { enabled ->
+        Switch(modifier = Modifier.semantics { contentDescription = "Automatic upload" },
+            checked = settings.automaticUpload, onCheckedChange = { enabled ->
             scope.launch {
                 try { Upload.setAutomaticUpload(context, enabled) }
                 catch (e: Exception) {
