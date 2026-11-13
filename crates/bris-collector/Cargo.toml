@@ -41,7 +41,7 @@ serde_json = "1"
 # real bris-bundle v1 submission via the submitter code path and
 # POSTs it over a real loopback HTTP connection.
 bris-submit = { workspace = true, features = ["http"] }
-tokio = { version = "1", features = ["net"] }
+tokio = { version = "1", features = ["net", "sync", "time"] }
 
 [lints]
 workspace = true
