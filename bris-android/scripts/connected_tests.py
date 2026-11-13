@@ -2,7 +2,9 @@
 """Provision and run real Android instrumentation on an isolated Linux/KVM AVD."""
 
 import fcntl
+import json
 import os
+import secrets
 from pathlib import Path
 import shutil
 import signal
@@ -22,6 +24,7 @@ PACKAGES = ("platform-tools", "platforms;android-37.0", "build-tools;37.0.0",
 REQUIRED_CLASSES = (
     "io.github.spencerharmon.bris.engine.CalibrationStoreManifestTest",
     "io.github.spencerharmon.bris.ui.ConfidenceEllipseOverlayTest",
+    "io.github.spencerharmon.bris.upload.AutoUploadAcceptanceTest",
 )
 
 
@@ -51,6 +54,60 @@ def free_port():
     with socket.socket() as sock:
         sock.bind(("127.0.0.1", 0))
         return sock.getsockname()[1]
+
+
+def cargo_bin(name, package, env):
+    """Build a workspace binary and return cargo's reported executable path."""
+    out = subprocess.run(["cargo", "build", "--quiet", "--message-format=json", "-p", package,
+                          "--bin", name], env=env, cwd=ROOT, check=True, capture_output=True, text=True)
+    for line in out.stdout.splitlines():
+        msg = json.loads(line)
+        if msg.get("reason") == "compiler-artifact" and msg["target"]["name"] == name:
+            return msg["executable"]
+    raise RuntimeError(f"cargo did not report an executable for {name}")
+
+
+def start_collector(env, data_root, log):
+    """Run the real bris-collector on host loopback with temporary durable storage.
+
+    The emulator reaches host 127.0.0.1 as 10.0.2.2. The admin token is
+    ephemeral and only enrolls the app (which then receives a per-device token).
+    """
+    binary = cargo_bin("bris_collector", "bris-collector", env)
+    port = free_port()
+    token = secrets.token_hex(24)
+    collector_env = dict(env, BRIS_COLLECTOR_DATA_ROOT=str(data_root),
+                         BRIS_COLLECTOR_BIND=f"127.0.0.1:{port}",
+                         BRIS_COLLECTOR_BEARER_TOKEN=token)
+    collector_env.pop("BRIS_COLLECTOR_CONFIG", None)
+    process = subprocess.Popen([binary], env=collector_env, stdout=log, stderr=subprocess.STDOUT)
+    deadline = time.monotonic() + 30
+    while time.monotonic() < deadline:
+        if process.poll() is not None:
+            raise RuntimeError(f"bris-collector exited with {process.returncode}")
+        try:
+            with socket.create_connection(("127.0.0.1", port), timeout=1):
+                return process, port, token
+        except OSError:
+            time.sleep(0.2)
+    process.terminate()
+    raise RuntimeError("bris-collector did not start listening")
+
+
+def replay_stored_submissions(env, data_root):
+    """Every bundle the app uploaded must replay IN PLACE from the collector store."""
+    bris = cargo_bin("bris", "bris-cli", env)
+    media = sorted(p.parent for p in (data_root / "submissions").glob("*/*/*/*/manifest.json"))
+    if not media:
+        raise RuntimeError("collector stored no submissions from the device")
+    for submission in media:
+        result = subprocess.run([bris, "replay", "--bundle", str(submission / "media"),
+                                 "--disable-store"], env=dict(env, NO_COLOR="1"),
+                                capture_output=True, text=True)
+        text = result.stdout + result.stderr
+        if result.returncode != 0 or "mode complete" not in text:
+            raise RuntimeError(f"bris replay failed in place for {submission}:\n{text}")
+    print(f"Replayed {len(media)} stored device submissions in place", flush=True)
 
 
 def emulator_port():
@@ -140,8 +197,12 @@ def execute(args, state, avd_home):
     port = emulator_port()
     env["ANDROID_SERIAL"] = f"emulator-{port}"
     emulator = None
+    collector = None
     log_path = state / "emulator.log"
+    collector_root = Path(tempfile.mkdtemp(prefix="collector-", dir=state))
     try:
+        with (state / "collector.log").open("w") as collector_log:
+            collector, collector_port, admin_token = start_collector(env, collector_root, collector_log)
         run([adb, "start-server"], env)
         with log_path.open("w") as log:
             emulator = subprocess.Popen(
@@ -164,9 +225,20 @@ def execute(args, state, avd_home):
             reports = ANDROID / "app/build/outputs/androidTest-results/connected"
             if reports.exists():
                 shutil.rmtree(reports)  # Old XML must never satisfy this run's assertion.
-            run([ANDROID / "gradlew", *args, "--no-daemon"], env)
+            run([ANDROID / "gradlew", *args, "--no-daemon",
+                 f"-Pandroid.testInstrumentationRunnerArguments.brisCollectorUrl=http://10.0.2.2:{collector_port}",
+                 f"-Pandroid.testInstrumentationRunnerArguments.brisCollectorAdminToken={admin_token}"], env)
             verify_results(reports)
+            replay_stored_submissions(env, collector_root)
     finally:
+        if collector is not None and collector.poll() is None:
+            collector.terminate()
+            try:
+                collector.wait(timeout=20)
+            except subprocess.TimeoutExpired:
+                collector.kill()
+                collector.wait()
+        shutil.rmtree(collector_root, ignore_errors=True)
         # Only terminate processes owned by this invocation, never a user's device/server.
         if emulator is not None and emulator.poll() is None:
             emulator.terminate()

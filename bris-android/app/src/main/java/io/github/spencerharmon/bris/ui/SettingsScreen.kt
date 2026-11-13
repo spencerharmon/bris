@@ -31,6 +31,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.dp
 import androidx.documentfile.provider.DocumentFile
 import androidx.compose.material3.OutlinedTextField
@@ -225,6 +226,9 @@ fun SettingsScreen(prefs: Prefs, onBack: () -> Unit) {
     }
 }
 
+/** Semantics tag of the "Automatic upload" switch (acceptance tests drive it). */
+const val AUTOMATIC_UPLOAD_SWITCH_TAG = "automatic-upload-switch"
+
 /**
  * Collector settings: runtime base URL + token
  * (never compiled in), per-device registration, queue status.
@@ -257,7 +261,8 @@ private fun CollectorSection() {
     Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween,
         verticalAlignment = Alignment.CenterVertically) {
         Text("Automatic upload")
-        Switch(checked = settings.automaticUpload, onCheckedChange = { enabled ->
+        Switch(checked = settings.automaticUpload, modifier = Modifier.testTag(AUTOMATIC_UPLOAD_SWITCH_TAG),
+            onCheckedChange = { enabled ->
             scope.launch {
                 try { Upload.setAutomaticUpload(context, enabled) }
                 catch (e: Exception) {

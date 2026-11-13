@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    Debug builds only: permit cleartext HTTP to the device-local loopback so
+    the connected auto-upload acceptance test can reach its controlled
+    collector relay. Release builds keep the platform default (no cleartext).
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <application android:networkSecurityConfig="@xml/network_security_config_debug" />
+</manifest>
