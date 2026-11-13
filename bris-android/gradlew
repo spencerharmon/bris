@@ -1,5 +1,17 @@
 #!/bin/sh
 
+# Bris's connected-test entry point provisions an isolated headless device.
+# The harness re-enters this wrapper with BRIS_CONNECTED_DEVICE=existing.
+if [ "${BRIS_CONNECTED_DEVICE:-}" != existing ]; then
+    for arg in "$@"; do
+        case "$arg" in
+            connectedDebugAndroidTest|:connectedDebugAndroidTest|:app:connectedDebugAndroidTest)
+                exec python3 "$(dirname "$0")/scripts/connected_tests.py" "$@"
+                ;;
+        esac
+    done
+fi
+
 #
 # Copyright © 2015-2021 the original authors.
 #
