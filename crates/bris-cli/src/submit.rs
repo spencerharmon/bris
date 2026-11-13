@@ -14,7 +14,7 @@
 //!    about to leave the device;
 //! 3. **stops there unless the operator passed `--yes`** — no
 //!    submission is ever sent without an explicit operator
-//!    action (Bris makes no automatic network calls);
+//!    action (automatic completion uploads have separate consent);
 //! 4. on `--yes`, enqueues the submission to a durable on-disk
 //!    queue and (unless `--enqueue-only`) flushes the queue to
 //!    the collector, retrying transient failures.
@@ -27,7 +27,7 @@ use std::path::PathBuf;
 
 use anyhow::{bail, Context};
 use bris_submit::review::SubmissionReview;
-use bris_submit::transport::{CollectorEndpoint, HttpTransport};
+use bris_submit::transport::CollectorEndpoint;
 use bris_submit::{build_submission, AttemptResult, SubmissionQueue, SubmissionSource};
 
 use crate::SubmitArgs;
@@ -42,13 +42,22 @@ fn default_queue_root() -> PathBuf {
 }
 
 /// Entry point for `bris submit`.
-pub(crate) fn run_submit(args: &SubmitArgs) -> anyhow::Result<()> {
+pub(crate) fn run_submit(
+    args: &SubmitArgs,
+    config: &crate::config::UploadConfig,
+) -> anyhow::Result<()> {
+    if (args.yes || args.flush_only) && !args.debug && !config.debug {
+        bail!("manual submission requires Debug mode (--debug or upload.debug=true)");
+    }
     let queue_root = args.queue_root.clone().unwrap_or_else(default_queue_root);
     let queue = SubmissionQueue::open(&queue_root)
         .with_context(|| format!("open submission queue at {}", queue_root.display()))?;
 
     // Flush-only mode: skip building; just drive the queue.
     if args.flush_only {
+        if !args.yes {
+            bail!("manual queue flush requires --yes; entries retain their individual approval");
+        }
         return flush(&queue, args);
     }
 
@@ -80,8 +89,7 @@ pub(crate) fn run_submit(args: &SubmitArgs) -> anyhow::Result<()> {
     if !args.yes {
         println!(
             "Not submitted. This is the pre-upload review only.\n\
-             Re-run with --yes to confirm and upload (Bris never \
-             uploads automatically)."
+             Re-run with --debug --yes to confirm this manual upload."
         );
         return Ok(());
     }
@@ -136,11 +144,7 @@ fn flush(queue: &SubmissionQueue, args: &SubmitArgs) -> anyhow::Result<()> {
     if let Some(device_uuid) = &args.device_uuid {
         endpoint = endpoint.with_device_uuid(device_uuid.clone());
     }
-    let transport = HttpTransport::new(endpoint);
-
-    let results = queue
-        .drain_once(&transport)
-        .context("flush submission queue")?;
+    let results = queue.flush(endpoint).context("flush submission queue")?;
     let mut any_dead = false;
     for r in &results {
         match r {

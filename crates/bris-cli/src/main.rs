@@ -24,6 +24,7 @@ mod replay_report;
 mod subcommands;
 mod submit;
 mod training_index;
+mod uploads;
 
 use anyhow::{bail, Context};
 use bris_almanac::{refraction::Atmosphere, Observer};
@@ -132,6 +133,9 @@ enum Command {
     /// Android app provides for on-device sessions.
     #[command(subcommand)]
     Session(SessionCommand),
+    /// Inspect or retry automatic uploads (never prompts).
+    #[command(subcommand)]
+    Uploads(uploads::UploadCommand),
     /// Structured session logging: append every published fix
     /// for a recorded capture to a session's newline-delimited
     /// JSON sight log (`sight-log.jsonl`), each record carrying
@@ -326,6 +330,18 @@ enum SessionCommand {
     /// session. Sets `bundle.session_id` and appends to
     /// `ordered_capture_ids`.
     Attach(SessionAttachArgs),
+    /// Complete the current capture snapshot; automatically upload only if enabled.
+    Complete(SessionCompleteArgs),
+}
+
+#[derive(Debug, clap::Args)]
+struct SessionCompleteArgs {
+    /// Session UUID.
+    #[arg(long)]
+    session: uuid::Uuid,
+    /// Corpus root. Defaults to `./bris-corpus`.
+    #[arg(long)]
+    corpus: Option<PathBuf>,
 }
 
 #[derive(Debug, clap::Args)]
@@ -804,7 +820,12 @@ struct UpdateArgs {
 }
 
 #[derive(Debug, clap::Args)]
+// These are independent CLI switches, not an internal state machine.
+#[allow(clippy::struct_excessive_bools)]
 struct SubmitArgs {
+    /// Enable Debug mode for this individually reviewed manual submission.
+    #[arg(long)]
+    debug: bool,
     /// Capture bundle directory (contains `bundle.json` and a
     /// `frames/` or `media/` subdirectory). The `bundle.json`
     /// is shipped verbatim — the manifest sent is the same one
@@ -902,7 +923,11 @@ fn main() -> anyhow::Result<()> {
     let raw_config = config::load_config(cli.config.as_deref()).context("load configuration")?;
     match cli.command {
         Command::Replay(args) => run_replay(&args),
-        Command::Session(cmd) => run_session(cmd),
+        Command::Session(cmd) => match cmd {
+            SessionCommand::Complete(args) => uploads::complete(&args, cli.config.as_deref()),
+            cmd => run_session(cmd),
+        },
+        Command::Uploads(cmd) => uploads::run(cmd, cli.config.as_deref()),
         Command::Corpus(cmd) => run_corpus(cmd),
         Command::Capture(args) => run_capture(&args, &raw_config),
         Command::Serve(args) => run_serve(&args, &raw_config),
@@ -910,7 +935,15 @@ fn main() -> anyhow::Result<()> {
         Command::Fix(args) => run_fix(&args),
         Command::Log(args) => run_log(&args),
         Command::Update(args) => subcommands::run_update(&args),
-        Command::Submit(args) => submit::run_submit(&args),
+        Command::Submit(mut args) => {
+            args.collector_url = args
+                .collector_url
+                .or(raw_config.upload.collector_url.clone());
+            args.token = args.token.or(raw_config.upload.token.clone());
+            args.device_uuid = args.device_uuid.or(raw_config.upload.device_uuid.clone());
+            args.queue_root = args.queue_root.or(raw_config.upload.queue_root.clone());
+            submit::run_submit(&args, &raw_config.upload)
+        }
     }
 }
 
@@ -3316,6 +3349,7 @@ fn run_session(cmd: SessionCommand) -> anyhow::Result<()> {
         SessionCommand::List(args) => run_session_list(args),
         SessionCommand::Show(args) => run_session_show(args),
         SessionCommand::Attach(args) => run_session_attach(args),
+        SessionCommand::Complete(args) => uploads::complete(&args, None),
     }
 }
 

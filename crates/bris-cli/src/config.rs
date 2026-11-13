@@ -68,6 +68,45 @@ pub(crate) struct RawConfig {
     pub camera: Option<RawCamera>,
     #[serde(default)]
     pub nmea: Vec<RawNmea>,
+    #[serde(default)]
+    pub upload: UploadConfig,
+}
+
+/// Runtime-only consent and destination. Never log the bearer token.
+#[derive(Clone, Deserialize, PartialEq, Eq)]
+#[serde(default, deny_unknown_fields)]
+pub(crate) struct UploadConfig {
+    pub automatic_upload: bool,
+    pub debug: bool,
+    pub collector_url: Option<String>,
+    pub token: Option<String>,
+    pub device_uuid: Option<String>,
+    pub queue_root: Option<PathBuf>,
+    /// Bounded per-invocation upload budget, including an active transfer.
+    pub drain_seconds: u64,
+}
+
+impl Default for UploadConfig {
+    fn default() -> Self {
+        Self {
+            automatic_upload: false,
+            debug: false,
+            collector_url: None,
+            token: None,
+            device_uuid: None,
+            queue_root: None,
+            drain_seconds: 120,
+        }
+    }
+}
+
+impl std::fmt::Debug for UploadConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("UploadConfig")
+            .field("automatic_upload", &self.automatic_upload)
+            .field("debug", &self.debug)
+            .finish_non_exhaustive()
+    }
 }
 
 /// Observer position + eye height. All fields optional in
