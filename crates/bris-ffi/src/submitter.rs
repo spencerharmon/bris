@@ -109,6 +109,10 @@ pub struct FfiCollectorEndpoint {
     pub base_url: String,
     /// Bearer token.
     pub bearer_token: String,
+    /// Device UUID sent as `X-Bris-Device-Uuid`. REQUIRED when
+    /// `bearer_token` is a per-device token issued by
+    /// `POST /v1/devices/register`; `None` for the admin token.
+    pub device_uuid: Option<String>,
 }
 
 /// Outcome of a single flush pass over one queued entry.
@@ -263,10 +267,11 @@ impl Submitter {
     /// failure is reflected per-entry in the outcomes, not as an
     /// error).
     pub fn flush(&self, endpoint: FfiCollectorEndpoint) -> Result<Vec<FfiFlushOutcome>, FfiError> {
-        let transport = HttpTransport::new(CollectorEndpoint::new(
-            endpoint.base_url,
-            endpoint.bearer_token,
-        ));
+        let mut ep = CollectorEndpoint::new(endpoint.base_url, endpoint.bearer_token);
+        if let Some(uuid) = endpoint.device_uuid {
+            ep = ep.with_device_uuid(uuid);
+        }
+        let transport = HttpTransport::new(ep);
         let results = self
             .queue
             .drain_once(&transport)

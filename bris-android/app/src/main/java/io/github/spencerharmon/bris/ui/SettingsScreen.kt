@@ -33,7 +33,17 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.documentfile.provider.DocumentFile
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.text.input.PasswordVisualTransformation
 import io.github.spencerharmon.bris.Prefs
+import io.github.spencerharmon.bris.upload.CollectorSettings
+import io.github.spencerharmon.bris.upload.DeviceRegistrar
+import io.github.spencerharmon.bris.upload.RegistrationResult
+import io.github.spencerharmon.bris.upload.Upload
+import io.github.spencerharmon.bris.upload.maskToken
 import io.github.spencerharmon.bris.engine.LensCatalog
 import io.github.spencerharmon.bris.engine.ShareSessionsAction
 import kotlinx.coroutines.Dispatchers
@@ -190,6 +200,11 @@ fun SettingsScreen(prefs: Prefs, onBack: () -> Unit) {
             }
         }
 
+        if (debugMode) {
+            HorizontalDivider()
+            CollectorSection()
+        }
+
         HorizontalDivider()
 
         // ---- Share sessions ----
@@ -210,6 +225,78 @@ fun SettingsScreen(prefs: Prefs, onBack: () -> Unit) {
         Button(onClick = onBack) { Text("Back") }
 
         SnackbarHost(hostState = snackbarHost) { data -> Snackbar(snackbarData = data) }
+    }
+}
+
+/**
+ * Debug-gated collector settings: runtime base URL + token
+ * (never compiled in), per-device registration, queue status.
+ */
+@Composable
+private fun CollectorSection() {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    val store = remember(context) { Upload.settings(context) }
+    val settings by store.flow.collectAsState(initial = CollectorSettings())
+    var url by remember(settings.baseUrl) { mutableStateOf(settings.baseUrl) }
+    var token by remember(settings.enteredToken) { mutableStateOf(settings.enteredToken) }
+    var status by remember { mutableStateOf<String?>(null) }
+    var counts by remember { mutableStateOf<Pair<Int, Int>?>(null) }
+
+    LaunchedEffect(Unit) {
+        counts = runCatching { withContext(Dispatchers.IO) { Upload.coordinator(context).counts() } }.getOrNull()
+    }
+
+    Text("Collector", style = androidx.compose.material3.MaterialTheme.typography.titleMedium)
+    OutlinedTextField(
+        value = url,
+        onValueChange = { url = it },
+        label = { Text("Base URL") },
+        singleLine = true,
+        modifier = Modifier.fillMaxWidth(),
+    )
+    OutlinedTextField(
+        value = token,
+        onValueChange = { token = it },
+        label = { Text("Token (enrollment or device)") },
+        singleLine = true,
+        visualTransformation = PasswordVisualTransformation(),
+        modifier = Modifier.fillMaxWidth(),
+    )
+    Text(
+        if (settings.registered) "Device registered (token ${maskToken(settings.deviceToken)})"
+        else "Device not registered",
+        style = androidx.compose.material3.MaterialTheme.typography.bodySmall,
+    )
+    counts?.let { (p, d) -> Text("Queue: $p pending, $d rejected") }
+    settings.lastError?.let { Text("Last error: $it") }
+    status?.let { Text(it) }
+    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        Button(onClick = {
+            scope.launch {
+                status = try {
+                    store.save(url, token)
+                    val s = store.current()
+                    val uuid = Prefs(context).deviceUuid()
+                    val res = withContext(Dispatchers.IO) {
+                        DeviceRegistrar().register(s.baseUrl, s.enteredToken, uuid)
+                    }
+                    when (res) {
+                        is RegistrationResult.Registered -> {
+                            store.setDeviceToken(res.deviceToken); "Saved; device registered."
+                        }
+                        is RegistrationResult.NotEnrollmentToken ->
+                            "Saved; token is not an enrollment token (HTTP ${res.httpStatus}), using it as-is."
+                        is RegistrationResult.Failed -> "Saved; registration failed: ${res.message}"
+                    }
+                } catch (e: IllegalArgumentException) {
+                    e.message
+                }
+            }
+        }) { Text("Save & register") }
+        OutlinedButton(onClick = { Upload.scheduleFlush(context); status = "Upload scheduled." }) {
+            Text("Upload now")
+        }
     }
 }
 

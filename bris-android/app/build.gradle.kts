@@ -24,7 +24,7 @@ plugins {
 
 android {
     namespace = "io.github.spencerharmon.bris"
-    compileSdk = 34
+    compileSdk = 37
     // Pin build-tools so AGP doesn't try to fetch a different
     // version than the one installed under the merged SDK at
     // local.properties' sdk.dir. The chaotic-aur
@@ -62,16 +62,9 @@ android {
             abiFilters += listOf("arm64-v8a", "x86_64")
         }
 
-        // Bearer token used by the diagnostic-collection
-        // submitter. Spike-grade: a single shared token built
-        // into every APK. Override with
-        //   `-PbrisCollectorToken=<token>`
-        // on the Gradle command line for a real build; the
-        // default below is a placeholder that the collector
-        // will not accept.
-        val token = (project.findProperty("brisCollectorToken") as String?)
-            ?: "spike-shared-token-replace-me"
-        buildConfigField("String", "BRIS_COLLECTOR_BEARER_TOKEN", "\"$token\"")
+        // NOTE: no collector URL or bearer token is compiled in.
+        // Both are runtime config entered in Settings (Debug
+        // mode) -- ROI collection-path section 1.
         // BRIS_APP_VERSION retained as the human-readable APK
         // version string (mirrors versionName). The canonical
         // engine build provenance is supplied by
@@ -79,12 +72,6 @@ android {
         // bundle.json's `build` block; see plan.org Phase 8.5.
         buildConfigField("String", "BRIS_APP_VERSION", "\"$gitDescribe\"")
         buildConfigField("int", "BRIS_VERSION_CODE", "$gitCommitCount")
-        // Diagnostic-collection upload was a spike that was
-        // removed when the on-device save paths were unified;
-        // the in-app submission UI is gone. This flag is no
-        // longer referenced and is kept only as a stub for
-        // any future re-attachment of an upload path.
-        buildConfigField("boolean", "ENABLE_REMOTE_SUBMIT", "false")
     }
 
     buildFeatures {
@@ -177,6 +164,9 @@ dependencies {
 
     // HTTP submission to the collector.
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
+    // Network-constrained, retrying background flush of the
+    // durable submission queue.
+    implementation("androidx.work:work-runtime-ktx:2.9.1")
 
     debugImplementation("androidx.compose.ui:ui-tooling")
 
@@ -186,6 +176,8 @@ dependencies {
     // android.jar ships org.json as stubs ("Stub!" at runtime);
     // JVM unit tests need the real implementation.
     testImplementation("org.json:json:20240303")
+    // Fake collector endpoint for registration tests.
+    testImplementation("com.squareup.okhttp3:mockwebserver:4.12.0")
 
     // Instrumented tests (Compose smoke tests for HUD overlays).
     // Run under Gradle's `connectedAndroidTest` task in CI.
@@ -293,5 +285,9 @@ val uniffiBindgen = tasks.register<Exec>("uniffiBindgen") {
 
 tasks.named("preBuild") {
     dependsOn(uniffiBindgen)
-    dependsOn(cargoBuildAll)
 }
+// The cross-compiled .so files are only needed when packaging
+// JNI libs into an APK, not for JVM unit tests -- so hook the
+// cross-build onto the jniLibs merge rather than preBuild.
+tasks.matching { it.name.startsWith("merge") && it.name.endsWith("JniLibFolders") }
+    .configureEach { dependsOn(cargoBuildAll) }
