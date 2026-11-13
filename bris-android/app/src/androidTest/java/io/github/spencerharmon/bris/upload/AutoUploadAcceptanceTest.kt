@@ -31,7 +31,6 @@ import java.io.InputStream
 import java.io.OutputStream
 import java.net.HttpURLConnection
 import java.net.InetAddress
-import java.net.InetSocketAddress
 import java.net.ServerSocket
 import java.net.Socket
 import java.net.URL
@@ -276,7 +275,7 @@ class AutoUploadAcceptanceTest {
 
 /**
  * Device-loopback TCP relay to the host collector. FORWARD pipes bytes both
- * ways; DOWN refuses connections (listener closed, same port reopened later);
+ * ways; DOWN resets every connection attempt (still counted) without forwarding;
  * HOLD accepts and drains the client without ever forwarding, recording when
  * the client closes. It never interprets HTTP.
  */
@@ -306,25 +305,17 @@ class Relay(private val host: String, private val port: Int) {
 
     private fun supervise() {
         while (!stopped) {
-            val s = server
-            if (mode.get() == Mode.DOWN) {
-                s?.close()
-                server = null
-                Thread.sleep(50)
-                continue
-            }
-            val listener = s ?: try {
-                ServerSocket().apply {
-                    reuseAddress = true
-                    bind(InetSocketAddress(loopback, localPort))
-                }.also { server = it }
-            } catch (e: java.io.IOException) {
-                Thread.sleep(50); continue
-            }
+            val listener = server ?: break
             listener.soTimeout = 100
             val client = try { listener.accept() } catch (e: java.io.IOException) { continue }
             connections.incrementAndGet()
             when (mode.get()) {
+                Mode.DOWN -> {
+                    // Offline: every attempt is counted and reset before any byte
+                    // is forwarded, so the client sees a transport failure.
+                    client.setSoLinger(true, 0)
+                    runCatching { client.close() }
+                }
                 Mode.HOLD -> {
                     val h = Held(client)
                     held.set(h)
@@ -339,7 +330,7 @@ class Relay(private val host: String, private val port: Int) {
                         runCatching { client.close() }
                     }.apply { isDaemon = true }.start()
                 }
-                else -> {
+                Mode.FORWARD -> {
                     val upstream = try { Socket(host, port) } catch (e: java.io.IOException) {
                         client.close(); continue
                     }

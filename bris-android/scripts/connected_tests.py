@@ -62,7 +62,8 @@ def cargo_bin(name, package, env):
                           "--bin", name], env=env, cwd=ROOT, check=True, capture_output=True, text=True)
     for line in out.stdout.splitlines():
         msg = json.loads(line)
-        if msg.get("reason") == "compiler-artifact" and msg["target"]["name"] == name:
+        if msg.get("reason") == "compiler-artifact" and msg["target"]["name"] == name \
+                and msg.get("executable"):
             return msg["executable"]
     raise RuntimeError(f"cargo did not report an executable for {name}")
 
