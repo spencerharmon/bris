@@ -37,8 +37,32 @@ build.
 
 ## Configuration
 
-Settings → Debug mode → on. Then enter a collector base URL. The
-shared bearer token is currently compiled into the APK build
-config; in the spike this means rebuilding with a different
-token to change it. Per-device tokens are tracked as a
-follow-up.
+Nothing about the collector is compiled into the APK. Settings ->
+Debug mode -> on reveals a **Collector** section:
+
+- **Base URL** and **Token** (masked), persisted in an app-private
+  DataStore (`bris_collector`; app backup is disabled).
+- **Save & register** saves both, then calls
+  `POST /v1/devices/register` with the token. If the collector
+  issues a per-device token it is stored and used for every
+  upload (with the `X-Bris-Device-Uuid` header); a 401/403 means
+  the token is not an enrollment token and it is used as-is.
+  Changing URL or token drops a previously-issued device token.
+- Queue status (pending / rejected) and the last upload error.
+
+## Uploading a capture
+
+Sight log -> open a capture -> **Submit to collector...** (Debug
+mode only) shows the one-screen pre-upload review produced by
+`Submitter.review`. Nothing is queued until **Approve & upload**
+(`Submitter.approve_and_enqueue`); a network-constrained,
+exponential-backoff WorkManager job (`FlushWorker`) then flushes
+the durable queue under `files/submission-queue/`, retrying
+while entries remain pending. **Upload now** in Settings
+re-schedules the flush.
+
+## Tests
+
+`./gradlew testDebugUnitTest` runs JVM unit tests only; the
+Android cross-compile (`cargo ndk`) is attached to the jniLibs
+merge, so unit tests need only a host Rust toolchain.

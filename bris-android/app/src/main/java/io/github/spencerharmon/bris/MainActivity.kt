@@ -19,6 +19,7 @@ import io.github.spencerharmon.bris.ui.SessionPickerScreen
 import io.github.spencerharmon.bris.ui.SettingsScreen
 import io.github.spencerharmon.bris.ui.SightLogDetailScreen
 import io.github.spencerharmon.bris.ui.SightLogScreen
+import io.github.spencerharmon.bris.ui.SubmitScreen
 import java.net.URLDecoder
 import java.net.URLEncoder
 
@@ -113,6 +114,18 @@ class MainActivity : ComponentActivity() {
                                 dirName = dirName,
                                 onBack = { nav.popBackStack() },
                                 onDeleted = { nav.popBackStack() },
+                                onSubmit = if (debugMode) {
+                                    { path -> nav.navigate("submit/" + URLEncoder.encode(path, "UTF-8")) }
+                                } else {
+                                    null
+                                },
+                            )
+                        }
+                        composable("submit/{dir}") { backStack ->
+                            val raw = backStack.arguments?.getString("dir") ?: return@composable
+                            SubmitScreen(
+                                bundleDir = URLDecoder.decode(raw, "UTF-8"),
+                                onBack = { nav.popBackStack() },
                             )
                         }
                     }

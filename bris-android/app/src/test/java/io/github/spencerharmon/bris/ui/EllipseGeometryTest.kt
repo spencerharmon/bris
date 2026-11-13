@@ -51,8 +51,8 @@ class EllipseGeometryTest {
         // produce the same point set as drawing (minor, major,
         // orient) directly, modulo ordering.
         val direct = EllipseGeometry.ellipsePoints(
-            sigmaMajorNm = 5.0,
-            sigmaMinorNm = 0.5,
+            sigmaMajorNm = 0.5,
+            sigmaMinorNm = 5.0,
             orientationRad = 0.0,
             pxPerNm = 10f,
         )

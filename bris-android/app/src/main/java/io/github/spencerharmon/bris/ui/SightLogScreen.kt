@@ -211,6 +211,7 @@ fun SightLogDetailScreen(
     dirName: String,
     onBack: () -> Unit,
     onDeleted: () -> Unit,
+    onSubmit: ((String) -> Unit)? = null,
 ) {
     val context = LocalContext.current
     val sightLog = remember(context) { SightLog.forApp(context) }
@@ -237,6 +238,12 @@ fun SightLogDetailScreen(
             modifier = Modifier.padding(top = 4.dp),
         )
         statusText?.let { Text(it, modifier = Modifier.padding(top = 8.dp)) }
+        if (onSubmit != null) {
+            androidx.compose.material3.Button(
+                onClick = { onSubmit(sessionDir.absolutePath) },
+                modifier = Modifier.padding(top = 8.dp),
+            ) { Text("Submit to collector\u2026") }
+        }
 
         Text(
             "Manifest",
