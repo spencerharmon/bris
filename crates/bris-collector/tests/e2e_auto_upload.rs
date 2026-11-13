@@ -47,7 +47,13 @@ fn bris_bin() -> &'static Path {
             .canonicalize()
             .unwrap();
         let out = Command::new(env!("CARGO"))
-            .args(["build", "--quiet", "--message-format=json", "-p", "bris-cli"])
+            .args([
+                "build",
+                "--quiet",
+                "--message-format=json",
+                "-p",
+                "bris-cli",
+            ])
             .args(["--bin", "bris", "--manifest-path"])
             .arg(&manifest)
             .stderr(Stdio::inherit())
@@ -190,6 +196,10 @@ impl Cli {
 
     /// Write `[upload]`. `automatic` None = key absent (the default).
     fn configure(&self, url: &str, token: &str, automatic: Option<bool>) {
+        self.configure_with_budget(url, token, automatic, 3);
+    }
+
+    fn configure_with_budget(&self, url: &str, token: &str, automatic: Option<bool>, seconds: i64) {
         let mut up = toml::map::Map::new();
         up.insert("collector_url".into(), url.into());
         up.insert("token".into(), token.into());
@@ -198,7 +208,7 @@ impl Cli {
             "queue_root".into(),
             self.temp.path().join("queue").to_str().unwrap().into(),
         );
-        up.insert("drain_seconds".into(), toml::Value::Integer(3));
+        up.insert("drain_seconds".into(), toml::Value::Integer(seconds));
         if let Some(a) = automatic {
             up.insert("automatic_upload".into(), a.into());
         }
@@ -251,7 +261,16 @@ impl Cli {
             let src = self.temp.path().join("incoming").join(&cap);
             make_capture(&src, &cap);
             let s = src.to_str().unwrap();
-            self.ok(&["session", "attach", "--session", &id, "--bundle", s, "--corpus", c]);
+            self.ok(&[
+                "session",
+                "attach",
+                "--session",
+                &id,
+                "--bundle",
+                s,
+                "--corpus",
+                c,
+            ]);
             dirs.push(corpus.join("sessions").join(&id).join("captures").join(cap));
         }
         (id, dirs)
@@ -260,7 +279,14 @@ impl Cli {
     /// The frontend's completion hook — the ONLY path that enqueues.
     fn complete(&self, id: &str) -> Output {
         let c = self.corpus();
-        let out = self.ok(&["session", "complete", "--session", id, "--corpus", c.to_str().unwrap()]);
+        let out = self.ok(&[
+            "session",
+            "complete",
+            "--session",
+            id,
+            "--corpus",
+            c.to_str().unwrap(),
+        ]);
         let all = text(&out);
         assert!(
             !all.contains("Pre-upload review"),
@@ -367,16 +393,28 @@ fn assert_stored_artifact(data_root: &Path, id: &str, capture: &Path) {
     assert_eq!(manifest["gps"]["lat_deg"], bundle["gps_truth"]["lat"]);
     assert_ne!(bundle["ap_input"]["lat"], bundle["gps_truth"]["lat"]);
     let items = manifest["media"].as_array().unwrap();
-    let names: Vec<_> = items.iter().map(|m| m["filename"].as_str().unwrap()).collect();
-    for f in ["bundle.json", "00000000.pgm", "00000001.pgm"] {
-        assert!(
-            names.iter().any(|n| n.ends_with(f)),
-            "{f} missing from {names:?}"
+    let names: Vec<_> = items
+        .iter()
+        .map(|m| m["filename"].as_str().unwrap())
+        .collect();
+    let mut expected = std::collections::BTreeMap::new();
+    expected.insert("bundle.json".to_owned(), shipped);
+    for entry in std::fs::read_dir(capture.join("frames")).unwrap() {
+        let entry = entry.unwrap();
+        expected.insert(
+            entry.file_name().into_string().unwrap(),
+            std::fs::read(entry.path()).unwrap(),
         );
     }
+    assert_eq!(names.len(), expected.len(), "exact source inventory");
     for m in items {
         let name = m["filename"].as_str().unwrap();
         let bytes = std::fs::read(media.join(name)).unwrap();
+        assert_eq!(
+            &bytes,
+            expected.get(name).expect("unexpected stored media"),
+            "source bytes: {name}"
+        );
         assert_eq!(m["checksum_sha256"], hex::encode(Sha256::digest(&bytes)));
     }
     let out = Command::new(bris_bin())
@@ -434,8 +472,7 @@ async fn toggle_on_uploads_every_completed_capture_and_survives_offline_restart(
         let id = ids
             .iter()
             .find(|sid| {
-                std::fs::read(submission_dir(store.path(), sid).join("media/bundle.json"))
-                    .unwrap()
+                std::fs::read(submission_dir(store.path(), sid).join("media/bundle.json")).unwrap()
                     == want
             })
             .expect("capture stored");
@@ -449,7 +486,11 @@ async fn toggle_on_uploads_every_completed_capture_and_survives_offline_restart(
     col.stop().await;
     let (id2, caps2) = cli.session("offline", 1);
     cli.complete(&id2);
-    assert_eq!(cli.status(), (true, 1, 0), "offline capture visibly pending");
+    assert_eq!(
+        cli.status(),
+        (true, 1, 0),
+        "offline capture visibly pending"
+    );
 
     // ---- 3. Restart the collector over the SAME durable store; the
     // device token must still authenticate. A fresh CLI process retries. ----
@@ -470,7 +511,10 @@ async fn toggle_on_uploads_every_completed_capture_and_survives_offline_restart(
         .expect("retried capture stored");
     assert_stored_artifact(store.path(), rid, &caps2[0]);
     // The index rebuilt from disk agrees with the live view.
-    assert_eq!(Store::open(store.path()).unwrap().rebuild_index().unwrap(), 3);
+    assert_eq!(
+        Store::open(store.path()).unwrap().rebuild_index().unwrap(),
+        3
+    );
     col.stop().await;
 }
 
@@ -538,7 +582,7 @@ async fn toggle_off_cancels_active_transfer() {
         }
     });
     let cli = Cli::new();
-    cli.configure(&hold_url, &token, Some(true));
+    cli.configure_with_budget(&hold_url, &token, Some(true), 60);
     let (id, _) = cli.session("cancel", 2);
     let corpus = cli.corpus();
     let mut child = cli
@@ -546,26 +590,60 @@ async fn toggle_off_cancels_active_transfer() {
         .arg(&corpus)
         .spawn()
         .unwrap();
-    let mut held = rx.recv_timeout(Duration::from_secs(10)).expect("transfer started");
-    cli.ok(&["uploads", "set", "--automatic-upload", "false"]);
-    held.set_read_timeout(Some(Duration::from_millis(200))).unwrap();
-    let deadline = Instant::now() + Duration::from_millis(1500);
+    let mut held = rx
+        .recv_timeout(Duration::from_secs(10))
+        .expect("transfer started");
+    let started = Instant::now();
+    let mut off = cli
+        .cmd(&["uploads", "set", "--automatic-upload", "false"])
+        .spawn()
+        .unwrap();
+    held.set_read_timeout(Some(Duration::from_millis(200)))
+        .unwrap();
+    let deadline = started + Duration::from_millis(1500);
     let mut buf = [0u8; 8192];
     loop {
         use std::io::Read;
         match held.read(&mut buf) {
-            Ok(0) => break,
-            Err(e) if e.kind() == std::io::ErrorKind::ConnectionReset => break,
+            Ok(0) => {
+                assert!(
+                    Instant::now() < deadline,
+                    "toggle cancellation exceeded deadline"
+                );
+                break;
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::ConnectionReset => {
+                assert!(
+                    Instant::now() < deadline,
+                    "toggle cancellation exceeded deadline"
+                );
+                break;
+            }
             Ok(_) => {}
-            Err(e) if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) => {}
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) => {}
             Err(e) => panic!("{e}"),
         }
-        assert!(Instant::now() < deadline, "active transfer not cancelled by toggle-off");
+        assert!(
+            Instant::now() < deadline,
+            "active transfer not cancelled by toggle-off"
+        );
     }
-    let deadline = Instant::now() + Duration::from_secs(5);
-    while child.try_wait().unwrap().is_none() {
-        assert!(Instant::now() < deadline, "completion did not stop");
-        std::thread::sleep(Duration::from_millis(20));
+    for process in [&mut child, &mut off] {
+        loop {
+            if let Some(status) = process.try_wait().unwrap() {
+                assert!(status.success(), "completion/OFF command failed: {status}");
+                break;
+            }
+            assert!(
+                started.elapsed() < Duration::from_secs(5),
+                "completion/OFF did not stop"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
     }
     assert_eq!(cli.status(), (false, 0, 2));
     // Point back at the real collector: still nothing may be sent.

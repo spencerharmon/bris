@@ -5,6 +5,7 @@ import unittest
 from unittest.mock import patch
 import os
 import subprocess
+import json
 
 
 spec = importlib.util.spec_from_file_location("connected_tests", Path(__file__).with_name("connected_tests.py"))
@@ -50,6 +51,34 @@ class InstrumentationResultsTest(unittest.TestCase):
 
 
 class HarnessEntryTest(unittest.TestCase):
+    def test_replay_checks_frame_bundles_and_explicit_empty_refusal(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for name, count in (("a", 2), ("b", 2), ("c", 0)):
+                submission = root / "submissions/2026/01/01" / name
+                (submission / "media").mkdir(parents=True)
+                (submission / "manifest.json").write_text("{}")
+                (submission / "media/bundle.json").write_text(json.dumps({"capture": {"frame_count": count}}))
+            good = subprocess.CompletedProcess([], 0, "mode complete", "")
+            empty = subprocess.CompletedProcess([], 1, "", "no frames found in bundle")
+            with patch.object(harness, "cargo_bin", return_value="bris"), \
+                    patch.object(harness.subprocess, "run", side_effect=[good, good, empty]):
+                harness.replay_stored_submissions({}, root)
+            for bad in (good, subprocess.CompletedProcess([], 1, "", "checksum mismatch")):
+                with patch.object(harness, "cargo_bin", return_value="bris"), \
+                        patch.object(harness.subprocess, "run", side_effect=[good, good, bad]), \
+                        self.assertRaises(RuntimeError):
+                    harness.replay_stored_submissions({}, root)
+
+    def test_restart_requires_named_successful_method(self):
+        method = "reopenPendingRestart"
+        passing = f"INSTRUMENTATION_STATUS: test={method}\nINSTRUMENTATION_STATUS_CODE: 0\nOK (1 test)"
+        harness.verify_restart_result(passing, method)
+        for output in ("", passing.replace(method, "other"), passing.replace("OK (1 test)", "FAILURES!!!"),
+                       passing.replace("STATUS_CODE: 0", "STATUS_CODE: -2")):
+            with self.subTest(output=output), self.assertRaises(RuntimeError):
+                harness.verify_restart_result(output, method)
+
     def test_wrapper_routes_exact_task_and_preserves_arguments(self):
         # A fake Python executable exercises the actual POSIX wrapper dispatch,
         # without provisioning an SDK or accidentally running Gradle.

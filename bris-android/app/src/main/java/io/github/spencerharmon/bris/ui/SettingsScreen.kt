@@ -177,6 +177,7 @@ fun SettingsScreen(prefs: Prefs, onBack: () -> Unit) {
         ) {
             Text("Debug mode")
             Switch(
+                modifier = Modifier.testTag("debug-mode-switch"),
                 checked = debugMode,
                 onCheckedChange = { v -> scope.launch { prefs.setDebugMode(v) } },
             )

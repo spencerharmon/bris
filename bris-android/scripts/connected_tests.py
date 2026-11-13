@@ -56,6 +56,34 @@ def free_port():
         return sock.getsockname()[1]
 
 
+def verify_restart_result(output, method):
+    if "OK (1 test)" not in output or "FAILURES!!!" in output or "INSTRUMENTATION_FAILED" in output:
+        raise RuntimeError(f"Restart instrumentation {method} did not pass:\n{output}")
+    if f"test={method}" not in output or "INSTRUMENTATION_STATUS_CODE: 0" not in output:
+        raise RuntimeError(f"Required restart method {method} did not execute:\n{output}")
+
+
+def restart_acceptance(adb, env, port, token, state):
+    package = "io.github.spencerharmon.bris"
+    run([ANDROID / "gradlew", "-p", ANDROID, "installDebug", "installDebugAndroidTest", "--no-daemon"], env)
+    run([adb, "shell", "pm", "clear", package], env)
+    for method in ("preparePendingRestart", "reopenPendingRestart"):
+        run([adb, "shell", "am", "force-stop", package], env)
+        stopped = subprocess.run([str(adb), "shell", "pidof", package], env=env, capture_output=True, text=True)
+        if stopped.returncode != 1 or stopped.stdout.strip():
+            raise RuntimeError(f"App process did not stop: {stopped.stdout} {stopped.stderr}")
+        result = run([adb, "shell", "am", "instrument", "-w", "-r",
+                      "-e", "class", REQUIRED_CLASSES[-1] + "#" + method,
+                      "-e", "brisCollectorUrl", f"http://10.0.2.2:{port}",
+                      "-e", "brisCollectorAdminToken", token,
+                      package + ".test/androidx.test.runner.AndroidJUnitRunner"],
+                     env, capture_output=True, text=True, timeout=360)
+        output = result.stdout + result.stderr
+        (state / f"{method}.log").write_text(output)
+        verify_restart_result(output, method)
+        print(f"Restart instrumentation verified: {method}: 1 passed", flush=True)
+
+
 def cargo_bin(name, package, env):
     """Build a workspace binary and return cargo's reported executable path."""
     out = subprocess.run(["cargo", "build", "--quiet", "--message-format=json", "-p", package,
@@ -101,14 +129,29 @@ def replay_stored_submissions(env, data_root):
     media = sorted(p.parent for p in (data_root / "submissions").glob("*/*/*/*/manifest.json"))
     if not media:
         raise RuntimeError("collector stored no submissions from the device")
+    replayed = 0
+    no_frames = 0
     for submission in media:
         result = subprocess.run([bris, "replay", "--bundle", str(submission / "media"),
                                  "--disable-store"], env=dict(env, NO_COLOR="1"),
                                 capture_output=True, text=True)
         text = result.stdout + result.stderr
-        if result.returncode != 0 or "mode complete" not in text:
+        bundle = json.loads((submission / "media/bundle.json").read_text())
+        if bundle["capture"]["frame_count"] == 0:
+            # Debug-off no-fix recordings retain diagnostics, not camera frames.
+            # Replay must report that honestly rather than invent a successful run.
+            if result.returncode == 0 or "no frames found in bundle" not in text:
+                raise RuntimeError(f"Expected explicit no-frame replay refusal for {submission}:\n{text}")
+            print(f"Verified no-frame replay refusal: {submission.name}", flush=True)
+            no_frames += 1
+        elif result.returncode != 0 or "mode complete" not in text:
             raise RuntimeError(f"bris replay failed in place for {submission}:\n{text}")
-    print(f"Replayed {len(media)} stored device submissions in place", flush=True)
+        else:
+            replayed += 1
+    if replayed < 2:
+        raise RuntimeError(f"Expected at least two frame-bearing replay fixtures, got {replayed}")
+    print(f"Replayed {replayed} stored device submissions in place; "
+          f"verified {no_frames} diagnostic-only no-frame refusals", flush=True)
 
 
 def emulator_port():
@@ -227,9 +270,12 @@ def execute(args, state, avd_home):
             if reports.exists():
                 shutil.rmtree(reports)  # Old XML must never satisfy this run's assertion.
             run([ANDROID / "gradlew", *args, "--no-daemon",
+                 "-Pandroid.testInstrumentationRunnerArguments.class=" + ",".join([
+                     *REQUIRED_CLASSES[:-1], REQUIRED_CLASSES[-1] + "#automaticUploadIsSilentDurableVisibleAndRevocable"]),
                  f"-Pandroid.testInstrumentationRunnerArguments.brisCollectorUrl=http://10.0.2.2:{collector_port}",
                  f"-Pandroid.testInstrumentationRunnerArguments.brisCollectorAdminToken={admin_token}"], env)
             verify_results(reports)
+            restart_acceptance(adb, env, collector_port, admin_token, state)
             replay_stored_submissions(env, collector_root)
     finally:
         if collector is not None and collector.poll() is None:
