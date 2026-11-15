@@ -6,9 +6,9 @@ from contextlib import contextmanager
 import hashlib
 import json
 import os
+import secrets
 from pathlib import Path
 import shutil
-import secrets
 import signal
 import socket
 import subprocess
@@ -30,15 +30,19 @@ REQUIRED_CLASSES = (
     "io.github.spencerharmon.bris.ui.ConfidenceEllipseOverlayTest",
     "io.github.spencerharmon.bris.ui.FirstCaptureUploadTest",
     "io.github.spencerharmon.bris.ui.ExplicitSessionUploadTest",
+    "io.github.spencerharmon.bris.upload.AutoUploadAcceptanceTest",
 )
 APP = "io.github.spencerharmon.bris"
-MINIMUM_TESTS = dict(zip(REQUIRED_CLASSES, (4, 3, 1, 1)))
+AUTO_CLASS = REQUIRED_CLASSES[-1]
+GROUPED = REQUIRED_CLASSES[:-1]
+MINIMUM_TESTS = dict(zip(REQUIRED_CLASSES, (4, 3, 1, 1, 1)))
 
 
 def run(args, env, **kwargs):
     print("+ " + " ".join(
         str(arg).split("=", 1)[0] + "=<redacted>"
-        if str(arg).startswith("-Pandroid.testInstrumentationRunnerArguments.collectorToken=")
+        if str(arg).startswith(("-Pandroid.testInstrumentationRunnerArguments.collectorToken=",
+                                  "-Pandroid.testInstrumentationRunnerArguments.brisCollectorAdminToken="))
         else str(arg) for arg in args), flush=True)
     return subprocess.run(list(map(str, args)), env=env, check=True, **kwargs)
 
@@ -159,6 +163,104 @@ def verify_collector(data, device):
     print(f"Real collector verified: {session_id}, captures {ids}, byte-identical media", flush=True)
 
 
+def verify_restart_result(output, method):
+    if "OK (1 test)" not in output or "FAILURES!!!" in output or "INSTRUMENTATION_FAILED" in output:
+        raise RuntimeError(f"Restart instrumentation {method} did not pass:\n{output}")
+    if f"test={method}" not in output or "INSTRUMENTATION_STATUS_CODE: 0" not in output:
+        raise RuntimeError(f"Required restart method {method} did not execute:\n{output}")
+
+
+def restart_acceptance(adb, env, port, token, state):
+    package = "io.github.spencerharmon.bris"
+    run([ANDROID / "gradlew", "-p", ANDROID, "installDebug", "installDebugAndroidTest", "--no-daemon"], env)
+    run([adb, "shell", "pm", "clear", package], env)
+    for method in ("preparePendingRestart", "reopenPendingRestart"):
+        run([adb, "shell", "am", "force-stop", package], env)
+        stopped = subprocess.run([str(adb), "shell", "pidof", package], env=env, capture_output=True, text=True)
+        if stopped.returncode != 1 or stopped.stdout.strip():
+            raise RuntimeError(f"App process did not stop: {stopped.stdout} {stopped.stderr}")
+        result = run([adb, "shell", "am", "instrument", "-w", "-r",
+                      "-e", "class", REQUIRED_CLASSES[-1] + "#" + method,
+                      "-e", "brisCollectorUrl", f"http://10.0.2.2:{port}",
+                      "-e", "brisCollectorAdminToken", token,
+                      package + ".test/androidx.test.runner.AndroidJUnitRunner"],
+                     env, capture_output=True, text=True, timeout=360)
+        output = result.stdout + result.stderr
+        (state / f"{method}.log").write_text(output)
+        verify_restart_result(output, method)
+        print(f"Restart instrumentation verified: {method}: 1 passed", flush=True)
+
+
+def cargo_bin(name, package, env):
+    """Build a workspace binary and return cargo's reported executable path."""
+    out = subprocess.run(["cargo", "build", "--quiet", "--message-format=json", "-p", package,
+                          "--bin", name], env=env, cwd=ROOT, check=True, capture_output=True, text=True)
+    for line in out.stdout.splitlines():
+        msg = json.loads(line)
+        if msg.get("reason") == "compiler-artifact" and msg["target"]["name"] == name \
+                and msg.get("executable"):
+            return msg["executable"]
+    raise RuntimeError(f"cargo did not report an executable for {name}")
+
+
+def start_collector(env, data_root, log):
+    """Run the real bris-collector on host loopback with temporary durable storage.
+
+    The emulator reaches host 127.0.0.1 as 10.0.2.2. The admin token is
+    ephemeral and only enrolls the app (which then receives a per-device token).
+    """
+    binary = cargo_bin("bris_collector", "bris-collector", env)
+    port = free_port()
+    token = secrets.token_hex(24)
+    collector_env = dict(env, BRIS_COLLECTOR_DATA_ROOT=str(data_root),
+                         BRIS_COLLECTOR_BIND=f"127.0.0.1:{port}",
+                         BRIS_COLLECTOR_BEARER_TOKEN=token)
+    collector_env.pop("BRIS_COLLECTOR_CONFIG", None)
+    process = subprocess.Popen([binary], env=collector_env, stdout=log, stderr=subprocess.STDOUT)
+    deadline = time.monotonic() + 30
+    while time.monotonic() < deadline:
+        if process.poll() is not None:
+            raise RuntimeError(f"bris-collector exited with {process.returncode}")
+        try:
+            with socket.create_connection(("127.0.0.1", port), timeout=1):
+                return process, port, token
+        except OSError:
+            time.sleep(0.2)
+    process.terminate()
+    raise RuntimeError("bris-collector did not start listening")
+
+
+def replay_stored_submissions(env, data_root):
+    """Every bundle the app uploaded must replay IN PLACE from the collector store."""
+    bris = cargo_bin("bris", "bris-cli", env)
+    media = sorted(p.parent for p in (data_root / "submissions").glob("*/*/*/*/manifest.json"))
+    if not media:
+        raise RuntimeError("collector stored no submissions from the device")
+    replayed = 0
+    no_frames = 0
+    for submission in media:
+        result = subprocess.run([bris, "replay", "--bundle", str(submission / "media"),
+                                 "--disable-store"], env=dict(env, NO_COLOR="1"),
+                                capture_output=True, text=True)
+        text = result.stdout + result.stderr
+        bundle = json.loads((submission / "media/bundle.json").read_text())
+        if bundle["capture"]["frame_count"] == 0:
+            # Debug-off no-fix recordings retain diagnostics, not camera frames.
+            # Replay must report that honestly rather than invent a successful run.
+            if result.returncode == 0 or "no frames found in bundle" not in text:
+                raise RuntimeError(f"Expected explicit no-frame replay refusal for {submission}:\n{text}")
+            print(f"Verified no-frame replay refusal: {submission.name}", flush=True)
+            no_frames += 1
+        elif result.returncode != 0 or "mode complete" not in text:
+            raise RuntimeError(f"bris replay failed in place for {submission}:\n{text}")
+        else:
+            replayed += 1
+    if replayed < 2:
+        raise RuntimeError(f"Expected at least two frame-bearing replay fixtures, got {replayed}")
+    print(f"Replayed {replayed} stored device submissions in place; "
+          f"verified {no_frames} diagnostic-only no-frame refusals", flush=True)
+
+
 def emulator_port():
     for port in range(5554, 5682, 2):
         with socket.socket() as console, socket.socket() as adb:
@@ -246,8 +348,12 @@ def execute(args, state, avd_home):
     port = emulator_port()
     env["ANDROID_SERIAL"] = f"emulator-{port}"
     emulator = None
+    collector_proc = None
     log_path = state / "emulator.log"
+    collector_root = Path(tempfile.mkdtemp(prefix="collector-", dir=state))
     try:
+        with (state / "collector.log").open("w") as collector_log:
+            collector_proc, collector_port, admin_token = start_collector(env, collector_root, collector_log)
         run([adb, "start-server"], env)
         with log_path.open("w") as log:
             emulator = subprocess.Popen(
@@ -276,7 +382,7 @@ def execute(args, state, avd_home):
             failures = []
             # Separate invocations are deliberate: pm clear also resets process-wide
             # SessionHolder/Upload/DataStore singletons, unlike deleting test files.
-            groups = [REQUIRED_CLASSES[:2], *[(name,) for name in REQUIRED_CLASSES[2:]]]
+            groups = [GROUPED[:2], *[(name,) for name in GROUPED[2:]]]
             for number, classes in enumerate(groups):
                 group = evidence / str(number)
                 group.mkdir()
@@ -297,17 +403,17 @@ def execute(args, state, avd_home):
                                           capture_output=True, text=True)
                             if cleared.stdout.strip() != "Success":
                                 raise RuntimeError(f"Could not clear app data: {cleared.stdout}")
-                        with collector(env, group) as (collector_port, token):
-                            run([adb, "reverse", f"tcp:{collector_port}", f"tcp:{collector_port}"], env)
+                        with collector(env, group) as (group_port, token):
+                            run([adb, "reverse", f"tcp:{group_port}", f"tcp:{group_port}"], env)
                             try:
-                                extra += [f"-Pandroid.testInstrumentationRunnerArguments.collectorUrl=http://127.0.0.1:{collector_port}",
+                                extra += [f"-Pandroid.testInstrumentationRunnerArguments.collectorUrl=http://127.0.0.1:{group_port}",
                                           f"-Pandroid.testInstrumentationRunnerArguments.collectorToken={token}"]
                                 run([ANDROID / "gradlew", *args, *extra, "--no-daemon"], env)
                                 run([adb, "pull", f"/data/local/tmp/{classes[0].rsplit('.', 1)[-1]}",
                                      group / "device"], env)
                                 verify_collector(group / "data", group / "device")
                             finally:
-                                run([adb, "reverse", "--remove", f"tcp:{collector_port}"], env)
+                                run([adb, "reverse", "--remove", f"tcp:{group_port}"], env)
                 except (RuntimeError, OSError, ValueError, subprocess.SubprocessError) as error:
                     # CalledProcessError includes argv, which contains the ephemeral token.
                     detail = (f"command exited {error.returncode}" if isinstance(error, subprocess.CalledProcessError)
@@ -318,10 +424,37 @@ def execute(args, state, avd_home):
                         shutil.copytree(reports, group / "reports")
                     with (group / "logcat.txt").open("w") as logcat:
                         run([adb, "logcat", "-d"], env, stdout=logcat)
+            auto = evidence / "auto"
+            auto.mkdir()
+            try:
+                if reports.exists():
+                    shutil.rmtree(reports)
+                run([ANDROID / "gradlew", *args, "--no-daemon",
+                     "-Pandroid.testInstrumentationRunnerArguments.class="
+                     + AUTO_CLASS + "#automaticUploadIsSilentDurableVisibleAndRevocable",
+                     f"-Pandroid.testInstrumentationRunnerArguments.brisCollectorUrl=http://10.0.2.2:{collector_port}",
+                     f"-Pandroid.testInstrumentationRunnerArguments.brisCollectorAdminToken={admin_token}"], env)
+                restart_acceptance(adb, env, collector_port, admin_token, auto)
+                replay_stored_submissions(env, collector_root)
+            except (RuntimeError, OSError, ValueError, subprocess.SubprocessError) as error:
+                detail = (f"command exited {error.returncode}" if isinstance(error, subprocess.CalledProcessError)
+                          else str(error))
+                failures.append(f"{AUTO_CLASS}: {detail}")
+            finally:
+                if reports.exists():
+                    shutil.copytree(reports, auto / "reports")
             if failures:
                 raise RuntimeError(f"Connected checks failed; evidence {evidence}:\n" + "\n".join(failures))
             verify_results(evidence)
     finally:
+        if collector_proc is not None and collector_proc.poll() is None:
+            collector_proc.terminate()
+            try:
+                collector_proc.wait(timeout=20)
+            except subprocess.TimeoutExpired:
+                collector_proc.kill()
+                collector_proc.wait()
+        shutil.rmtree(collector_root, ignore_errors=True)
         # Only terminate processes owned by this invocation, never a user's device/server.
         if emulator is not None and emulator.poll() is None:
             emulator.terminate()

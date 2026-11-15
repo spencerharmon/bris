@@ -177,6 +177,7 @@ fun SettingsScreen(prefs: Prefs, onBack: () -> Unit) {
         ) {
             Text("Debug mode")
             Switch(
+                modifier = Modifier.testTag("debug-mode-switch"),
                 checked = debugMode,
                 onCheckedChange = { v -> scope.launch { prefs.setDebugMode(v) } },
                 modifier = Modifier.testTag("debug-mode-switch"),
@@ -227,6 +228,9 @@ fun SettingsScreen(prefs: Prefs, onBack: () -> Unit) {
     }
 }
 
+/** Semantics tag of the "Automatic upload" switch (acceptance tests drive it). */
+const val AUTOMATIC_UPLOAD_SWITCH_TAG = "automatic-upload-switch"
+
 /**
  * Collector settings: runtime base URL + token
  * (never compiled in), per-device registration, queue status.
@@ -259,8 +263,8 @@ private fun CollectorSection() {
     Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween,
         verticalAlignment = Alignment.CenterVertically) {
         Text("Automatic upload")
-        Switch(modifier = Modifier.testTag("automatic-upload-switch"),
-            checked = settings.automaticUpload, onCheckedChange = { enabled ->
+        Switch(checked = settings.automaticUpload, modifier = Modifier.testTag(AUTOMATIC_UPLOAD_SWITCH_TAG),
+            onCheckedChange = { enabled ->
             scope.launch {
                 try { Upload.setAutomaticUpload(context, enabled) }
                 catch (e: Exception) {
