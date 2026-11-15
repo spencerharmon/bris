@@ -180,7 +180,6 @@ fun SettingsScreen(prefs: Prefs, onBack: () -> Unit) {
                 modifier = Modifier.testTag("debug-mode-switch"),
                 checked = debugMode,
                 onCheckedChange = { v -> scope.launch { prefs.setDebugMode(v) } },
-                modifier = Modifier.testTag("debug-mode-switch"),
             )
         }
         Text(
